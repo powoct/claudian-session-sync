@@ -1,0 +1,77 @@
+# testing.md §13. Every step here is also an npm script, so the same command runs
+# locally (`npm run verify` chains them in this order). Nothing is inlined with
+# npx: a gate that only exists in the workflow file cannot be run before pushing.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 18 * * *"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # windows-latest is not optional: rename semantics, reserved names, trailing
+    # dots/spaces, path length and junctions only misbehave there. macOS is not
+    # optional either: APFS is case-insensitive and normalises to NFD.
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check:pinned-deps # G-02
+      - run: npm run typecheck # tsc --noEmit is part of the security gate (testing.md §3 req 5)
+      - run: npm run lint # eslint . --max-warnings=0 (G-10)
+      - run: npm run check:secrets # G-11
+      - run: npm run check:docs # Q-01
+      - run: npm test # vitest run --coverage; thresholds are built in (G-09)
+      - run: npm run build # esbuild -> main.js + dist/meta.json
+      - run: npm run check:bundle # G-05
+      - run: npm run check:manifest # G-06
+      - run: npm run check:no-skip # G-07, reads reports/vitest.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-${{ matrix.os }}
+          path: |
+            reports/
+            coverage/
+            artifacts/
+          if-no-files-found: ignore
+
+  nightly-property:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      FC_NUM_RUNS: "5000"
+      FC_SEED: "" # empty = a fresh random seed each night
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:nightly # tests/**/property/** only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fast-check-counterexamples
+          path: artifacts/
+          if-no-files-found: ignore

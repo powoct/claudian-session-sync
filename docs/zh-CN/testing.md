@@ -986,7 +986,7 @@ console.log(JSON.stringify(rows, null, 2));
 |---|---|---|
 | G-01 | `package.json` + `package-lock.json`（lockfileVersion 3） | `npm ci` 在三平台可复现安装 |
 | G-02 | 版本固定：`.nvmrc`（Node 20.x）+ `engines.node`；`typescript` / `vitest` / `@vitest/coverage-v8` / `esbuild` / `eslint` / `fast-check` 全部 **exact pin**（无 `^` `~`） | CI 检查所有 devDependencies 版本串匹配 `/^\d+\.\d+\.\d+$/` |
-| G-03 | scripts：`typecheck` / `lint` / `test` / `build` + `test:nightly` / `check:no-skip` / `check:manifest` / `check:bundle` / `check:secrets` / `check:pinned-deps` | 本地与 CI 跑同一组命令，CI 里不写内联 npx |
+| G-03 | scripts：`typecheck` / `lint` / `test` / `build` + `test:nightly` / `check:no-skip` / `check:manifest` / `check:bundle` / `check:secrets` / `check:pinned-deps` / `check:docs`（Q-01） | 本地与 CI 跑同一组命令，CI 里不写内联 npx。另有 `verify` 按 CI 顺序把它们串起来，便于推送前本地跑一遍 |
 | G-04 | 三平台 workflow | §13 |
 | G-05 | bundle 合同测试（**替代 `node -e "require('./main.js')"`**） | §12.2 |
 | G-06 | `manifest.json` 合同测试 | §12.3 |
@@ -1018,18 +1018,19 @@ console.log(JSON.stringify(rows, null, 2));
 
 ### 12.5 nightly 反例 artifact
 
-fast-check 的 `reporter` 在失败时把 `{property, seed, counterexamplePath, numRuns, counterexample, error, regressionSnippet}` 写进 `artifacts/fc-<name>-<seed>.json`，CI 用 `actions/upload-artifact@v4`（`if: always()`）上传。`regressionSnippet` 是一段可直接粘进 `tests/m1/regression/` 的固定用例骨架。
+失败时把 `{property, seed, counterexamplePath, numRuns, counterexample, error, regressionSnippet}` 写进 `artifacts/fc-<name>-<seed>.json`，CI 用 `actions/upload-artifact@v4`（`if: always()`）上传。`regressionSnippet` 是一段可直接粘进 `tests/m1/regression/` 的固定用例骨架。
+
+落地方式是 `tests/helpers/fast-check.ts` 的 **`fcAssert(name, property, opts)` 包装**（`fc.check` → 失败则写产物 → 用 `fc.defaultReportMessage` 抛原样错误），不是 fast-check 的 `reporter` 参数：传 `reporter` 会整个接管错误格式化，得自己重新拼那段标准报错。属性测试一律走 `fcAssert` 而不是 `fc.assert`，否则失败不留产物。`FC_NUM_RUNS` / `FC_SEED` 由它读取（§13），G-08 自身由 `tests/build/fc-reporter.test.ts` 验证。
 
 ### 12.6 coverage 真正强制
 
 ```ts
-// vitest.config.ts（片段）
+// vitest.config.mts（片段）
 coverage: {
   provider: "v8",
   reporter: ["text", "json-summary", "lcov"],
   reportOnFailure: true,
-  all: true,                     // 关键 ①
-  include: ["src/**/*.ts"],
+  include: ["src/**/*.ts"],      // 关键 ①
   exclude: ["src/**/*.d.ts", "src/main.ts"],       // main.ts 是纯装配，由 bundle smoke 覆盖
   thresholds: {
     autoUpdate: false,           // 关键 ②
@@ -1041,9 +1042,42 @@ coverage: {
 }
 ```
 
-① 没有 `all: true`，删掉一个测试文件会让覆盖率**上升**（对应源文件不再计入），门槛形同虚设。② `autoUpdate: false` 否则 vitest 会把实际值写回配置，门槛一路下滑。门槛不达标时 `vitest run --coverage` 退出码非 0，CI 直接红——**不要**用 `|| true` 或单独的"报告 job"。
+① **未被任何测试触及的源文件也必须计入**，否则删掉一个测试文件会让覆盖率**上升**（对应源文件不再计入），门槛形同虚设。vitest 3 用 `all: true` 表达这件事；**vitest 4 删掉了该字段**，把语义并进 `include`——显式列出 glob 即"匹配到的文件无论有没有被测都计入"。语义等价，但它现在挂在一个名字不再自我说明的选项上，因此 M0 用 `tests/build/coverage-gate.test.ts` 把这条行为钉死：一个临时工程里放一个没测试的源文件必须让门槛不达标、给它补上测试后必须通过。**升级 vitest 时这条测试变红就说明门槛失效了**，不要绕过它。② `autoUpdate: false` 否则 vitest 会把实际值写回配置，门槛一路下滑。门槛不达标时 `vitest run --coverage` 退出码非 0，CI 直接红——**不要**用 `|| true` 或单独的"报告 job"。
+
+> M0 期间 `src/` 只有 `main.ts`（已被 exclude），覆盖率集合为空、门槛平凡通过。这不是问题，但也意味着**门槛本身在 M0 无信号**——`coverage-gate` 那条测试是这一阶段唯一的证据来源。
 
 门槛用于挡回归，不作为质量目标——U-07 与 U-18 那两条测试比 10% 覆盖率值钱。
+
+### 12.7 M0 实际落地（2026-08-06 完成）
+
+工具链（全部 exact pin，见 `package.json`）：Node **20.20.2**（`.nvmrc`）、TypeScript 5.9.3、vitest 4.1.10、esbuild 0.28.1、ESLint 10.8.0 + typescript-eslint 8.66.0、fast-check 4.9.0、obsidian 1.13.1。
+
+> TypeScript 停在 5.9.3 而不是 7.x：typescript-eslint 8.66 的 peer 范围是 `>=4.8.4 <6.1.0`，装 TS 7 会让 G-10 的 lint 门禁直接失效。**升 TS 前先确认 typescript-eslint 支持。**
+
+门禁与其自检的对应关系——**每条门禁都有一条"喂它应当被拦下的输入"的测试**，理由见 `tests/README.md`：
+
+| 门禁 | 实现 | 自检 |
+|---|---|---|
+| G-02 `check:pinned-deps` | `scripts/check-pinned-deps.mjs` | `tests/build/gate-scripts.test.ts`（caret 范围 / 错误 Node 大版本 / lockfile v2 / 缺必需 devDep） |
+| G-05 bundle 三层 | `tests/build/artifact-metafile.test.ts`、`artifact-smoke.test.ts` | 自身即断言；`Module._load` 钩子换入 `tests/helpers/obsidian-stub.ts` 与**记录型 `fs`**，后者是 §12.2c "onload 期间零 fs 读"的实现手段 |
+| G-06 `check:manifest` | `scripts/check-manifest.mjs` | 同上（isDesktopOnly / 版本漂移 / versions.json 不含该版本） |
+| G-07 `check:no-skip` | `scripts/check-no-skip.mjs` | 同上（含 Windows 反斜杠路径与"m2/pending 不受管"两条） |
+| G-08 反例产物 | `tests/helpers/fast-check.ts` | `tests/build/fc-reporter.test.ts` |
+| G-09 覆盖率强制 | `vitest.config.mts` | `tests/build/coverage-gate.test.ts`（§12.6 ①） |
+| G-10 lint 规则 | `eslint.config.mjs` | `tests/build/eslint-rules.test.ts`（20 条：domain 禁 import / 禁 `RuntimeEnv` / 全仓禁 `require("fs")`，四条**逃逸路径**见下，以及四条**应当放行**的反向用例） |
+| G-11 `check:secrets` | `scripts/check-secrets.mjs` | 同 gate-scripts（token / 真实 home 路径 / 不误伤 `task-`、`risk-` 这类词） |
+| Q-01 `check:docs` | `scripts/check-docs.mjs` | 同 gate-scripts |
+
+**G-10 的四条逃逸路径**（`no-restricted-imports` 一条都看不见，全部另配 `no-restricted-syntax` / `no-restricted-globals` 堵上，各有用例）：`await import("node:fs")`、`createRequire(...)("fs")`（故此 `node:module` 也进 domain 禁用名单）、`export * from "node:fs"`、直接读 `process`。
+
+> 写这组自检的直接收益：初版的 esquery 选择器把 `fs/promises` 里的 `/` 直接写进正则，**选择器本身解析失败**——而 `npm run lint` 全绿，因为仓库里还没有 `src/domain/` 文件可供它作用。没有这组测试，G-10 会一直"绿着"直到 M1 有人往领域层 import 了 `fs` 也没人拦。选择器里的斜杠必须写成 unicode 转义（反斜杠 + `u002F`），因为 esquery 用斜杠作正则定界符。
+
+两处与原文不同的实现选择，均已在上文就地说明：`coverage.all` → `coverage.include`（§12.6 ①）、fast-check `reporter` → `fcAssert` 包装（§12.5）。
+
+另外两条 M0 期间定下、后续容易踩的约定：
+
+- **`package.json` 不能写 `"type": "module"`**。Obsidian 按 CommonJS 加载 `main.js`；带上该字段后 Node 把 `.js` 当 ESM，bundle smoke 直接 `module is not defined`。仓库工具链靠显式 `.mjs` / `.mts` 扩展名走 ESM。
+- **`.gitattributes` 强制 `eol=lf`**，`tests/fixtures/**` 与 `*.jsonl` 标 `-text` 完全不转换。Windows 检出时被改写行尾会让每个字节级断言变成假冲突。
 
 ---
 
@@ -1073,6 +1107,7 @@ jobs:
       - run: npm run typecheck              # tsc --noEmit（安全门禁的一部分）
       - run: npm run lint                   # eslint . --max-warnings=0
       - run: npm run check:secrets          # G-11
+      - run: npm run check:docs             # Q-01
       - run: npm test                       # vitest run --coverage（L0/L1/L2/安全组，门槛内建）
       - run: npm run build                  # esbuild → main.js + dist/meta.json
       - run: npm run check:bundle           # G-05

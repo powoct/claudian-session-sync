@@ -1,0 +1,44 @@
+{
+  "name": "ai-session-sync",
+  "version": "0.0.1",
+  "description": "Sync AI agent CLI session files across machines so a conversation can be resumed elsewhere.",
+  "author": "powoct",
+  "license": "MIT",
+  "private": true,
+  "//type": "Intentionally NOT \"module\": Obsidian loads main.js as CommonJS. Repo tooling is ESM by explicit .mjs extension instead.",
+  "main": "main.js",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "test:nightly": "vitest run --config vitest.nightly.config.mts --passWithNoTests",
+    "build": "node scripts/build.mjs",
+    "build:dev": "node scripts/build.mjs --dev",
+    "check:pinned-deps": "node scripts/check-pinned-deps.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:manifest": "node scripts/check-manifest.mjs",
+    "check:no-skip": "node scripts/check-no-skip.mjs",
+    "check:bundle": "vitest run --config vitest.build.config.mts",
+    "verify": "npm run check:pinned-deps && npm run typecheck && npm run lint && npm run check:secrets && npm run check:docs && npm test && npm run build && npm run check:bundle && npm run check:manifest && npm run check:no-skip"
+  },
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@eslint/js": "10.0.1",
+    "@types/node": "20.19.43",
+    "@vitest/coverage-v8": "4.1.10",
+    "esbuild": "0.28.1",
+    "eslint": "10.8.0",
+    "fast-check": "4.9.0",
+    "globals": "17.9.0",
+    "obsidian": "1.13.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.66.0",
+    "vitest": "4.1.10"
+  }
+}

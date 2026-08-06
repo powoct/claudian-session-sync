@@ -1,2 +1,19 @@
 venv/
 tmp/
+
+# dependencies
+node_modules/
+
+# build output (main.js ships as a GitHub release asset, not in git)
+main.js
+main.js.map
+dist/
+
+# test / gate output
+coverage/
+reports/
+artifacts/
+*.tsbuildinfo
+
+# throwaway project built by tests/build/coverage-gate.test.ts
+coverage-gate-fixture/

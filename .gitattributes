@@ -1,0 +1,13 @@
+# Byte-exactness is the whole premise of this repo: prefix-safe merge compares
+# session files byte for byte, and the CLIs always terminate lines with LF
+# (findings/2026-08-06-spike-conclusions.md, OQ-8). A Windows checkout that
+# silently rewrote line endings would turn every fixture into a false conflict.
+* text=auto eol=lf
+
+# Fixtures and sample session data are opaque bytes — never transform them.
+tests/fixtures/** -text
+*.jsonl -text
+
+# Shell scripts must keep LF or they fail with `bad interpreter: ...^M`.
+*.sh text eol=lf
+*.ps1 text eol=crlf

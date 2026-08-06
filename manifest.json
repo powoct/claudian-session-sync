@@ -1,0 +1,10 @@
+{
+  "id": "ai-session-sync",
+  "name": "AI Session Sync",
+  "version": "0.0.1",
+  "minAppVersion": "1.5.0",
+  "description": "Sync AI agent CLI session files (Claude Code and friends) between machines so a conversation can be resumed elsewhere.",
+  "author": "powoct",
+  "authorUrl": "https://github.com/powoct/claudian-session-sync",
+  "isDesktopOnly": true
+}
