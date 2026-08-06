@@ -1064,20 +1064,50 @@ coverage: {
 | G-07 `check:no-skip` | `scripts/check-no-skip.mjs` | 同上（含 Windows 反斜杠路径与"m2/pending 不受管"两条） |
 | G-08 反例产物 | `tests/helpers/fast-check.ts` | `tests/build/fc-reporter.test.ts` |
 | G-09 覆盖率强制 | `vitest.config.mts` | `tests/build/coverage-gate.test.ts`（§12.6 ①） |
-| G-10 lint 规则 | `eslint.config.mjs` | `tests/build/eslint-rules.test.ts`（20 条：domain 禁 import / 禁 `RuntimeEnv` / 全仓禁 `require("fs")`，四条**逃逸路径**见下，以及四条**应当放行**的反向用例） |
-| G-11 `check:secrets` | `scripts/check-secrets.mjs` | 同 gate-scripts（token / 真实 home 路径 / 不误伤 `task-`、`risk-` 这类词） |
-| Q-01 `check:docs` | `scripts/check-docs.mjs` | 同 gate-scripts |
+| G-10 lint 规则 | `eslint.config.mjs` | `tests/build/eslint-rules.test.ts`（43 条，见下"分层规则"） |
+| G-11 `check:secrets` | `scripts/check-secrets.mjs` | 同 gate-scripts（token / 真实 home 路径 / UTF-16 / 超大文件 / 不误伤 `task-`、`Bearer of bad news` 这类词） |
+| Q-01 `check:docs` | `scripts/check-docs.mjs` | 同 gate-scripts（含指针悬空） |
+| 工具链指向 | `tsconfig.json` / `eslint.config.mjs` | `tests/build/toolchain.test.ts`（见下） |
+| vitest 报告契约 | — | `tests/build/reporter-contract.test.ts`（见下） |
 
-**G-10 的四条逃逸路径**（`no-restricted-imports` 一条都看不见，全部另配 `no-restricted-syntax` / `no-restricted-globals` 堵上，各有用例）：`await import("node:fs")`、`createRequire(...)("fs")`（故此 `node:module` 也进 domain 禁用名单）、`export * from "node:fs"`、直接读 `process`。
+#### 分层规则（G-10 的实际形状）
+
+按目录分档，从外到内逐层收紧。**allow-list 优于 blocklist**：domain 的层级规则不是"禁止 import infra/ui/providers"（那只挡住今天存在的目录，M1 新建一个 `src/util/` 就是一条无人看守的通道），而是**禁止任何爬出 `src/domain/` 的相对路径**。
+
+| 范围 | 禁止 |
+|---|---|
+| 全仓 | 裸 `require("fs"/"os"/"child_process")` |
+| `src/**` | 网络（`http`/`https`/`net`/`tls`/`dgram`、`fetch`/`XMLHttpRequest`/`WebSocket`）；`as SafeAbsolutePath` 之类的强转 |
+| `src/{infra,providers,orchestration}/**` | 以上 + `obsidian`（只有 `src/ui/` 与 `src/main.ts` 可以） |
+| `src/domain/**` | 以上 + 全部 Node 内置（含 `node:module`、`node:process`）+ 任何 `../` + `RuntimeEnv` 标识符 + `Date.now` / `new Date()` / `Math.random` + 内联 `eslint-disable`（`noInlineConfig`） |
+| `tests/**` | `fc.assert`（必须走 `fcAssert`，否则失败不留反例产物） |
+
+例外只有两个，且是**精确减一条**而不是整组关掉：`src/infra/path-guard.*` 与 `src/domain/path-safety.*` 可以做那一次 branded 强转——正是这一次强转让其他所有文件的禁令有意义。
+
+> ⚠️ **flat config 的规则选项是"替换"不是"合并"**：同一个 rule id 被后面的 config 对象再次声明时，前面的选项**整个失效**。所以每一档都得把上一档的内容重新列一遍（代码里用 `NETWORK_MODULES` / `REQUIRE_NODE_FS_BAN` 这类常量组合）。M0 期间踩过两次：加 `src/**` 网络规则时静默弄丢了全仓的 `require("fs")` 禁令，两次都是被 `eslint-rules.test.ts` 当场抓到。
+
+**四条 `no-restricted-imports` 完全看不见的逃逸路径**（另配 `no-restricted-syntax` / `no-restricted-globals`，各有用例）：`await import("node:fs")`、`createRequire(...)("fs")`、`export * from "node:fs"`、直接读 `process` 全局。
 
 > 写这组自检的直接收益：初版的 esquery 选择器把 `fs/promises` 里的 `/` 直接写进正则，**选择器本身解析失败**——而 `npm run lint` 全绿，因为仓库里还没有 `src/domain/` 文件可供它作用。没有这组测试，G-10 会一直"绿着"直到 M1 有人往领域层 import 了 `fs` 也没人拦。选择器里的斜杠必须写成 unicode 转义（反斜杠 + `u002F`），因为 esquery 用斜杠作正则定界符。
 
-两处与原文不同的实现选择，均已在上文就地说明：`coverage.all` → `coverage.include`（§12.6 ①）、fast-check `reporter` → `fcAssert` 包装（§12.5）。
+#### 两条"门禁的门禁"
 
-另外两条 M0 期间定下、后续容易踩的约定：
+- **`toolchain.test.ts`**：断言 `tsc` 与 `eslint` 的**程序非空**且包含 `src/` 与 `tests/`。理由：两者对着空集都会打印成功。M0 期间把 tsconfig 的 include 写成 `src/**/*.{ts,mts}` 后，typecheck 只检查了 3 个配置文件、0.4 秒通过——**tsconfig 的 glob 不支持花括号展开**（ESLint 的支持），扩展名必须逐条列。修好当天就查出一个被掩盖的缺失 import。
+- **`reporter-contract.test.ts`**：真跑一次含 `it.skip` / `it.todo` 的 vitest，断言落盘 JSON 里确实是 `testResults[].name`（绝对路径）与 `assertionResults[].status` 的 `"skipped"` / `"todo"`。G-07 的其余用例喂的都是本仓库自己拼的 JSON，只证明脚本逻辑对，不证明 vitest 还这么输出；升级后字段一改，门禁会永久变绿而所有旧用例照样通过。
+
+#### `.only` 的实际覆盖范围
+
+`check:no-skip` 只在 `.only` **留下了被跳过的兄弟用例**时才抓得到；`describe.only` 包住整个文件时不留痕迹。真正挡住 `.only` 的是 `vitest.config.mts` 里的 `allowOnly: false`（本地与 CI 行为一致），本门禁是第二道。此外 `--min <n>` 给 M1 用：没有下限时，"没有用例被跳过"和"整个 M1 套件不再被收集"是同一行绿字。
+
+三处与原文不同的实现选择：`coverage.all` → `coverage.include`（§12.6 ①）、fast-check `reporter` → `fcAssert` 包装（§12.5）、§12.3 的 `main === "main.js"` 断在 `package.json` 上（Obsidian 的 manifest 没有 `main` 字段，入口恒为 main.js；manifest 里若出现该字段也一并校验）。
+
+另外几条 M0 期间定下、后续容易踩的约定：
 
 - **`package.json` 不能写 `"type": "module"`**。Obsidian 按 CommonJS 加载 `main.js`；带上该字段后 Node 把 `.js` 当 ESM，bundle smoke 直接 `module is not defined`。仓库工具链靠显式 `.mjs` / `.mts` 扩展名走 ESM。
 - **`.gitattributes` 强制 `eol=lf`**，`tests/fixtures/**` 与 `*.jsonl` 标 `-text` 完全不转换。Windows 检出时被改写行尾会让每个字节级断言变成假冲突。
+- **`useDefineForClassFields: false`**（tsconfig）。target 为 ES2022 时它默认为 true，此时 `Plugin` / `PluginSettingTab` 子类里"声明了但没初始化"的字段会编译成 `defineProperty(this, "x", undefined)`，把基类构造函数刚设好的值抹掉——Obsidian 插件的经典坑。
+- **`check:secrets` 扫全仓**（除依赖与构建产物），只对 `docs/` 放行 home-path 类规则：§5.1 的转义样本与 findings **必须**逐字引用真实路径，那是证据本身；凭证类规则在 `docs/` 照常生效。安全测试要用的诱饵串（`sk-TESTSENTINEL-0000` 之类，§8.4 SEC-10/11）靠大写标记 `SENTINEL` / `EXAMPLE` / `FAKE` / `DUMMY` 识别放行——**真实密钥不会自报家门**。
+- **M1 把 §5.1 样本表搬进 `tests/fixtures/` 时，用户名要换成 `testuser` 或 `<u>` 占位**（转义规则是逐字符映射，替换用户名不影响任何断言），否则 `check:secrets` 会拦。
 
 ---
 

@@ -43,16 +43,33 @@ if (pkg) {
     }
   }
 
+  // `overrides` and `resolutions` change what npm ci actually installs, and
+  // `npm audit fix` writes floating ranges straight into `overrides` — the one
+  // place a caret is most likely to appear without anyone typing it.
+  for (const field of ["overrides", "resolutions"]) {
+    if (pkg[field]) checkNestedRanges(pkg[field], field);
+  }
+
   const devDeps = pkg.devDependencies ?? {};
   for (const name of REQUIRED_DEV_DEPS) {
     if (!(name in devDeps)) v.add(`devDependencies.${name} is missing (required by G-02)`);
   }
 
-  const enginesNode = pkg.engines?.node;
-  if (!enginesNode) {
-    v.add("engines.node is missing");
-  } else if (!/\b20\b/.test(enginesNode) && !/>=\s*\d+/.test(enginesNode)) {
-    v.add(`engines.node = "${enginesNode}" does not admit Node ${REQUIRED_NODE_MAJOR}.x`);
+  if (!pkg.engines?.node) v.add("engines.node is missing");
+}
+
+/** Ranges nest: `overrides: { pkg: { dep: "^1" } }` and the `"."` self key. */
+function checkNestedRanges(node, trail) {
+  for (const [key, value] of Object.entries(node)) {
+    const where = `${trail}.${key}`;
+    if (value && typeof value === "object") {
+      checkNestedRanges(value, where);
+    } else if (typeof value === "string") {
+      checked++;
+      if (!EXACT_VERSION.test(value) && !value.startsWith("$")) {
+        v.add(`${where} = "${value}" is not an exact version (overrides decide what npm ci installs)`);
+      }
+    }
   }
 }
 
@@ -65,7 +82,50 @@ if (!existsSync(nvmrcPath)) {
     v.add(`.nvmrc = "${nvmrc}" is not a fully qualified version (want e.g. 20.20.2)`);
   } else if (Number(nvmrc.split(".")[0]) !== REQUIRED_NODE_MAJOR) {
     v.add(`.nvmrc = "${nvmrc}" is not Node ${REQUIRED_NODE_MAJOR}.x`);
+  } else if (pkg?.engines?.node) {
+    // The two must actually agree. Bumping engines to >=22 while .nvmrc still
+    // says 20.x leaves CI installing a Node the package claims not to support,
+    // and npm only warns.
+    checkNvmrcSatisfiesEngines(nvmrc, pkg.engines.node);
   }
+}
+
+/**
+ * Deliberately narrow: it understands `>=x.y.z` (optionally OR-ed) and an exact
+ * version, and refuses anything else rather than guessing. A gate that silently
+ * passes on a spelling it cannot parse is the failure mode being fixed here.
+ */
+function checkNvmrcSatisfiesEngines(nvmrc, range) {
+  const clauses = range.split("||").map((clause) => clause.trim());
+  const parsed = clauses.map((clause) => {
+    const gte = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(clause);
+    if (gte) return { kind: "gte", version: [Number(gte[1]), Number(gte[2] ?? 0), Number(gte[3] ?? 0)] };
+    if (EXACT_VERSION.test(clause)) return { kind: "eq", version: clause.split(".").map(Number) };
+    return null;
+  });
+
+  if (parsed.some((clause) => clause === null)) {
+    v.add(
+      `engines.node = "${range}" uses a range spelling this gate cannot evaluate ` +
+        `(it understands ">=x.y.z" and exact versions). Simplify it, or teach check-pinned-deps the spelling.`,
+    );
+    return;
+  }
+
+  const actual = nvmrc.split(".").map(Number);
+  const satisfied = parsed.some((clause) =>
+    clause.kind === "eq" ? compare(actual, clause.version) === 0 : compare(actual, clause.version) >= 0,
+  );
+  if (!satisfied) {
+    v.add(`.nvmrc = "${nvmrc}" does not satisfy engines.node = "${range}" — CI would install a Node this package rejects`);
+  }
+}
+
+function compare(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
+  }
+  return 0;
 }
 
 const lockPath = path.join(root, "package-lock.json");

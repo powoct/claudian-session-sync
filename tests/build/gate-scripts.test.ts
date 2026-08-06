@@ -12,11 +12,12 @@
  * itself trip check:secrets.
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+import { removeTree } from "../helpers/fs-cleanup";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const SCRIPTS = path.join(REPO_ROOT, "scripts");
@@ -24,7 +25,7 @@ const SCRIPTS = path.join(REPO_ROOT, "scripts");
 const tempRoots: string[] = [];
 
 afterAll(() => {
-  for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempRoots) removeTree(dir);
 });
 
 function makeRoot(): string {
@@ -131,11 +132,53 @@ describe("check-pinned-deps (G-02)", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("fast-check");
   });
+
+  // `npm audit fix` writes floating ranges into overrides — the one place a
+  // caret appears without anyone typing it.
+  it("catches a floating range hidden in overrides", () => {
+    const root = makeRoot();
+    writeGoodPinnedFixture(root);
+    const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    write(root, "package.json", { ...pkg, overrides: { esbuild: "^0.28.0" } });
+    const result = runGate("check-pinned-deps.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("overrides.esbuild");
+  });
+
+  it("catches a floating range nested inside an override", () => {
+    const root = makeRoot();
+    writeGoodPinnedFixture(root);
+    const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    write(root, "package.json", { ...pkg, resolutions: { vite: { "brace-expansion": ">=2.0.2" } } });
+    expect(runGate("check-pinned-deps.mjs", ["--root", root]).status).toBe(1);
+  });
+
+  it("catches .nvmrc and engines.node contradicting each other", () => {
+    const root = makeRoot();
+    writeGoodPinnedFixture(root);
+    const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    write(root, "package.json", { ...pkg, engines: { node: ">=22.0.0" } });
+    const result = runGate("check-pinned-deps.mjs", ["--root", root]);
+    expect(result.status, "20.20.2 does not satisfy >=22").toBe(1);
+    expect(result.stderr).toContain("engines.node");
+  });
+
+  it("refuses an engines.node range it cannot evaluate rather than passing it", () => {
+    const root = makeRoot();
+    writeGoodPinnedFixture(root);
+    const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    write(root, "package.json", { ...pkg, engines: { node: "^20.19.0" } });
+    const result = runGate("check-pinned-deps.mjs", ["--root", root]);
+    expect(result.status, "an unparsed range must fail closed, not silently pass").toBe(1);
+    expect(result.stderr).toContain("cannot evaluate");
+  });
 });
 
 describe("check-secrets (G-11)", () => {
   const githubToken = `gh${"p"}_${"A1b2C3d4E5f6G7h8I9j0"}`;
-  const bearer = `Bear${"er"} ${"aaaaaaaaaaaaaaaaaaaa"}`;
+  // Shaped like a real credential: long, mixed, with a digit and separators.
+  // A run of letters is what ordinary prose after "Bearer" looks like.
+  const bearer = `Bear${"er"} ${"eyJhbGciOi.J9x-abc_1234567890"}`;
   const realHomePosix = `/Us${"ers"}/somedev/notes`;
   const realHomeWindows = `C:\\Us${"ers"}\\somedev\\notes`;
 
@@ -189,11 +232,87 @@ describe("check-secrets (G-11)", () => {
     expect(result.stderr).toContain("github-token");
   });
 
-  it("skips binary files instead of choking on them", () => {
+  it("skips binary files instead of choking on them, and says so", () => {
     const root = makeRoot();
     write(root, "tests/fixtures/clean.ts", "export const ok = 1;\n");
     writeFileSync(path.join(root, "tests", "fixtures", "blob.bin"), Buffer.from([0, 1, 2, 0, 255]));
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status).toBe(0);
+    expect(result.stdout, "a silent skip reads as 'clean'").toContain("1 binary files skipped");
+  });
+
+  it("decodes UTF-16 instead of writing it off as binary", () => {
+    const root = makeRoot();
+    // A Windows-produced dump is full of NUL bytes but is perfectly readable text.
+    writeFileSync(
+      path.join(root, "leak.txt"),
+      Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`vault at ${realHomePosix}\n`, "utf16le")]),
+    );
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("real-home-path-posix");
+  });
+
+  it("fails closed on a file too large to scan", () => {
+    const root = makeRoot();
+    writeFileSync(path.join(root, "huge.jsonl"), Buffer.alloc(4 * 1024 * 1024 + 1, 0x61));
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status, "'too big to check' must never read as 'clean'").toBe(1);
+    expect(result.stderr).toContain("not scanned");
+  });
+
+  // An allow-list of directories is the blind spot; these are the places a key
+  // actually lands.
+  it("scans workflow files and the repository root, not just src/tests/scripts", () => {
+    const root = makeRoot();
+    write(root, ".github/workflows/ci.yml", `      - run: curl -H "${bearer}" https://example.invalid\n`);
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(".github/workflows/ci.yml");
+  });
+
+  it("still catches a credential inside docs/, where only home paths are exempt", () => {
+    const root = makeRoot();
+    write(root, "docs/zh-CN/findings/probe.md", `token: ${githubToken}\n`);
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("github-token");
+  });
+
+  it("allows the measured home paths that docs/ must quote verbatim", () => {
+    const root = makeRoot();
+    // The escape rule *is* the evidence: findings quote a real path on purpose.
+    write(root, "docs/zh-CN/findings/probe.md", `| \`${realHomePosix}\` | \`-Users-somedev-notes\` |\n`);
+    write(root, "src/main.ts", "export const ok = 1;\n");
     expect(runGate("check-secrets.mjs", ["--root", root]).status).toBe(0);
+  });
+
+  it("treats the security tests' own decoys as decoys", () => {
+    const root = makeRoot();
+    // SEC-10/11 plant these on purpose and assert they never escape; the gate
+    // must not make it impossible to write those tests (testing.md §8.4).
+    write(root, "tests/fixtures/sentinels.ts", `export const decoy = "sk-TESTSENTINEL-0000";\n`);
+    expect(runGate("check-secrets.mjs", ["--root", root]).status).toBe(0);
+  });
+
+  it("does not fire on prose that merely says Bearer", () => {
+    const root = makeRoot();
+    write(
+      root,
+      "src/notes.ts",
+      "// Bearer authentication is not used by this plugin.\n" +
+        "// The remote uses Bearer credentials-from-keychain instead.\n",
+    );
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.status, "a gate that cries wolf is a gate someone switches off").toBe(0);
+  });
+
+  it("reports enough to triage without copying the secret into CI logs", () => {
+    const root = makeRoot();
+    write(root, "src/leak.ts", `export const t = "${githubToken}";\n`);
+    const result = runGate("check-secrets.mjs", ["--root", root]);
+    expect(result.stderr).toContain(githubToken.slice(0, 4));
+    expect(result.stderr).not.toContain(githubToken);
   });
 
   it("does not flag ordinary words that merely contain the literal fragments", () => {
@@ -217,6 +336,7 @@ describe("check-docs (Q-01)", () => {
   it("passes a CLAUDE.md that points at the spec", () => {
     const root = makeRoot();
     write(root, "CLAUDE.md", "See docs/zh-CN/architecture.md for the normative spec.\n");
+    write(root, "docs/zh-CN/architecture.md", "# spec\n");
     expect(runGate("check-docs.mjs", ["--root", root]).status).toBe(0);
   });
 
@@ -226,9 +346,19 @@ describe("check-docs (Q-01)", () => {
     expect(runGate("check-docs.mjs", ["--root", root]).status).toBe(1);
   });
 
+  it("catches a pointer that no longer resolves", () => {
+    const root = makeRoot();
+    // A substring test alone survives the spec being moved.
+    write(root, "CLAUDE.md", "See docs/zh-CN/architecture.md for the normative spec.\n");
+    const result = runGate("check-docs.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("dangling");
+  });
+
   it("catches a retired rule creeping back in", () => {
     const root = makeRoot();
     write(root, "CLAUDE.md", `See docs/zh-CN/architecture.md.\n\n合并规则：${retiredRule}。\n`);
+    write(root, "docs/zh-CN/architecture.md", "# spec\n");
     const result = runGate("check-docs.mjs", ["--root", root]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(retiredRule);
@@ -346,6 +476,22 @@ describe("check-no-skip (G-07)", () => {
     const root = makeRoot();
     write(root, "r.json", report([{ file: "D:\\repo\\tests\\m1\\planner.test.ts", statuses: ["pending"] }]));
     expect(runGate("check-no-skip.mjs", ["--report", path.join(root, "r.json")]).status).toBe(1);
+  });
+
+  // "no M1 case was skipped" and "the M1 suite stopped being collected" are
+  // otherwise the same green line.
+  it("catches the M1 suite silently vanishing when --min is set", () => {
+    const root = makeRoot();
+    write(root, "r.json", report([{ file: "/repo/tests/m2/codex.test.ts", statuses: ["passed"] }]));
+    const result = runGate("check-no-skip.mjs", ["--report", path.join(root, "r.json"), "--min", "5"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("expected at least 5");
+  });
+
+  it("passes --min when the floor is met", () => {
+    const root = makeRoot();
+    write(root, "r.json", report([{ file: "/repo/tests/m1/planner.test.ts", statuses: ["passed", "passed"] }]));
+    expect(runGate("check-no-skip.mjs", ["--report", path.join(root, "r.json"), "--min", "2"]).status).toBe(0);
   });
 
   it("leaves tests/m2 and tests/pending alone", () => {

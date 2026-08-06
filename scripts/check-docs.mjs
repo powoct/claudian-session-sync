@@ -6,7 +6,7 @@
 // assertions: it points at the normative spec, and none of the rules that were
 // explicitly retired (architecture.md appendix A) have crept back in.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { Violations, parseArgs } from "./lib/gate.mjs";
 
@@ -35,6 +35,10 @@ try {
 if (text !== null) {
   if (!text.includes(SPEC_POINTER)) {
     v.add(`CLAUDE.md does not point at the normative spec ("${SPEC_POINTER}" not found)`);
+  } else if (!existsSync(path.join(root, SPEC_POINTER))) {
+    // A substring test alone survives the spec being renamed or moved, leaving
+    // CLAUDE.md pointing at nothing while the gate stays green.
+    v.add(`CLAUDE.md points at ${SPEC_POINTER}, which does not exist — the pointer is dangling`);
   }
   for (const { text: needle, supersededBy } of RETIRED_RULES) {
     const index = text.indexOf(needle);

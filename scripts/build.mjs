@@ -19,9 +19,13 @@ import esbuild from "esbuild";
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const dev = process.argv.includes("--dev");
 
-// Exactly the allow-list of §12.2a: the Obsidian runtime, Electron, and Node
-// built-ins in both spellings. Anything else must end up inside the bundle.
-const EXTERNAL = [
+/**
+ * Exactly the allow-list of §12.2a: the Obsidian runtime, Electron, and Node
+ * built-ins in both spellings. Anything else must end up inside the bundle.
+ * Exported so tests/build/artifact-metafile.test.ts can assert set equality
+ * against it rather than re-deriving the list and testing itself.
+ */
+export const EXTERNAL = [
   "obsidian",
   "electron",
   ...builtinModules,
@@ -45,17 +49,23 @@ const options = {
   define: { "process.env.NODE_ENV": JSON.stringify(dev ? "development" : "production") },
 };
 
-if (dev) {
-  const context = await esbuild.context(options);
-  await context.watch();
-  process.stdout.write("watching src/ (dev build, inline sourcemap)\n");
-} else {
-  const result = await esbuild.build(options);
-  mkdirSync(path.join(REPO_ROOT, "dist"), { recursive: true });
-  writeFileSync(
-    path.join(REPO_ROOT, "dist", "meta.json"),
-    JSON.stringify(result.metafile, null, 2) + "\n",
-  );
-  const bytes = statSync(path.join(REPO_ROOT, "main.js")).size;
-  process.stdout.write(`built main.js (${(bytes / 1024).toFixed(1)} KiB) + dist/meta.json\n`);
+// Importing this module must not trigger a build — the metafile test imports it
+// for EXTERNAL alone.
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  if (dev) {
+    const context = await esbuild.context(options);
+    await context.watch();
+    process.stdout.write("watching src/ (dev build, inline sourcemap)\n");
+  } else {
+    const result = await esbuild.build(options);
+    mkdirSync(path.join(REPO_ROOT, "dist"), { recursive: true });
+    writeFileSync(
+      path.join(REPO_ROOT, "dist", "meta.json"),
+      JSON.stringify(result.metafile, null, 2) + "\n",
+    );
+    const bytes = statSync(path.join(REPO_ROOT, "main.js")).size;
+    process.stdout.write(`built main.js (${(bytes / 1024).toFixed(1)} KiB) + dist/meta.json\n`);
+  }
 }

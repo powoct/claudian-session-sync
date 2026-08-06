@@ -30,6 +30,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
       const value = argv[++i];
       if (!value) usageError("--report needs a file path");
       out.report = path.resolve(value);
+    } else if (arg === "--min") {
+      const value = Number.parseInt(argv[++i] ?? "", 10);
+      if (!Number.isInteger(value) || value < 0) usageError("--min needs a non-negative integer");
+      out.min = value;
     } else {
       usageError(`unknown argument: ${arg}`);
     }

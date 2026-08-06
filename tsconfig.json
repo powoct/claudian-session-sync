@@ -6,6 +6,12 @@
     "moduleResolution": "bundler",
     "types": ["node"],
 
+    // The classic Obsidian subclass footgun. With ES2022 this defaults to true,
+    // and a declared-but-uninitialised field on a Plugin/PluginSettingTab
+    // subclass then emits `defineProperty(this, "x", undefined)`, wiping a value
+    // the base class set in its constructor. Assignment semantics instead.
+    "useDefineForClassFields": false,
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -23,5 +29,21 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.mts", "vitest.build.config.mts", "vitest.nightly.config.mts"]
+  // No brace expansion here: tsconfig include globs support only * ? and **/,
+  // so "src/**/*.{ts,mts}" silently matches nothing and typecheck passes by
+  // checking an empty program. tests/build/toolchain.test.ts guards against
+  // exactly that.
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.mts",
+    "src/**/*.cts",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "tests/**/*.mts",
+    "tests/**/*.cts",
+    "vitest.config.mts",
+    "vitest.build.config.mts",
+    "vitest.nightly.config.mts"
+  ]
 }

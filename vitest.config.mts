@@ -11,6 +11,10 @@ export default defineConfig({
     exclude: ["**/node_modules/**", "tests/build/artifact-*.test.ts"],
     reporters: ["default", "json"],
     outputFile: { json: "reports/vitest.json" },
+    // `.only` fails the run here as well as in CI. check:no-skip catches .only
+    // via the siblings it turns into skips, but a `describe.only` wrapping a
+    // whole file leaves no skipped case behind and would slip past it.
+    allowOnly: false,
     // Real tmpdirs and real rename semantics mean tests must not race each other
     // inside one file (testing.md §2.2).
     sequence: { concurrent: false },

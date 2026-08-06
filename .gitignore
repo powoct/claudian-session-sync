@@ -15,5 +15,11 @@ reports/
 artifacts/
 *.tsbuildinfo
 
-# throwaway project built by tests/build/coverage-gate.test.ts
+# throwaway projects built by tests/build/*.test.ts
 coverage-gate-fixture/
+reporter-contract-fixture/
+
+# credentials never belong in this repo (check:secrets scans for them too)
+.env
+.env.*
+

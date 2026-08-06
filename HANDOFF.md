@@ -102,8 +102,11 @@ tmp/probe-results/               两台真机的原始产物（gitignore；报�
 M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 
 - **`package.json` 不写 `"type": "module"`**——Obsidian 按 CJS 加载 `main.js`。仓库工具链靠 `.mjs` / `.mts` 扩展名走 ESM
-- **属性测试用 `fcAssert` 而不是 `fc.assert`**，否则 nightly 失败不留反例产物
-- **`domain/` 里不许出现 `RuntimeEnv` 这个标识符**（连类型位置都不行），lint 会挡；领域层只收 `SystemInfo` 纯数据与 `nowMs`
+- **属性测试用 `fcAssert` 而不是 `fc.assert`**（lint 会挡），否则 nightly 失败不留反例产物
+- **`domain/` 里不许出现 `RuntimeEnv` 这个标识符**（连类型位置都不行）、不许 `../` 任何路径、不许 `Date.now()` / `Math.random()`；领域层只收 `SystemInfo` 纯数据与 `nowMs`
+- **不许 `as SafeAbsolutePath`**——只有 `infra/path-guard.*` 与 `domain/path-safety.*` 能铸造 branded 路径
+- **改 `eslint.config.mjs` 时注意 flat config 的规则选项是替换不是合并**：同一个 rule id 在后面的 config 对象里再声明一次，前面的选项整个失效。加规则时把上一档的常量一起带上（`NETWORK_MODULES` / `REQUIRE_NODE_FS_BAN` / `DOMAIN_SYNTAX_RULES`），并让 `eslint-rules.test.ts` 跑一遍
+- **tsconfig 的 `include` 不支持花括号展开**（ESLint 的 `files` 支持）。写成 `src/**/*.{ts,mts}` 会让 typecheck 检查空集合并"通过"；`toolchain.test.ts` 就是为此存在的
 - **升 TypeScript 前先确认 typescript-eslint 的 peer 范围**（当前 `>=4.8.4 <6.1.0`，所以 TS 停在 5.9.3，不能跳 7.x）
 - 加/删命令要同步改 `tests/build/artifact-smoke.test.ts` 的 `EXPECTED_COMMAND_IDS`
 
@@ -113,3 +116,15 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
 - **三平台 CI 只在 Linux 上实跑过**：GitHub Actions 的 macOS / Windows job 还没有第一次绿灯记录（本机没有这两个平台）。首次 push 后确认，尤其是 `eslint-rules` 与 `gate-scripts` 两组涉及路径分隔符的测试
 - branch protection 的 required checks 还没配（Q-30 要求三平台 job 名进去），否则门禁不生效
+
+### M1 期间必须补上的门禁欠账
+
+M0 的自检把"门禁本身能不能拦住东西"验完了，但下面几项**要等 M1 有代码/测试之后才能装**，别忘了：
+
+| 项 | 什么时候装 | 说明 |
+|---|---|---|
+| `check:no-skip --min <n>` | `tests/m1/` 一有内容就加进 CI | 机制已就位并有用例；不设下限时"没有用例被跳过"与"整个 M1 套件不再被收集"是同一行绿字 |
+| Q-32 Windows 执行数 ≥ ubuntu 的 95% | M1 收尾 | 目前无任何实现；需要跨 job 比对 `reports/vitest.json` |
+| type-aware lint | 批 2 起 | `@typescript-eslint/no-floating-promises` 才能挡住漏写 `await this.barrier(...)`；需要开 `projectService`，会拖慢 lint，值得 |
+| §11.2 `PassReport` 字段禁令 | 批 3 | 类型层禁止 `content` / `buffer` / `bytes` / `lines: string[]` / `sample` / `head` / `tail`，配 `expectTypeOf` 断言 |
+| `src/ui/**` 覆盖率归属 | 批 4 | 现在 UI 落在全局 80% 门槛下，表现层按 §4 是靠 stub smoke + 人工验收的，落地时要么显式 exclude（照 `main.ts` 的先例）要么补测试——**别顺手调低全局门槛** |

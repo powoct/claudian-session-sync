@@ -14,12 +14,25 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import fc from "fast-check";
 
-export const FC_NUM_RUNS = Number.parseInt(process.env.FC_NUM_RUNS ?? "", 10) || 100;
-export const FC_SEED =
-  process.env.FC_SEED && process.env.FC_SEED.trim() !== ""
-    ? Number.parseInt(process.env.FC_SEED, 10)
-    : undefined;
-export const FC_ARTIFACTS_DIR = process.env.FC_ARTIFACTS_DIR ?? "artifacts";
+export const DEFAULT_NUM_RUNS = 100;
+
+// Read at call time, not at import time: a module-level snapshot cannot be
+// tested without reloading the module, and "the nightly job's env var is
+// ignored" is precisely the failure that would go unnoticed for months.
+export function fcNumRuns(): number {
+  return Number.parseInt(process.env.FC_NUM_RUNS ?? "", 10) || DEFAULT_NUM_RUNS;
+}
+
+export function fcSeed(): number | undefined {
+  const raw = process.env.FC_SEED;
+  if (!raw || raw.trim() === "") return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+export function fcArtifactsDir(): string {
+  return process.env.FC_ARTIFACTS_DIR ?? "artifacts";
+}
 
 export interface FcAssertOptions {
   numRuns?: number;
@@ -38,11 +51,12 @@ export function fcAssert<Ts>(
   property: fc.IProperty<Ts>,
   options: FcAssertOptions = {},
 ): void {
-  const { artifactsDir = FC_ARTIFACTS_DIR, seed, path: counterexamplePath, endOnFailure, numRuns } = options;
+  const { artifactsDir = fcArtifactsDir(), seed, path: counterexamplePath, endOnFailure, numRuns } = options;
+  const envSeed = fcSeed();
 
   const parameters: fc.Parameters<Ts> = {
-    numRuns: numRuns ?? FC_NUM_RUNS,
-    ...(seed !== undefined ? { seed } : FC_SEED !== undefined ? { seed: FC_SEED } : {}),
+    numRuns: numRuns ?? fcNumRuns(),
+    ...(seed !== undefined ? { seed } : envSeed !== undefined ? { seed: envSeed } : {}),
     ...(counterexamplePath !== undefined ? { path: counterexamplePath } : {}),
     ...(endOnFailure !== undefined ? { endOnFailure } : {}),
   };
@@ -58,7 +72,7 @@ export function fcAssert<Ts>(
 export function writeCounterexampleArtifact<Ts>(
   name: string,
   details: fc.RunDetails<Ts>,
-  artifactsDir: string = FC_ARTIFACTS_DIR,
+  artifactsDir: string = fcArtifactsDir(),
 ): string {
   const safeName = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "property";
   const seed = details.seed;

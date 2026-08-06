@@ -7,13 +7,17 @@
  * code or test-only dependency got dragged into the shipped file, and that the
  * bundle did not quietly swallow node_modules.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+// The build's own declared list, not a copy of it: asserting a re-derived list
+// against itself would pass no matter what scripts/build.mjs actually does.
+import { EXTERNAL as BUILD_EXTERNAL } from "../../scripts/build.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const SRC_DIR = path.join(REPO_ROOT, "src");
 const BUNDLE = path.join(REPO_ROOT, "main.js");
 const METAFILE = path.join(REPO_ROOT, "dist", "meta.json");
 
@@ -52,6 +56,15 @@ function inputPaths(): string[] {
   return Object.keys(metafile.inputs).map((input) => input.split("\\").join("/"));
 }
 
+function newestMtime(dir: string): number {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    newest = Math.max(newest, entry.isDirectory() ? newestMtime(full) : statSync(full).mtimeMs);
+  }
+  return newest;
+}
+
 describe("bundle metafile contract (§12.2a)", () => {
   it("leaves external only what the Obsidian runtime provides", () => {
     const output = metafile.outputs["main.js"];
@@ -63,6 +76,26 @@ describe("bundle metafile contract (§12.2a)", () => {
     expect(disallowed, `externals outside the allow-list would be missing at runtime`).toEqual([]);
     // The plugin must genuinely link against the host API rather than shipping a copy.
     expect(externals).toContain("obsidian");
+  });
+
+  it("declares exactly the allow-list as external in the build config", () => {
+    // §12.2a asks for equality with the allow-list. The metafile can only show
+    // what the bundle happened to import, so the equality belongs here, against
+    // what scripts/build.mjs actually passes to esbuild.
+    expect(new Set(BUILD_EXTERNAL)).toEqual(ALLOWED_EXTERNALS);
+  });
+
+  it("is not stale relative to src/", () => {
+    // check:bundle asserts things about main.js; if main.js predates the source
+    // it describes, every one of those assertions is about the wrong artifact.
+    const bundleMtime = statSync(BUNDLE).mtimeMs;
+    const newestSource = newestMtime(SRC_DIR);
+
+    expect(
+      bundleMtime,
+      "main.js is older than src/ — run `npm run build` before `npm run check:bundle`",
+    ).toBeGreaterThanOrEqual(newestSource);
+    expect(statSync(METAFILE).mtimeMs).toBeGreaterThanOrEqual(newestSource);
   });
 
   it("does not bundle test code or test-only dependencies", () => {
@@ -89,6 +122,9 @@ describe("bundle metafile contract (§12.2a)", () => {
 
   it("is CommonJS, as Obsidian's loader requires", () => {
     expect(bundleText).toMatch(/module\.exports|exports\./);
-    expect(bundleText).not.toMatch(/^\s*export\s+default\s/m);
+    // Any top-level ESM syntax at all — Obsidian requires() this file, so an
+    // `import`/`export` statement would throw before onload is ever reached.
+    expect(bundleText).not.toMatch(/^\s*import\s+[\w{*]/m);
+    expect(bundleText).not.toMatch(/^\s*export\s+(default|const|function|class|\{)/m);
   });
 });

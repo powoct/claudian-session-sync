@@ -17,11 +17,12 @@
  * to node_modules — and specifically *not* inside node_modules, which vitest
  * excludes from coverage by default, which would make this test vacuously pass.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+import { removeTree } from "../helpers/fs-cleanup";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const VITEST_CLI = path.join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
@@ -58,12 +59,12 @@ export default defineConfig({
 `;
 
 afterAll(() => {
-  rmSync(FIXTURE_ROOT, { recursive: true, force: true });
+  removeTree(FIXTURE_ROOT);
 });
 
 /** Builds the throwaway project; `withTest` decides whether src/ is exercised. */
 function writeFixture(withTest: boolean): void {
-  rmSync(FIXTURE_ROOT, { recursive: true, force: true });
+  removeTree(FIXTURE_ROOT);
   mkdirSync(path.join(FIXTURE_ROOT, "src"), { recursive: true });
   mkdirSync(path.join(FIXTURE_ROOT, "tests"), { recursive: true });
 

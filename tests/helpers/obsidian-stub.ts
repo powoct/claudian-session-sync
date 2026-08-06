@@ -137,16 +137,36 @@ export interface StubApp {
     onLayoutReady(callback: () => void): void;
     /** Callbacks queued but not yet run — the smoke test asserts deferral. */
     readonly layoutReadyCallbacks: Array<() => void>;
+    /** Callbacks the stub ran immediately because the layout was already ready. */
+    readonly layoutReadyRanInline: Array<() => void>;
   };
   vault: { getName(): string; adapter: Record<string, never> };
 }
 
-export function makeStubApp(): StubApp {
+export interface StubAppOptions {
+  /**
+   * Obsidian's real `onLayoutReady` invokes the callback *synchronously* when
+   * the layout is already up — which is what happens when a plugin is enabled
+   * from settings rather than at startup. A stub that always defers would let a
+   * plugin doing heavy work in that callback pass the deferral test and still
+   * block the host in production, so both modes are testable.
+   */
+  layoutAlreadyReady?: boolean;
+}
+
+export function makeStubApp(options: StubAppOptions = {}): StubApp {
   const layoutReadyCallbacks: Array<() => void> = [];
+  const layoutReadyRanInline: Array<() => void> = [];
   return {
     workspace: {
       layoutReadyCallbacks,
+      layoutReadyRanInline,
       onLayoutReady(callback: () => void) {
+        if (options.layoutAlreadyReady) {
+          layoutReadyRanInline.push(callback);
+          callback();
+          return;
+        }
         layoutReadyCallbacks.push(callback);
       },
     },
@@ -223,8 +243,13 @@ export class Setting {
   name = "";
   desc = "";
   heading = false;
+  /** Obsidian appends a `.setting-item` to the container; mirror that. */
+  readonly settingEl: FakeElement;
 
-  constructor(readonly containerEl: FakeElement) {}
+  constructor(readonly containerEl: FakeElement) {
+    this.settingEl = containerEl.createEl("div");
+    this.settingEl.addClass("setting-item");
+  }
 
   setName(name: string): this {
     this.name = name;
