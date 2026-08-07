@@ -43,7 +43,8 @@ const input = (overrides: Partial<PlanInput> = {}): PlanInput => ({
   conflictKnown: false,
   maxFileSizeBytes: MAX_BYTES,
   pullNewFastPath: false,
-  hints: { remoteHadNonZeroSize: false, truncatedTailPasses: 0 },
+  hints: { remoteHadNonZeroSize: false },
+  history: { truncatedTailPasses: 0 },
   ...overrides,
 });
 
@@ -140,7 +141,7 @@ describe("§5.2.2 tail integrity (U-11)", () => {
     const result = plan(
       input({
         local: L({ tail: "truncated" }),
-        hints: { remoteHadNonZeroSize: false, truncatedTailPasses: MALFORMED_TAIL_PASSES },
+        history: { truncatedTailPasses: MALFORMED_TAIL_PASSES },
       }),
     );
     expect(result.action).toBe("DEFER");
@@ -177,7 +178,7 @@ describe("§5.2.3 zero-byte files (U-12)", () => {
       input({
         remoteSide: R({ size: 0 }),
         relation: "l-extends-r",
-        hints: { remoteHadNonZeroSize: true, truncatedTailPasses: 0 },
+        hints: { remoteHadNonZeroSize: true },
       }),
     );
     expect(result.action).toBe("DEFER");
@@ -334,6 +335,12 @@ describe("§5.2.7 exhaustive combinations", () => {
     zeroByte: ["none", "l-zero", "r-zero", "both-zero"] as const,
     tail: ["lf", "no-lf", "truncated"] as const,
     conflictKnown: [true, false],
+    // Added after review: these three were fixed constants, which left the
+    // "fast path is the only route from unstable input to a write" assertion
+    // resting on two point cases and a comment.
+    placeholder: ["none", "l", "r"] as const,
+    fastPath: [true, false],
+    hadContent: [true, false],
   };
 
   const TAIL_STATES = {
@@ -352,7 +359,10 @@ describe("§5.2.7 exhaustive combinations", () => {
                 for (const size of dims.size)
                   for (const zeroByte of dims.zeroByte)
                     for (const tail of dims.tail)
-                      for (const conflictKnown of dims.conflictKnown) {
+                      for (const conflictKnown of dims.conflictKnown)
+                        for (const placeholder of dims.placeholder)
+                          for (const fastPath of dims.fastPath)
+                            for (const hadContent of dims.hadContent) {
                         // Impossible states are filtered rather than asserted
                         // about: a relation between a file and nothing is not a
                         // case the planner can be wrong about.
@@ -371,6 +381,12 @@ describe("§5.2.7 exhaustive combinations", () => {
                         // separately below.
                         if ((lZero || rZero) && relation === "divergent") continue;
 
+                        // A placeholder is a file that exists but whose bytes
+                        // are not local; it cannot be claimed for a side that
+                        // is not there at all.
+                        if (placeholder === "l" && !lExists) continue;
+                        if (placeholder === "r" && !rExists) continue;
+
                         yield {
                           remote,
                           local: {
@@ -379,7 +395,7 @@ describe("§5.2.7 exhaustive combinations", () => {
                             observedHash: "hash-l",
                             stable: lStable,
                             tail: TAIL_STATES[tail],
-                            isPlaceholder: false,
+                            isPlaceholder: placeholder === "l",
                           },
                           remoteSide: {
                             exists: rExists,
@@ -387,13 +403,14 @@ describe("§5.2.7 exhaustive combinations", () => {
                             observedHash: "hash-r",
                             stable: rStable,
                             tail: TAIL_STATES[tail],
-                            isPlaceholder: false,
+                            isPlaceholder: placeholder === "r",
                           },
                           relation,
                           conflictKnown,
                           maxFileSizeBytes: MAX_BYTES,
-                          pullNewFastPath: false,
-                          hints: { remoteHadNonZeroSize: false, truncatedTailPasses: 0 },
+                          pullNewFastPath: fastPath,
+                          hints: { remoteHadNonZeroSize: hadContent },
+                          history: { truncatedTailPasses: 0 },
                         };
                       }
   }
@@ -401,7 +418,7 @@ describe("§5.2.7 exhaustive combinations", () => {
   const ALL = [...combinations()];
 
   it("generates a meaningful number of combinations", () => {
-    expect(ALL.length).toBeGreaterThan(1000);
+    expect(ALL.length).toBeGreaterThan(20_000);
   });
 
   it("always produces exactly one action", () => {
@@ -452,14 +469,85 @@ describe("§5.2.7 exhaustive combinations", () => {
     }
   });
 
-  it("never writes from an unstable side except through the fast path", () => {
+  it("never writes from an unstable side unless the fast path applies", () => {
     const writes: Action[] = ["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE"];
     for (const combo of ALL) {
       const unstable =
         (combo.local.exists && !combo.local.stable) || (combo.remoteSide.exists && !combo.remoteSide.stable);
       if (!unstable) continue;
-      // pullNewFastPath is false throughout this generator.
+
+      // The fast path's own preconditions, restated here rather than reusing
+      // the planner's, so the test does not agree with the code by
+      // construction: it only applies when nothing exists locally to lose.
+      const fastPathApplies =
+        combo.pullNewFastPath && !combo.local.exists && combo.remoteSide.exists;
+      if (fastPathApplies) continue;
+
       expect(writes, JSON.stringify(combo)).not.toContain(plan(combo).action);
+    }
+  });
+
+  it("only ever reaches PULL_NEW through the fast path when a side is unstable", () => {
+    for (const combo of ALL) {
+      const unstable =
+        (combo.local.exists && !combo.local.stable) || (combo.remoteSide.exists && !combo.remoteSide.stable);
+      if (!unstable) continue;
+      const { action } = plan(combo);
+      if (action === "PULL_NEW") {
+        // Creating is the only write an unstable observation may authorise,
+        // and only when it replaces nothing.
+        expect(combo.pullNewFastPath, JSON.stringify(combo)).toBe(true);
+        expect(combo.local.exists, JSON.stringify(combo)).toBe(false);
+      }
+    }
+  });
+
+  it("never writes when either side is a cloud placeholder", () => {
+    // Its bytes are not here: any size or hash observed about it describes a
+    // stub, and reading it would pull the file down mid-pass.
+    const writes: Action[] = ["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE", "CONFLICT"];
+    for (const combo of ALL) {
+      if (!combo.local.isPlaceholder && !combo.remoteSide.isPlaceholder) continue;
+      expect(writes, JSON.stringify(combo)).not.toContain(plan(combo).action);
+    }
+  });
+
+  it("never lets the fast path overwrite anything", () => {
+    for (const combo of ALL) {
+      if (!combo.pullNewFastPath) continue;
+      if (!combo.local.exists) continue;
+      // A caller setting the fast path for a file that already exists locally
+      // is contradicting itself; the planner normalises it away rather than
+      // trusting it. Two consequences, both asserted: the flag never appears,
+      // and an unstable side still defers instead of riding the exemption.
+      const { action, flags } = plan(combo);
+      expect(flags, JSON.stringify(combo)).not.toContain("pullNewFastPath");
+
+      const unstable =
+        !combo.local.stable || (combo.remoteSide.exists && !combo.remoteSide.stable);
+      const reachedStabilityGate =
+        combo.remote === "ready" &&
+        combo.local.size <= combo.maxFileSizeBytes &&
+        combo.remoteSide.size <= combo.maxFileSizeBytes &&
+        !combo.local.isPlaceholder &&
+        !combo.remoteSide.isPlaceholder;
+      if (unstable && reachedStabilityGate) {
+        expect(action, JSON.stringify(combo)).toBe("DEFER");
+      }
+    }
+  });
+
+  it("never turns a remote regression into a push", () => {
+    // A remote file that once had content and is now empty is a symptom of the
+    // sync tool, not permission to declare this machine authoritative.
+    for (const combo of ALL) {
+      if (!combo.hints.remoteHadNonZeroSize) continue;
+      if (!(combo.remoteSide.exists && combo.remoteSide.size === 0)) continue;
+      if (!combo.local.exists || combo.local.size === 0) continue;
+      if (combo.remote !== "ready") continue;
+      if (combo.local.size > combo.maxFileSizeBytes) continue;
+      if (combo.local.isPlaceholder || combo.remoteSide.isPlaceholder) continue;
+      expect(plan(combo).action, JSON.stringify(combo)).not.toBe("PUSH_OVERWRITE");
     }
   });
 

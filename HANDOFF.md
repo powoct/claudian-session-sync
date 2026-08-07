@@ -1,11 +1,11 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-06。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-07。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：M0 脚手架完成，M1 未开始
+## 当前状态：M0 完成，M1 批 1（领域层纯函数）完成并通过审核
 
-门禁齐备且**每条都被自检过**，`src/` 里只有装配骨架。下一步是 M1 的第一批领域层纯函数。
+门禁齐备且每条都被自检过；领域层五个纯函数模块落地，[review/2](review/2_m1-batch1-domain-review.md) 判定"达到设计基线，可以进入批 2"（0 个 Blocker）。下一步是批 2 的 infra 层。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
@@ -15,7 +15,8 @@
 | 真机探测套件 | ✅ | `tmp/probe/`（不入库）；经安全审查修掉 3 个泄漏级 bug 后交付 |
 | **macOS + Windows 真机探测** | ✅ | 原始报告与逐条判定归档在 [docs/zh-CN/findings/](docs/zh-CN/findings/)；结论已回填两份文档 |
 | **M0 脚手架** | ✅ **完成** | G-01…G-11 全部交付并自检；`npm run verify` 本地全绿（`npm test` 102 条 + `check:bundle` 20 条）。落地清单见 [testing.md §12.7](docs/zh-CN/testing.md) |
-| M1 | ❌ 未开始 | — |
+| **M1 批 1 · 领域层** | ✅ **完成** | 5 个模块，230 条 m1 用例，domain 覆盖率 98%；[review/2](review/2_m1-batch1-domain-review.md) 的建议已处理（见下） |
+| M1 批 2–4 | ⬜ 未开始 | — |
 
 ### M0 交付了什么
 
@@ -51,7 +52,17 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
 - ⬜ **批 2 · infra（下一步）**：`FsGateway`（原子写、win32 跳过目录 fsync）、三处状态 store、备份（含 `backups/remote/`）、`PathGuard`
   - 批 1 已经把接口形状定下来了：`FsGateway` 的写方法只收 `SafeAbsolutePath`（`src/domain/types.ts`），`PathGuard` 是**唯一**能铸造它的地方（lint 已强制，见 `eslint-rules.test.ts` 的 branded-path 组）
   - E0 签名按**分量**存进 ledger，不要只存 sha256——未来 mtime 的降级路径需要"剔除 mtime 后重算"，只有摘要就做不到（`src/domain/stability.ts` 顶部有说明）
-- **批 3 · SyncEngine + L2**：九阶段 pass、VO 协议、双 replica world、S-01…S-20、崩溃点矩阵 R-01…R-13、I1/I2 属性测试
+- ⬜ **批 3 · SyncEngine + L2**：九阶段 pass、VO 协议、双 replica world、S-01…S-20、崩溃点矩阵 R-01…R-13、I1/I2 属性测试
+
+  **批 3 首批用例认领表**（来自 [review/2](review/2_m1-batch1-domain-review.md) §4，批 1 因分层归属写不了的那些，别漏）：
+
+  | 用例 | 内容 | 为什么现在写不了 |
+  |---|---|---|
+  | **U-18b 集成形态** | 真实 tmpdir：写 `R0` → 等长 `R1` + `utimes` 还原 mtime → 跑 pass → 必须 `CONFLICT` | 需要 FsGateway（批 2）+ SyncEngine。**U-18 的"最重要测试"地位要求它进批 3 首批**，批 1 只有领域层那一半 |
+  | U-12b 备份断言 | 0 字节被 `PULL_OVERWRITE` 覆盖时，备份区确实有那份 0 字节备份 | 需要备份模块（批 2） |
+  | `malformedTail` → Notice | planner 打 flag，报告层要真的渲染成 `MALFORMED_TAIL` + Notice | U-11d 要求"让用户看见"，planner 不产 Notice；这一半悬在批 3/4 |
+  | U-14 | 空目录 → 空 Action 列表，不报错 | work-list 层 |
+  | U-16 / U-17 | `AWAIT_INIT` 零写入；文件数骤降 → `NOT_READY` 且不解释成"远端删了" | 就绪状态机（§9.6） |
 - **批 4 · Obsidian UI** → 真机十步验收（[testing.md §9.4](docs/zh-CN/testing.md)；两台机器的 `~/aiss-probe` 都还留着可复用）
 
 批 1 从 `path-escape` 起步的具体理由：样本表已经全部实测（[testing.md §5.1](docs/zh-CN/testing.md) 12 条 `verified: true`），是唯一一个"输入输出都已知、可以纯表驱动写完"的模块，能顺带把 `tests/m1/` 建起来让 `check:no-skip` 从"M0 空跑"转成真门禁。

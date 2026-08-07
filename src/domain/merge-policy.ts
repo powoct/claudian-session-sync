@@ -31,6 +31,13 @@ export interface PrefixResult {
  * A missing trailing newline does *not* mean the file is truncated — a valid
  * JSONL file may simply end without one. Conflating the two would make the
  * plugin refuse to sync perfectly good files, or worse, push half a line.
+ *
+ * The question this answers is "does the file end on a record boundary", and
+ * only that. In particular an **empty file is reported as `lf-terminated`**,
+ * which is a convention rather than a description: it ends on a record boundary
+ * vacuously, but it plainly has no terminating LF. Anything that needs the
+ * literal question — "would appending here continue a partial line?" — must ask
+ * `endsWithNewline` instead of reading it off this value.
  */
 export type TailState = "lf-terminated" | "complete-no-lf" | "truncated";
 
@@ -97,7 +104,10 @@ export function comparePrefix(shortBytes: Uint8Array, longBytes: Uint8Array): Pr
  * rather than complete. JSONL records are objects, so this costs nothing real.
  */
 export function tailState(bytes: Uint8Array): TailState {
-  // An empty file has no partial record in it.
+  // An empty file has no partial record in it, so it is safe to append to and
+  // valid as an overwrite source. See the note on TailState: this is the one
+  // value that is a convention rather than a description — `endsWithNewline`
+  // answers the literal question.
   if (bytes.length === 0) return "lf-terminated";
 
   const lastLf = lastIndexOfByte(bytes, LF);
@@ -131,6 +141,20 @@ export function tailState(bytes: Uint8Array): TailState {
  */
 export function canBeOverwriteSource(bytes: Uint8Array): boolean {
   return tailState(bytes) !== "truncated";
+}
+
+/**
+ * Does the file literally end with a newline byte?
+ *
+ * Separate from `tailState` because the two answers diverge on an empty file:
+ * `tailState` calls it `lf-terminated` (it ends on a record boundary), while
+ * this correctly says no. Anything deciding whether a separator is needed
+ * before appending must use this one — inferring it from `lf-terminated` would
+ * start an empty file with a blank line, or append to a `complete-no-lf` file
+ * without a separator and weld two records into one unparseable line.
+ */
+export function endsWithNewline(bytes: Uint8Array): boolean {
+  return bytes.length > 0 && bytes[bytes.length - 1] === LF;
 }
 
 /**

@@ -66,16 +66,30 @@ export interface SideFacts {
 /**
  * Manifest-derived input, quarantined into its own field.
  *
- * Rule EV-1: the manifest is a hint, never an authority. A value in here may
- * only ever make a decision *more* conservative — the single member is a
- * boolean whose only effect is to turn a write into a DEFER. It is a separate
- * object rather than a loose field so that adding anything hash-shaped here
+ * Rule EV-1: the manifest is a hint, never an authority. Its single member is a
+ * boolean whose only possible effect is to turn a write into a DEFER — it can
+ * make a decision more conservative and nothing else. It lives in a named
+ * object rather than as a loose field so that adding anything hash-shaped here
  * looks as wrong as it is.
+ *
+ * Deliberately holds *only* manifest-derived values. The manifest is written by
+ * other machines and read as untrusted text (architecture §5.2); mixing a local
+ * observation into this object would be an invitation to feed remote strings
+ * into a decision path that is supposed to rest on what this machine saw.
  */
 export interface DeferOnlyHints {
   /** The manifest recorded this remote file at non-zero size in the past. */
   readonly remoteHadNonZeroSize: boolean;
-  /** Consecutive passes in which this side's tail failed to parse. */
+}
+
+/**
+ * This machine's own observation history, from the local ledger.
+ *
+ * Separate from `DeferOnlyHints` on purpose: same shape of influence, entirely
+ * different provenance. Nothing here has crossed a network or a sync directory.
+ */
+export interface LocalHistory {
+  /** Consecutive passes in which a side's tail failed to parse. */
   readonly truncatedTailPasses: number;
 }
 
@@ -90,6 +104,7 @@ export interface PlanInput {
   /** All §9.1.3 conditions met; the only route to a write from unstable input. */
   readonly pullNewFastPath: boolean;
   readonly hints: DeferOnlyHints;
+  readonly history: LocalHistory;
 }
 
 export interface PlanResult {
@@ -105,7 +120,7 @@ export interface PlanResult {
 export const MALFORMED_TAIL_PASSES = 5;
 
 export function plan(input: PlanInput): PlanResult {
-  const { local, remoteSide: remote, hints } = input;
+  const { local, remoteSide: remote, hints, history } = input;
   const flags: PlanFlag[] = [];
 
   // 1 — the neutral layout is from a newer version of this plugin. Reading it
@@ -132,12 +147,17 @@ export function plan(input: PlanInput): PlanResult {
   }
 
   // 5 — stability, with exactly one exception in the whole system.
-  const fastPath = !local.exists && remote.exists && input.pullNewFastPath;
+  //
+  // The fast path is normalised away whenever its own precondition does not
+  // hold, rather than trusted as passed: a caller that sets it alongside an
+  // existing local file is contradicting itself, and the safe reading of a
+  // contradiction is the conservative one.
+  const fastPath = input.pullNewFastPath && !local.exists && remote.exists;
   if (!fastPath) {
     const truncated = tailIsTruncated(local) || tailIsTruncated(remote);
     if (truncated) {
       flags.push("truncatedTail");
-      if (hints.truncatedTailPasses >= MALFORMED_TAIL_PASSES) flags.push("malformedTail");
+      if (history.truncatedTailPasses >= MALFORMED_TAIL_PASSES) flags.push("malformedTail");
       return result("DEFER", "tail-not-parseable", flags);
     }
     if ((local.exists && !local.stable) || (remote.exists && !remote.stable)) {

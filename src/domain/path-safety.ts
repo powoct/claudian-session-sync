@@ -19,7 +19,6 @@ import {
   ok,
   type LogicalId,
   type MachineId,
-  type PathViolation,
   type Result,
   type SafeRelativePath,
   type SafeSegment,
@@ -284,4 +283,3 @@ function utf8Length(value: string): number {
   }
   return bytes;
 }
-export type { PathViolation };

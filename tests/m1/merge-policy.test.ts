@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canBeOverwriteSource,
+  endsWithNewline,
   compareBySignature,
   comparableLength,
   comparePrefix,
@@ -185,6 +186,30 @@ describe("overwrite eligibility (§7.4.1 table)", () => {
   it("compares an intact file over its whole length", () => {
     const bytes = enc(lines(2));
     expect(comparableLength(bytes)).toBe(bytes.length);
+  });
+});
+
+describe("endsWithNewline — the literal question tailState does not answer", () => {
+  it("says no for an empty file, which tailState calls lf-terminated", () => {
+    // The one place the two disagree, and the reason this function exists: a
+    // batch-3 caller deciding "do I need a separator before appending?" would
+    // start the file with a blank line if it read the answer off tailState.
+    expect(tailState(enc(""))).toBe("lf-terminated");
+    expect(endsWithNewline(enc(""))).toBe(false);
+  });
+
+  it("says yes for a file that really ends with LF", () => {
+    expect(endsWithNewline(enc(lines(2)))).toBe(true);
+  });
+
+  it("says no for a complete record with no trailing LF", () => {
+    // Appending without a separator here would weld two records into one
+    // unparseable line.
+    expect(endsWithNewline(enc('{"uuid":"r1"}'))).toBe(false);
+  });
+
+  it("says no for a truncated tail", () => {
+    expect(endsWithNewline(enc(lines(1) + '{"uuid":"r2'))).toBe(false);
   });
 });
 

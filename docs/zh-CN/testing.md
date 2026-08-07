@@ -139,7 +139,7 @@ L0  纯函数单测        Planner / MergePolicy / Stability / PathSafety   自�
 3. **领域层允许持有 `SystemInfo`（纯数据快照）与 `nowMs: number` 参数，但不得持有 `RuntimeEnv` 本身**（lint 规则：`domain/` 禁止出现标识符 `RuntimeEnv`）。
 4. 所有文件系统访问经 `FsGateway`；所有时间读取经 `Clock`；所有随机与 UUID 经 `IdGen`（测试可固定）。
 5. **`FsGateway` 的写方法只接受 branded 的 `SafeAbsolutePath`**。"忘了校验路径"必须是编译错误——typecheck 因此成为安全门禁的一部分。
-6. **`PlanInput` 中不得存在任何 manifest 派生的 hash 字段**。Planner 只接受"本次实际观察到的文件事实"（`observedHash` / `observedSize` / `observedStableFor`）。唯一例外是布尔量 `remoteHadNonZeroSize`（由 manifest 的 size 历史派生，[架构 §5.3.2 规则 EV-1](./architecture.md)），它在类型上只能出现在 `DEFER` 分支的入参里。这是用类型系统消灭[审核 4.2](../../review/1_architecture-and-testing-review.md) 那一类 bug 的唯一可靠办法——反例见 §5.2.5 U-18。
+6. **`PlanInput` 中不得存在任何 manifest 派生的 hash 字段**。Planner 只接受"本次实际观察到的文件事实"——实现为 `SideFacts`：`observedHash` / `size` / `stable` / `tail` / `isPlaceholder`（`observedHash` 这个命名承担了全部说明责任：它只能是本次读到的字节的 hash）。唯一例外是布尔量 `remoteHadNonZeroSize`（由 manifest 的 size 历史派生，[架构 §5.3.2 规则 EV-1](./architecture.md)），它被隔离在 `PlanInput.hints: DeferOnlyHints` 里，且该对象**只装 manifest 派生值**——本机 ledger 的观察计数（如 `truncatedTailPasses`）住在另一个字段 `history: LocalHistory`。两者影响决策的方式相同（只能推向更保守），但来源一个是别的机器写的不可信文本、一个是本机事实，混在一起迟早会有人把远端字符串喂进稳定性判定。这是用类型系统消灭[审核 4.2](../../review/1_architecture-and-testing-review.md) 那一类 bug 的唯一可靠办法——反例见 §5.2.5 U-18。
 7. **`SyncEngine` 在每个关键点调用 `await this.barrier(point, ctx)`**（`point` 取自 §7.4 的枚举）。生产实现是同步返回的 no-op；没有这组 barrier，竞态与崩溃点测试无法编写。
 8. **`FsGateway` 可被装饰以记录全部调用**（方法名 + resolved 绝对路径 + 读/写）。这是 I4 越界断言与 dry-run 无写入断言的基础。
 9. **`SyncEngine` 不得有 catch-all**。测试注入的 `CrashSignal`（不继承 `Error` 的特殊对象）必须能穿透到测试代码；单 action 的可捕获错误只能针对**已知 errno 集合**捕获。
