@@ -58,7 +58,17 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ⬜ 把这些接起来的 store I/O 门面（读写 machine.json / workspaces/*.json / observations.json 的实际落盘路径）——纯逻辑与格式已就绪，剩下的是 FsGateway 调用编排，可与批 3 的 SyncEngine 一起做
   - 批 1 已经把接口形状定下来了：`FsGateway` 的写方法只收 `SafeAbsolutePath`（`src/domain/types.ts`），`PathGuard` 是**唯一**能铸造它的地方（lint 已强制，见 `eslint-rules.test.ts` 的 branded-path 组）
   - E0 签名按**分量**存进 ledger，不要只存 sha256——未来 mtime 的降级路径需要"剔除 mtime 后重算"，只有摘要就做不到（`src/domain/stability.ts` 顶部有说明）
-- ⬜ **批 3 · SyncEngine + L2**：九阶段 pass、VO 协议、双 replica world、S-01…S-20、崩溃点矩阵 R-01…R-13、I1/I2 属性测试
+- 🔄 **批 3 · SyncEngine + L2（进行中）**：
+  - ✅ `orchestration/pass-report.ts`——报告类型（**类型上没有任何能装文件内容的字段**）、`HookPoint` 屏障点、`CrashSignal`（刻意不继承 Error）
+  - ✅ `orchestration/sync-engine.ts`——P0–P8 九阶段、稳定性闸门前置于读字节、A6 备份 / A8 最后一眼 / A10 写回快照、`mintWritePath` 强制 adapter 输出过 PathGuard
+  - ✅ `providers/provider-adapter.ts` + `claude-code/adapter.ts`——白名单分类（安全边界）、Tier A 扫目录发现
+  - ✅ `tests/helpers/world.ts`——双 replica L2 world + 可编程 transport（truncate / zero-byte / mtime 策略 / drop）
+  - ✅ `tests/helpers/invariants.ts`——`assertRecoverable`（I1，字节前缀语义）、I1-a/b/c
+  - ✅ **U-18b 集成形态已落地**（等长 + 还原 mtime + 发散 → CONFLICT，两侧冻结）、U-07 引擎级、S-01/02/03/08/10、I2a 收敛
+  - ⬜ 崩溃点矩阵 R-01…R-13（屏障点已就位，用例待写）
+  - ⬜ I1/I2 fast-check 属性测试（`fcAssert` 与 world 都已就绪）
+  - ⬜ 冲突隔离落盘（`.quarantine/<conflictId>/`）与三条冲突命令
+  - ⬜ 就绪状态机 U-15/16/17、manifest 读写
 
   **批 3 首批用例认领表**（来自 [review/2](review/2_m1-batch1-domain-review.md) §4，批 1 因分层归属写不了的那些，别漏）：
 
