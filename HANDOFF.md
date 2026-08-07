@@ -146,8 +146,10 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 
 - macOS 侧 OQ-1 Round 2（Windows 包落到 mac 再验一次反方向）——Windows→mac 方向已验过，此项只是对称补全，优先级低
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
-- **三平台 CI 只在 Linux 上实跑过**：GitHub Actions 的 macOS / Windows job 还没有第一次绿灯记录（本机没有这两个平台）。首次 push 后确认，尤其是 `eslint-rules` 与 `gate-scripts` 两组涉及路径分隔符的测试
-- branch protection 的 required checks 还没配（Q-30 要求三平台 job 名进去），否则门禁不生效
+- ✅ **三平台 CI 已全绿**（2026-08-07，run 31186382661）。此前从 M0 起连续 5 次 push 都是 Linux 绿、macOS/Windows 红而没人看——**推完记得看一眼 `gh run list`**，红了五次和红了一次的修复成本差很多
+  - 三个 bug 都在测试侧，且**都朝着"看起来成功"的方向失败**：Windows 上 `split(path.sep)` 让四 root 重叠检测变成空转（找不到重叠 = 通过）；`tsc --listFiles` 在 Windows 输出正斜杠而 REPO_ROOT 是反斜杠，于是 toolchain 测试报"tsc 检查了空程序"；macOS 的 `/var` → `/private/var` 让 `resolveUnderRoot` 正确地拒绝了一切（参数就叫 realRoot，测试没给 realpath）
+  - 教训已固化：`path-guard` 导出 `splitPathSegments`（两种分隔符都吃），别让每个调用方自己写一个
+- ⬜ branch protection 的 required checks 还没配（Q-30 要求三平台 job 名进去），否则门禁只是提示
 
 ### M1 期间必须补上的门禁欠账
 
