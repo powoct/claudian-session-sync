@@ -53,8 +53,9 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ✅ `infra/clock.ts`——`Clock` / `IdGen` 接口 + 系统实现 + 可钉死的测试替身
   - ✅ `infra/fs-gateway.ts` + `node-fs-gateway.ts`——原子写（同目录 tmp → fsync → rename）、win32 跳过目录 fsync、`retryOnTransient` 退避、`renameNoReplace`（link+unlink 拿到"目标已存在则失败"的原子语义）
   - ✅ `infra/path-guard.ts`——逐级 lstat containment、四 root 重叠、凭证名单、大小写敏感性运行时探测；**唯一铸造 `SafeAbsolutePath` 的地方**
-  - ⬜ 三处状态 store（machine.json / workspaces / observations ledger）
-  - ⬜ 备份（含 `backups/remote/`）与 `index.jsonl`
+  - ✅ `infra/state-store.ts`——observations ledger 解析（丢失/指纹不符/更高 schema 一律 fail-safe 归零）、machineId 漂移检测与轮换、workspace 身份 preflight（W-1/2/4/5）、可移植设置的机器相关值检测
+  - ✅ `infra/backup-store.ts`——命名（去掉 Windows 非法字符且字典序 == 时间序）、同毫秒碰撞降级、**I1 管辖的轮转**（不可由幸存者复原的版本一律不删）
+  - ⬜ 把这些接起来的 store I/O 门面（读写 machine.json / workspaces/*.json / observations.json 的实际落盘路径）——纯逻辑与格式已就绪，剩下的是 FsGateway 调用编排，可与批 3 的 SyncEngine 一起做
   - 批 1 已经把接口形状定下来了：`FsGateway` 的写方法只收 `SafeAbsolutePath`（`src/domain/types.ts`），`PathGuard` 是**唯一**能铸造它的地方（lint 已强制，见 `eslint-rules.test.ts` 的 branded-path 组）
   - E0 签名按**分量**存进 ledger，不要只存 sha256——未来 mtime 的降级路径需要"剔除 mtime 后重算"，只有摘要就做不到（`src/domain/stability.ts` 顶部有说明）
 - ⬜ **批 3 · SyncEngine + L2**：九阶段 pass、VO 协议、双 replica world、S-01…S-20、崩溃点矩阵 R-01…R-13、I1/I2 属性测试

@@ -233,3 +233,25 @@ export async function probeCaseSensitivity(
     await fs.removeFile(lower).catch(() => undefined);
   }
 }
+
+/**
+ * Mints a path inside this plugin's own home state directory (§5.5).
+ *
+ * A legitimate second minting site alongside `resolveUnderRoot`, and worth
+ * naming rather than casting inline: these paths are *constructed* by the
+ * plugin from the OS home directory, not received from a sync folder or an
+ * adapter, so the containment walk has nothing to check. What still has to be
+ * checked is that nobody has built a path out of untrusted text — hence the
+ * explicit root containment test rather than a bare cast.
+ */
+export function mintStatePath(
+  deps: PathGuardDeps,
+  stateRoot: string,
+  absoluteTarget: string,
+): Result<SafeAbsolutePath> {
+  if (absoluteTarget.includes("\0")) return err("NUL_OR_CONTROL", "state path");
+  if (!containsPath(deps, stateRoot, absoluteTarget)) {
+    return err("ROOT_OVERLAP", "state path outside the state root");
+  }
+  return ok(absoluteTarget as SafeAbsolutePath);
+}
