@@ -44,7 +44,12 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
 
 ## 下一步：M1（依据 review §9 与两份文档）
 
-- **批 1 · 领域层纯函数**：`path-escape`（实测样本表驱动，`EXPECTED_UNVERIFIED = 0`）→ `path-safety` → `merge-policy`（isPrefix / tailState）→ `stability` → `planner`（决策表全组合穷举；U-07 与 U-18 是全项目最重要的两条测试）
+- **批 1 · 领域层纯函数**（进行中，5 个模块完成 3 个）：
+  - ✅ `providers/claude-code/path-escape`——实测样本表驱动，`EXPECTED_UNVERIFIED = 0` 已成立
+  - ✅ `domain/path-safety`——§8.1/§8.2 拒绝表，约 100 条用例逐条指名 violation
+  - ✅ `domain/merge-policy`——`comparePrefix` / `tailState` / 覆盖源资格；U-07 分叉用例在内
+  - ⬜ `domain/stability`——观察账本判定（testing.md §5.5）
+  - ⬜ `domain/planner`——决策表全组合穷举（§5.2；**U-18 在这里**，与 merge-policy 的 U-07 并列为全项目最重要的两条测试）
 - **批 2 · infra**：`FsGateway`（原子写、win32 跳过目录 fsync）、三处状态 store、备份（含 `backups/remote/`）、`PathGuard`
 - **批 3 · SyncEngine + L2**：九阶段 pass、VO 协议、双 replica world、S-01…S-20、崩溃点矩阵 R-01…R-13、I1/I2 属性测试
 - **批 4 · Obsidian UI** → 真机十步验收（[testing.md §9.4](docs/zh-CN/testing.md)；两台机器的 `~/aiss-probe` 都还留着可复用）
@@ -123,7 +128,7 @@ M0 的自检把"门禁本身能不能拦住东西"验完了，但下面几项**�
 
 | 项 | 什么时候装 | 说明 |
 |---|---|---|
-| `check:no-skip --min <n>` | `tests/m1/` 一有内容就加进 CI | 机制已就位并有用例；不设下限时"没有用例被跳过"与"整个 M1 套件不再被收集"是同一行绿字 |
+| ~~`check:no-skip --min`~~ | ✅ 已装（`--min 100`，当前 162 条） | 加测试时不必调它；只有**大幅**扩容后才值得提高下限 |
 | Q-32 Windows 执行数 ≥ ubuntu 的 95% | M1 收尾 | 目前无任何实现；需要跨 job 比对 `reports/vitest.json` |
 | type-aware lint | 批 2 起 | `@typescript-eslint/no-floating-promises` 才能挡住漏写 `await this.barrier(...)`；需要开 `projectService`，会拖慢 lint，值得 |
 | §11.2 `PassReport` 字段禁令 | 批 3 | 类型层禁止 `content` / `buffer` / `bytes` / `lines: string[]` / `sample` / `head` / `tail`，配 `expectTypeOf` 断言 |
