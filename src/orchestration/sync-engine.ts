@@ -23,6 +23,7 @@
 import { type Action, type PlanInput, type SideFacts, plan } from "../domain/planner";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
 import { type E0Signature, judgeStability } from "../domain/stability";
+import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
 import type { LogicalId, PathViolation, SafeAbsolutePath } from "../domain/types";
 import type { FsGateway } from "../infra/fs-gateway";
 import type { Clock, IdGen } from "../infra/clock";
@@ -82,6 +83,10 @@ export interface EngineDeps {
    * caught, and the branded return type is what makes skipping it impossible.
    */
   readonly mintWritePath: (target: string) => Promise<MintOutcome>;
+  /** First 8 characters of this machine's id, for conflict metadata. */
+  readonly machineIdPrefix: string;
+  /** Injected so the engine stays free of Date, per testing.md §3 req 4. */
+  readonly nowIso: () => string;
 }
 
 export type MintOutcome =
@@ -224,6 +229,29 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         remoteHashPrefix: remoteFacts.observedHash ? hashPrefix(remoteFacts.observedHash) : null,
       };
 
+      // A conflict is only useful if both branches survive somewhere a user
+      // can reach them. Quarantine is a copy — neither original is touched —
+      // so a mistaken conflict costs a confusing report, not a lost branch.
+      let quarantinedId: string | undefined;
+      if (
+        decision.action === "CONFLICT" &&
+        !deps.dryRun &&
+        localBytes &&
+        remoteBytes &&
+        localFacts.observedHash &&
+        remoteFacts.observedHash
+      ) {
+        quarantinedId = await quarantineConflict(deps, {
+          logicalId: group.logicalId,
+          providerId: adapter.id,
+          localBytes,
+          remoteBytes,
+          localHash: localFacts.observedHash,
+          remoteHash: remoteFacts.observedHash,
+          extension: extensionOf(file.neutralRel),
+        });
+      }
+
       // ── P6 apply ─────────────────────────────────────────────────────────
       const applied = await applyAction(deps, barrier, {
         action: decision.action,
@@ -249,6 +277,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         evidence,
         ...(applied.backupPath ? { backupPath: applied.backupPath } : {}),
         ...(applied.errorCode ? { errorCode: applied.errorCode } : {}),
+        ...(quarantinedId ? { conflictId: quarantinedId } : {}),
       });
 
       if (applied.violation) {
@@ -426,6 +455,79 @@ async function applyAction(
   await barrier("P6:after-rename", { neutralRel: ctx.neutralRel });
 
   return { result: "APPLIED", ...(backupPath ? { backupPath } : {}) };
+}
+
+/**
+ * Copies both branches into the deterministic quarantine directory.
+ *
+ * Idempotent by construction: the directory name is derived from the two
+ * hashes, so a repeated pass over the same disagreement writes the same paths
+ * and the exclusive create simply fails — which is why a conflict does not
+ * accumulate copies and why nothing has to remember that it happened.
+ */
+async function quarantineConflict(
+  deps: EngineDeps,
+  input: {
+    logicalId: LogicalId;
+    providerId: string;
+    localBytes: Uint8Array;
+    remoteBytes: Uint8Array;
+    localHash: string;
+    remoteHash: string;
+    extension: string;
+  },
+): Promise<string | undefined> {
+  const id = conflictId(
+    { logicalId: input.logicalId, localHash: input.localHash, remoteHash: input.remoteHash },
+    (value) => deps.hashBytes(new TextEncoder().encode(value)),
+  );
+  const layout = quarantineLayout({
+    workspaceId: deps.workspaceId,
+    providerId: input.providerId,
+    conflictId: id,
+    localHash: input.localHash,
+    remoteHash: input.remoteHash,
+    extension: input.extension,
+  });
+
+  const dir = deps.joinPath(deps.replicaRoot, ...layout.dir);
+  const meta = buildConflictMeta({
+    logicalId: input.logicalId,
+    conflictId: id,
+    localHash: input.localHash,
+    remoteHash: input.remoteHash,
+    localSize: input.localBytes.length,
+    remoteSize: input.remoteBytes.length,
+    localLineCount: countLines(input.localBytes),
+    remoteLineCount: countLines(input.remoteBytes),
+    machineIdPrefix: deps.machineIdPrefix,
+    detectedAtIso: deps.nowIso(),
+  });
+
+  const writes: Array<[string, Uint8Array]> = [
+    [layout.localCopy, input.localBytes],
+    [layout.remoteCopy, input.remoteBytes],
+    [layout.meta, new TextEncoder().encode(`${JSON.stringify(meta, null, 2)}\n`)],
+  ];
+
+  for (const [name, bytes] of writes) {
+    const minted = await deps.mintWritePath(deps.joinPath(dir, name));
+    if (!minted.ok) return undefined;
+    try {
+      await deps.fs.writeFileAtomic(minted.value, bytes);
+    } catch (error) {
+      const code = errnoOf(error);
+      if (!code || !CATCHABLE_IO.has(code)) throw error;
+      return undefined; // Reported as a conflict either way; the copies failed.
+    }
+  }
+  return id;
+}
+
+function extensionOf(neutralRel: string): string {
+  const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
+  const dot = name.indexOf(".");
+  return dot === -1 ? "" : name.slice(dot);
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────

@@ -65,10 +65,13 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ✅ `tests/helpers/world.ts`——双 replica L2 world + 可编程 transport（truncate / zero-byte / mtime 策略 / drop）
   - ✅ `tests/helpers/invariants.ts`——`assertRecoverable`（I1，字节前缀语义）、I1-a/b/c
   - ✅ **U-18b 集成形态已落地**（等长 + 还原 mtime + 发散 → CONFLICT，两侧冻结）、U-07 引擎级、S-01/02/03/08/10、I2a 收敛
-  - ⬜ 崩溃点矩阵 R-01…R-13（屏障点已就位，用例待写）
-  - ⬜ I1/I2 fast-check 属性测试（`fcAssert` 与 world 都已就绪）
-  - ⬜ 冲突隔离落盘（`.quarantine/<conflictId>/`）与三条冲突命令
-  - ⬜ 就绪状态机 U-15/16/17、manifest 读写
+  - ✅ `domain/conflict.ts` + 引擎落盘——内容派生的 `conflictId`、`.quarantine/<ws>/<provider>/<id>/`、meta.json；U-13/U-20/U-21 全绿
+  - ✅ `domain/readiness.ts`——NR-1…NR-9 全表 + `AWAIT_INIT` 歧义处理；U-15/16/17 全绿
+  - ✅ 崩溃点矩阵——`crashDuringPass` 注入 `CrashSignal`（不可捕获），六个注入点各断言"重启后与从未崩溃的对照组逐字节一致"
+  - ✅ I1/I2a/I2b 属性测试（`tests/m1/property/`，nightly job 已能挑到）
+  - ⬜ manifest 读写（M-01…M-08）——planner 已经不依赖它，属于加速与审计
+  - ⬜ 三条冲突命令的 UI 接线（领域层 `resolutionAction` 已就绪，命令注册在批 4）
+  - ⬜ 锁（R-09/R-10 重叠 pass 与多窗口争锁）
 
   **批 3 首批用例认领表**（来自 [review/2](review/2_m1-batch1-domain-review.md) §4，批 1 因分层归属写不了的那些，别漏）：
 
@@ -149,7 +152,7 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 - ✅ **三平台 CI 已全绿**（2026-08-07，run 31186382661）。此前从 M0 起连续 5 次 push 都是 Linux 绿、macOS/Windows 红而没人看——**推完记得看一眼 `gh run list`**，红了五次和红了一次的修复成本差很多
   - 三个 bug 都在测试侧，且**都朝着"看起来成功"的方向失败**：Windows 上 `split(path.sep)` 让四 root 重叠检测变成空转（找不到重叠 = 通过）；`tsc --listFiles` 在 Windows 输出正斜杠而 REPO_ROOT 是反斜杠，于是 toolchain 测试报"tsc 检查了空程序"；macOS 的 `/var` → `/private/var` 让 `resolveUnderRoot` 正确地拒绝了一切（参数就叫 realRoot，测试没给 realpath）
   - 教训已固化：`path-guard` 导出 `splitPathSegments`（两种分隔符都吃），别让每个调用方自己写一个
-- ⬜ branch protection 的 required checks 还没配（Q-30 要求三平台 job 名进去），否则门禁只是提示
+- ⚠️ **branch protection 在私有仓库上不生效**：已配 Rulesets，但 GitHub 提示私有仓库需 Team 组织账户才强制执行。在仓库转公开或升级前，**门禁的实际强制点是本地 `npm run verify` + 推完看 `gh run list`**，不是 GitHub
 
 ### M1 期间必须补上的门禁欠账
 

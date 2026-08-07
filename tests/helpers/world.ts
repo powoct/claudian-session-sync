@@ -27,7 +27,13 @@ import {
   type MintOutcome,
   runPass,
 } from "../../src/orchestration/sync-engine";
-import type { Barrier, PassReport } from "../../src/orchestration/pass-report";
+import {
+  type Barrier,
+  CrashSignal,
+  type HookPoint,
+  type PassReport,
+  isCrashSignal,
+} from "../../src/orchestration/pass-report";
 import { removeTree } from "./fs-cleanup";
 
 export type MachineName = "A" | "B";
@@ -175,6 +181,29 @@ export class Machine {
     return runPass(this.engineDeps(options));
   }
 
+  /**
+   * Runs a pass that dies at `at`, the way a killed process would.
+   *
+   * The signal is not an Error, so nothing in the engine can catch it — commit
+   * never runs, and no in-process state survives. Returns the signal so a test
+   * can assert *where* it died rather than merely that it did.
+   */
+  async crashDuringPass(at: HookPoint): Promise<CrashSignal> {
+    const barrier: Barrier = async (point) => {
+      if (point === at) throw new CrashSignal(point);
+    };
+    try {
+      await this.pass({ barrier });
+    } catch (error) {
+      if (isCrashSignal(error)) {
+        this.restart(); // The process is gone; so is everything it remembered.
+        return error;
+      }
+      throw error;
+    }
+    throw new Error(`expected a crash at ${at}, but the pass completed`);
+  }
+
   private engineDeps(options: { dryRun?: boolean; barrier?: Barrier }): EngineDeps {
     const fs = createNodeFsGateway({
       ids: sequentialIdGen(),
@@ -222,6 +251,8 @@ export class Machine {
       hashBytes: sha256,
       backup: async (request) => this.writeBackup(request),
       mintWritePath: async (target) => this.mint(target),
+      machineIdPrefix: this.name === "A" ? "aaaaaaaa" : "bbbbbbbb",
+      nowIso: () => new Date(this.clock.nowMs()).toISOString(),
     };
   }
 
