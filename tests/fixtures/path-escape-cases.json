@@ -1,0 +1,112 @@
+{
+  "$comment": [
+    "Measured samples for Claude Code's project-directory escape rule (OQ-3, 2026-08-06).",
+    "Every entry is real output from a real CLI on a real machine; see",
+    "docs/zh-CN/findings/2026-08-06-spike-conclusions.md.",
+    "",
+    "The `input` field is a REALPATH, not the path a user typed: the CLI resolves",
+    "symlinks before escaping (see the /private/tmp entry).",
+    "",
+    "Usernames are rewritten to `testuser` (the original probes ran under a real",
+    "account). The rule is a per-character mapping, so substituting the username",
+    "changes input and expected output in lockstep and tests nothing differently.",
+    "",
+    "`verified: false` entries are permitted for future CLI versions or new",
+    "providers, but EXPECTED_UNVERIFIED in the test file must be 0 for M1 exit."
+  ],
+  "cases": [
+    {
+      "input": "/home/testuser/projects/claudian-session-sync",
+      "expected": "-home-testuser-projects-claudian-session-sync",
+      "platform": "linux",
+      "verified": true,
+      "source": "measured",
+      "note": "plain POSIX path; leading / becomes a leading dash"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/plain",
+      "expected": "-Users-testuser-aiss-probe-plain",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/with space",
+      "expected": "-Users-testuser-aiss-probe-with-space",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "space collides with hyphen — escaping is not reversible"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/my.vault",
+      "expected": "-Users-testuser-aiss-probe-my-vault",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "dot collides with hyphen too"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/中文目录",
+      "expected": "-Users-testuser-aiss-probe-----",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "each non-ASCII character becomes one dash; equal-length CJK names collide"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/a_b (c)",
+      "expected": "-Users-testuser-aiss-probe-a-b--c-",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "underscore and parentheses are not preserved"
+    },
+    {
+      "input": "/Users/testuser/aiss-probe/UPPER-Case",
+      "expected": "-Users-testuser-aiss-probe-UPPER-Case",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "case is preserved at the character level"
+    },
+    {
+      "input": "/private/tmp/aiss-probe-outside",
+      "expected": "-private-tmp-aiss-probe-outside",
+      "platform": "darwin",
+      "verified": true,
+      "source": "measured",
+      "note": "the session was opened in /tmp; the CLI escaped the realpath, /private/tmp"
+    },
+    {
+      "input": "C:\\Users\\testuser\\aiss-probe\\plain",
+      "expected": "C--Users-testuser-aiss-probe-plain",
+      "platform": "win32",
+      "verified": true,
+      "source": "measured",
+      "note": "drive colon and the following backslash produce the C-- prefix"
+    },
+    {
+      "input": "C:\\Users\\testuser\\aiss-probe\\my.vault",
+      "expected": "C--Users-testuser-aiss-probe-my-vault",
+      "platform": "win32",
+      "verified": true,
+      "source": "measured"
+    },
+    {
+      "input": "C:\\Users\\testuser\\aiss-probe\\中文目录",
+      "expected": "C--Users-testuser-aiss-probe-----",
+      "platform": "win32",
+      "verified": true,
+      "source": "measured"
+    },
+    {
+      "input": "D:\\aiss-probe\\plain",
+      "expected": "D--aiss-probe-plain",
+      "platform": "win32",
+      "verified": true,
+      "source": "measured",
+      "note": "non-system drive behaves identically"
+    }
+  ]
+}

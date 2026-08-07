@@ -22,7 +22,7 @@
     "check:secrets": "node scripts/check-secrets.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "check:manifest": "node scripts/check-manifest.mjs",
-    "check:no-skip": "node scripts/check-no-skip.mjs",
+    "check:no-skip": "node scripts/check-no-skip.mjs --min 100",
     "check:bundle": "vitest run --config vitest.build.config.mts",
     "verify": "npm run check:pinned-deps && npm run typecheck && npm run lint && npm run check:secrets && npm run check:docs && npm test && npm run build && npm run check:bundle && npm run check:manifest && npm run check:no-skip"
   },
