@@ -734,7 +734,7 @@ const evilAdapter: ProviderAdapter = {
 | SEC-01 | replica 里 `<sid>.jsonl` 是指向 `~/.claude/.credentials.json` 的 symlink | `lstat` 检出 → **拒绝，不解引用、不复制内容**；报告 `SYMLINK` |
 | SEC-02 | 本机 session 目录里的 `<sid>.jsonl` 是 symlink | push 时同样拒绝，不跟随 |
 | SEC-03 | replica 里 `<workspaceId>/claude-code` 整个是指向 vault 的 symlink 目录 | 逐级 `lstat` 检出 → 拒绝整棵子树 |
-| SEC-04 | Windows junction / reparse point 指向 `%USERPROFILE%` | 同 SEC-03（`fs.symlink(target, path, "junction")` 构造；非 Windows 用 symlink 目录代替并标注）⚠️ 依赖 OQ-9 |
+| SEC-04 | Windows junction / reparse point 指向 `%USERPROFILE%` | 同 SEC-03。**OQ-9 已实证 ✅**：`lstat().isSymbolicLink()` 对 junction（`mklink /J` 与 `fs.symlink(target, path, "junction")` 两种构造）都返回 true，因此断言直接用 lstat，无需 reparse tag 探测；非 Windows 用 symlink 目录代替并标注。**另注**：`realpath` 不展开 8.3 短名，字符串层的 `SHORTNAME_LIKE` 拒绝是唯一防线（见 §8.1） |
 | SEC-05 | 本机 session 文件与凭证文件是**硬链接**（同 inode） | `nlink > 1` → 拒绝 push + 报 `HARDLINK_SUSPECT`；备份必须用 **copy 而非 link**，断言备份文件 inode 与源不同 |
 | SEC-06 | 路径中间某级在 stat 之后被换成 symlink（TOCTOU） | 写入用 `O_NOFOLLOW`（POSIX）/ 打开后复核 `fstat` 的 dev+ino，不匹配则中止 |
 

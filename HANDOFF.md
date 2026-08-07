@@ -14,12 +14,12 @@
 | 按审核意见改版（第 2 版） | ✅ | 全部 finding 已落实或显式拒绝（拒绝理由见 testing.md 附录 A）；两轮独立核查（覆盖率 + 一致性）报出的 31 处问题已修完 |
 | 真机探测套件 | ✅ | `tmp/probe/`（不入库）；经安全审查修掉 3 个泄漏级 bug 后交付 |
 | **macOS + Windows 真机探测** | ✅ | 原始报告与逐条判定归档在 [docs/zh-CN/findings/](docs/zh-CN/findings/)；结论已回填两份文档 |
-| **M0 脚手架** | ✅ **完成** | G-01…G-11 全部交付并自检；`npm run verify` 本地全绿（61 条测试）。落地清单见 [testing.md §12.7](docs/zh-CN/testing.md) |
+| **M0 脚手架** | ✅ **完成** | G-01…G-11 全部交付并自检；`npm run verify` 本地全绿（`npm test` 102 条 + `check:bundle` 20 条）。落地清单见 [testing.md §12.7](docs/zh-CN/testing.md) |
 | M1 | ❌ 未开始 | — |
 
 ### M0 交付了什么
 
-工具链 exact pin（Node 20.20.2 / TS 5.9.3 / vitest 4.1.10 / esbuild 0.28.1 / ESLint 10.8.0 / fast-check 4.9.0），三平台 CI，七个 `check:*` 门禁脚本，bundle 三层合同测试，覆盖率强制，`.gitattributes` 行尾锁定。
+工具链 exact pin（Node 20.20.2 / TS 5.9.3 / vitest 4.1.10 / esbuild 0.28.1 / ESLint 10.8.0 / fast-check 4.9.0），三平台 CI，六个 `check:*` 门禁（五个是 `scripts/check-*.mjs`，`check:bundle` 是一份独立 vitest 配置），bundle 三层合同测试，覆盖率强制，`.gitattributes` 行尾锁定。
 
 **M0 的核心不是"配置文件写好了"，而是每条门禁都被喂过应当拦下的输入**——lint 规则、门禁脚本、覆盖率门槛、反例产物各有一组自检（[tests/README.md](tests/README.md)）。一条从未见过它报错的门禁，和一条条件写反了的门禁，长得一模一样。
 
@@ -77,7 +77,7 @@ docs/zh-CN/findings/             真机探测归档：两份原始报告 + spike
 review/                          第三方审核报告（设计决策的原始依据，已入库）
 
 src/main.ts                      Obsidian 入口，纯装配骨架
-scripts/                         构建与七个门禁脚本；每个都吃 --root 参数，好让自检指向临时目录
+scripts/                         构建脚本与五个门禁脚本；门禁都吃 --root 参数，好让自检指向临时目录
   build.mjs                        esbuild → main.js + dist/meta.json（--dev 进 watch）
   lib/gate.mjs                     门禁公共约定：退出码、违规汇总输出、--root/--report 解析
 tests/README.md                  哪个目录受哪条门禁约束——加测试前先看这张表

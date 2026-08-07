@@ -620,17 +620,17 @@ interface ProviderAdapter {
 
 | 事实 | 影响 |
 |---|---|
-| rollout 是 jsonl，末尾有 LF，首行 `{"type":"session_meta","payload":{…}}` ✅ | 形态上适合 append-jsonl 语义，但生命周期是否 append-only **未验证** ⚠️ |
+| rollout 是 jsonl，末尾有 LF，首行 `{"type":"session_meta","payload":{…}}` ✅ | 适合 append-jsonl 语义；生命周期**已实证为严格追加** ✅（见下方 OQ-2 第 4 条，macOS 一轮；跨版本与 Windows 侧留待 M2 复测） |
 | 首行 payload 含 `cwd`、`cli_version`、`id`、`git`、`source` ✅ | 与 Claude Code 同样有**机器相关绝对路径**，§7.3 的 canonical 化约束同样适用 |
 | **文件名 ≠ logicalId**：`rollout-<ISO 时间戳>-<uuid v7>.jsonl` ✅ | Claude Code 的"文件名即 logicalId"假设**不成立**；`logicalIdPattern` 必须按 provider 定义，落位时不能简单用 `<logicalId>.jsonl` |
-| 存在**两套**索引：`session_index.jsonl` 与 `state_*.sqlite` 的 `threads` 表 ✅ | resume 到底依赖哪一个（或都不依赖、直接扫目录）是 OQ-2 的核心问题 |
+| 存在**两套**索引：`session_index.jsonl` 与 `state_*.sqlite` 的 `threads` 表 ✅ | **两套都不参与发现** ✅——OQ-2 实测为扫目录（见下）；索引只是本机派生物 |
 | `threads.rollout_path` / `cwd` 都是本机绝对路径 ✅ | 索引**绝不能跨机搬运**，只能在本机重建 |
 
 因此：
 
 1. 早期草案「`~/.codex/sessions/` 按日期分层的 jsonl」这一条**已被实测证实存在** ✅，但它**不完整**——同一份数据还被两套本机索引引用
 2. **sqlite 与 `-wal`/`-shm` 绝不能搬**：含绝对路径、非追加式、前缀合并语义完全不适用；`session_index.jsonl` 虽是 jsonl，但它是**派生索引**（`mode: "derived"`），同样不参与同步
-3. 若要支持，路径是 Tier B：搬 rollout 文件 → `reconcileLocalIndex()` 用本机路径重建索引（优先官方导入命令）
+3. ~~若要支持，路径是 Tier B：搬 rollout 文件 → `reconcileLocalIndex()` 用本机路径重建索引（优先官方导入命令）~~ **已被 OQ-2 推翻**：发现机制是扫目录，只搬 rollout 文件即可，无需任何索引重建（详见下方与 §6.5）
 
 **OQ-2 已有结论 ✅（2026-08-06 双平台实测）**：
 
@@ -832,7 +832,9 @@ Claude Code 的 jsonl 里有机器相关的 `cwd` 字段 ✅。是否在落地�
        toNeutral 的输出与机器无关              （两台机器对同一逻辑内容产出相同字节）
 ```
 
-M1 的选择：**两者都不实现（identity）**，即原样搬运、不碰 `cwd`。依据是 resume 靠目录名定位、`cwd` 只是元数据 ⚠️ —— 由 **OQ-1** 实测确认。若实测发现 `cwd` 影响 resume，再启用 canonical 化（把 workspace 路径替换成 `${AISS_WORKSPACE}` 占位符），由 round-trip property test 守住不变式。
+M1 的选择：**两者都不实现（identity）**，即原样搬运、不碰 `cwd`。**OQ-1 已实测确认 ✅**（2026-08-06，mac ↔ Windows 双向）：resume 靠目录名定位，`cwd` 只是元数据，跨平台落地后按 ID resume 历史完整、可续聊、无警告，两台机器的 `cwd` 值在同一文件里共存也无碍。
+
+保留 canonical 化的接口形状（`toNeutral` / `fromNeutral` 仍是显式的 identity 实现，不是"没有这一层"），是为了将来某个 provider 真的需要时有地方落——届时把 workspace 路径替换成 `${AISS_WORKSPACE}` 占位符，由 round-trip property test 守住上面三条不变式。
 
 ### 7.4 前缀判定算法（M1）
 
