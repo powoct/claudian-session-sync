@@ -161,6 +161,22 @@ export async function resolveUnderRoot(
   return ok(current as SafeAbsolutePath);
 }
 
+/**
+ * Splits a path into comparison segments, accepting either separator.
+ *
+ * Exported so callers do not each invent their own. Windows accepts "/" as well
+ * as "\\", and a path that arrived from a config file or a neutral layout may
+ * use either — splitting on `path.sep` alone silently yields a single segment
+ * for the other spelling, which makes every containment test answer "no". That
+ * failure is invisible: the overlap check simply stops finding overlaps.
+ *
+ * A drive letter stays its own segment, so `C:\\a` and `D:\\a` never compare
+ * equal.
+ */
+export function splitPathSegments(target: string): string[] {
+  return target.split(/[\\/]+/).filter(Boolean);
+}
+
 /** Is `candidate` the same as, or inside, `ancestor`? Segment-wise. */
 export function containsPath(deps: PathGuardDeps, ancestor: string, candidate: string): boolean {
   return isSameOrDescendant(deps.splitPath(candidate), deps.splitPath(ancestor), deps.caseSensitive);

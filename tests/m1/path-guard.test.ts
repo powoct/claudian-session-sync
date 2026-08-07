@@ -6,7 +6,7 @@
  * sync directory can reach outside the roots the user configured. Every case
  * asserts fail-closed: rejected with a named violation, never "handled".
  */
-import { mkdtempSync, promises as fsp, writeFileSync } from "node:fs";
+import { mkdtempSync, promises as fsp, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
 import {
   type PathGuardDeps,
   containsPath,
+  splitPathSegments,
   findRootOverlaps,
   isDenylisted,
   isTransferArtifact,
@@ -32,7 +33,11 @@ afterAll(() => {
 function makeRoot(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "aiss-pg-"));
   roots.push(dir);
-  return dir;
+  // resolveUnderRoot's parameter is named realRoot because it must be one.
+  // macOS hands out /var/folders/... which is a symlink to /private/var/...,
+  // and Windows can hand out an 8.3 short name — in both cases the guard would
+  // correctly refuse every path under it as having escaped its root.
+  return realpathSync.native(dir);
 }
 
 const fs = createNodeFsGateway({
@@ -48,7 +53,7 @@ const deps: PathGuardDeps = {
   caseSensitive: true,
   joinPath: (...parts) => path.join(...parts),
   dirnameOf: (target) => path.dirname(target),
-  splitPath: (target) => target.split(path.sep).filter(Boolean),
+  splitPath: splitPathSegments,
 };
 
 const isPosix = process.platform !== "win32";
@@ -70,6 +75,25 @@ describe("resolveUnderRoot — acceptance", () => {
     const root = makeRoot();
     const result = await resolveUnderRoot(deps, root, "ws/claude-code/new.jsonl");
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("resolveUnderRoot — the root must already be a realpath", () => {
+  it("refuses everything under a root that has not been resolved", async () => {
+    // Not a quirk to work around: on macOS /var/folders is a symlink to
+    // /private/var/folders, so a caller passing the unresolved path is asking
+    // about a different directory than the one the walk lands in. Failing
+    // closed is right — but it fails for every file, so it is worth having a
+    // test that names the cause.
+    const real = makeRoot();
+    const unresolved = path.join(tmpdir(), path.basename(real));
+    if (unresolved === real) return; // no symlinked tmpdir on this platform
+
+    await fsp.mkdir(path.join(real, "ws"), { recursive: true });
+    writeFileSync(path.join(real, "ws", "a.jsonl"), "x\n");
+
+    const result = await resolveUnderRoot(deps, unresolved, "ws/a.jsonl");
+    expect(result).toMatchObject({ ok: false, violation: "SYMLINK" });
   });
 });
 

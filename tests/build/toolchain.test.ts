@@ -25,10 +25,15 @@ function repoFilesInProgram(): string[] {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   });
+  // tsc prints forward slashes even on Windows, while REPO_ROOT carries the
+  // platform separator — comparing them directly yields an empty list, which
+  // looks exactly like "tsc checked nothing".
+  const root = REPO_ROOT.split("\\").join("/");
   return (result.stdout ?? "")
     .split(/\r?\n/)
-    .filter((line) => line.startsWith(REPO_ROOT) && !line.includes("node_modules"))
-    .map((line) => path.relative(REPO_ROOT, line).split(path.sep).join("/"));
+    .map((line) => line.split("\\").join("/"))
+    .filter((line) => line.startsWith(root) && !line.includes("node_modules"))
+    .map((line) => line.slice(root.length).replace(/^\//, ""));
 }
 
 describe("typecheck covers the code it is meant to guard", () => {
@@ -54,7 +59,7 @@ describe("lint covers the code it is meant to guard", () => {
     });
 
     const linted = (JSON.parse(result.stdout || "[]") as Array<{ filePath: string }>).map((entry) =>
-      path.relative(REPO_ROOT, entry.filePath).split(path.sep).join("/"),
+      path.relative(REPO_ROOT, entry.filePath).split("\\").join("/"),
     );
 
     expect(linted).toContain("src/main.ts");
