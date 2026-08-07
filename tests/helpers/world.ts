@@ -177,8 +177,30 @@ export class Machine {
     this.ledger.clear();
   }
 
-  async pass(options: { dryRun?: boolean; barrier?: Barrier } = {}): Promise<PassReport> {
-    return runPass(this.engineDeps(options));
+  /** Shared across passes on this machine, so R-09 is testable end to end. */
+  private passInFlight = false;
+  private lockEpoch = 0;
+
+  async pass(options: { dryRun?: boolean; barrier?: Barrier; withLock?: boolean } = {}): Promise<PassReport> {
+    const deps = this.engineDeps(options);
+    if (!options.withLock) return runPass(deps);
+
+    let heldEpoch = 0;
+    return runPass({
+      ...deps,
+      lock: {
+        acquire: async () => {
+          if (this.passInFlight) return { ok: false, reason: "ALREADY_RUNNING" };
+          this.passInFlight = true;
+          heldEpoch = ++this.lockEpoch;
+          return { ok: true };
+        },
+        mayWrite: async () => heldEpoch === this.lockEpoch,
+        release: async () => {
+          this.passInFlight = false;
+        },
+      },
+    });
   }
 
   /**

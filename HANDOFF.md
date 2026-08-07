@@ -3,9 +3,10 @@
 > 更新时间：2026-08-07。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：M0 完成，M1 批 1（领域层纯函数）完成并通过审核
+## 当前状态：M0 完成，M1 批 1–3 完成，剩批 4（Obsidian UI）与真机验收
 
-门禁齐备且每条都被自检过；领域层五个纯函数模块落地，[review/2](review/2_m1-batch1-domain-review.md) 判定"达到设计基线，可以进入批 2"（0 个 Blocker）。下一步是批 2 的 infra 层。
+领域层、infra 层、SyncEngine 与 L2 双 replica world 都已落地并全绿：**642 条测试、520 条 m1 阻塞用例、三平台 CI 全绿**。
+下一步是批 4 把 UI 接上，然后走 [testing.md §9.4](docs/zh-CN/testing.md) 的真机十步验收。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
@@ -16,7 +17,9 @@
 | **macOS + Windows 真机探测** | ✅ | 原始报告与逐条判定归档在 [docs/zh-CN/findings/](docs/zh-CN/findings/)；结论已回填两份文档 |
 | **M0 脚手架** | ✅ **完成** | G-01…G-11 全部交付并自检；`npm run verify` 本地全绿（`npm test` 102 条 + `check:bundle` 20 条）。落地清单见 [testing.md §12.7](docs/zh-CN/testing.md) |
 | **M1 批 1 · 领域层** | ✅ **完成** | 5 个模块，230 条 m1 用例，domain 覆盖率 98%；[review/2](review/2_m1-batch1-domain-review.md) 的建议已处理（见下） |
-| M1 批 2–4 | ⬜ 未开始 | — |
+| **M1 批 2 · infra** | ✅ **完成** | FsGateway / PathGuard / Clock / 三处 store / 备份 |
+| **M1 批 3 · SyncEngine + L2** | ✅ **基本完成** | 九阶段 pass、双 replica world、冲突隔离、就绪状态机、崩溃矩阵、manifest、锁；520 条 m1 用例 |
+| M1 批 4 · Obsidian UI | ⬜ 未开始 | — |
 
 ### M0 交付了什么
 
@@ -69,9 +72,10 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ✅ `domain/readiness.ts`——NR-1…NR-9 全表 + `AWAIT_INIT` 歧义处理；U-15/16/17 全绿
   - ✅ 崩溃点矩阵——`crashDuringPass` 注入 `CrashSignal`（不可捕获），六个注入点各断言"重启后与从未崩溃的对照组逐字节一致"
   - ✅ I1/I2a/I2b 属性测试（`tests/m1/property/`，nightly job 已能挑到）
-  - ⬜ manifest 读写（M-01…M-08）——planner 已经不依赖它，属于加速与审计
-  - ⬜ 三条冲突命令的 UI 接线（领域层 `resolutionAction` 已就绪，命令注册在批 4）
-  - ⬜ 锁（R-09/R-10 重叠 pass 与多窗口争锁）
+  - ✅ `domain/manifest.ts`——M-01…M-08 全覆盖；E0/E1/E2 证据分级 + `mayAuthoriseWrite` 类型收窄（E2 才能授权写）；更高 schemaVersion 绝不重写；未知字段读改写后仍在；坏 entry 只丢那一条
+  - ✅ `orchestration/lock.ts` + 引擎接线——R-09（同实例重叠 pass 立即 `ALREADY_RUNNING`，零写入）、R-10（陈旧锁可抢占 + **epoch 让被抢者的写入失效**）
+  - ⬜ 三条冲突命令的 UI 接线（领域层 `resolutionAction` 已就绪，命令注册属批 4）
+  - ⬜ 锁的落盘实现（纯逻辑与引擎接线已就绪，缺 FsGateway 读写 `locks/<ws>.lock` 那一层）
 
   **批 3 首批用例认领表**（来自 [review/2](review/2_m1-batch1-domain-review.md) §4，批 1 因分层归属写不了的那些，别漏）：
 

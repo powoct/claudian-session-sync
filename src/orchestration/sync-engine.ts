@@ -85,8 +85,25 @@ export interface EngineDeps {
   readonly mintWritePath: (target: string) => Promise<MintOutcome>;
   /** First 8 characters of this machine's id, for conflict metadata. */
   readonly machineIdPrefix: string;
+  /**
+   * Pass mutual exclusion (§7.4 R-09/R-10).
+   *
+   * Optional so unit-level callers need not provide one, but when present the
+   * engine refuses to start a second pass rather than queueing it, and
+   * re-checks before every write — a lock that can be stolen is only safe if
+   * the previous holder notices.
+   */
+  readonly lock?: PassLock;
   /** Injected so the engine stays free of Date, per testing.md §3 req 4. */
   readonly nowIso: () => string;
+}
+
+export interface PassLock {
+  /** Returns false when another pass holds it; the pass then does nothing. */
+  acquire(): Promise<{ readonly ok: boolean; readonly reason?: string }>;
+  /** Re-checked immediately before each write; false means we were superseded. */
+  mayWrite(): Promise<boolean>;
+  release(): Promise<void>;
 }
 
 export type MintOutcome =
@@ -134,6 +151,20 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   // A pass that cannot establish where it is writing does not write. Aborting
   // here means zero changes on both sides, which is what makes "the sync
   // directory looks empty" survivable rather than catastrophic.
+  const acquired = deps.lock ? await deps.lock.acquire() : { ok: true };
+  if (!acquired.ok) {
+    // Not queued: a second pass would plan against observations taken before
+    // the first one wrote.
+    return finish("aborted", acquired.reason ?? "lock-unavailable");
+  }
+
+  try {
+    return await runPassBody();
+  } finally {
+    await deps.lock?.release();
+  }
+
+  async function runPassBody(): Promise<PassReport> {
   await barrier("P0:preflight-done", {});
   if (deps.remoteReadiness === "unsupported-format") {
     return finish("aborted", "format-version-unsupported");
@@ -323,6 +354,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
 
   const failed = actions.filter((a) => isErrorResult(a.result)).length;
   return finish(failed === 0 ? "ok" : actions.length === failed ? "failed" : "partial");
+  }
 
   function finish(outcome: PassReport["outcome"], abortReason?: string): PassReport {
     return {
@@ -432,6 +464,12 @@ async function applyAction(
   // against. Anything else means somebody wrote while we were preparing.
   const targetNow = await observe(deps, targetPath);
   if (!sameSignature(targetPre.stat, targetNow.stat)) {
+    return { result: "ABORTED_PRECONDITION", ...(backupPath ? { backupPath } : {}) };
+  }
+
+  // The lock may have been stolen while this pass prepared. Checking here
+  // rather than only at acquisition is what makes stealing safe at all.
+  if (deps.lock && !(await deps.lock.mayWrite())) {
     return { result: "ABORTED_PRECONDITION", ...(backupPath ? { backupPath } : {}) };
   }
 
