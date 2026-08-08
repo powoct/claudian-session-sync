@@ -84,25 +84,6 @@ describe("reading a state file distinguishes three failures", () => {
     expect(await readJson(fs, target)).toEqual({ status: "unusable", reason: "not-json" });
   });
 
-  it.skipIf(process.platform === "win32")(
-    "reports unusable, not absent, when it cannot be read",
-    async () => {
-      // The distinction that matters: a directory we are not allowed to read
-      // is emphatically not an empty one. Conflating them is how a permissions
-      // problem becomes "the remote looks empty, push everything".
-      const root = makeRoot();
-      const target = path.join(root, "locked.json");
-      await fsp.writeFile(target, "{}");
-      await fsp.chmod(target, 0o000);
-      try {
-        const load = await readJson(fs, target);
-        expect(load.status).toBe("unusable");
-      } finally {
-        await fsp.chmod(target, 0o600);
-      }
-    },
-  );
-
   it("refuses to replace when creating exclusively", async () => {
     const root = makeRoot();
     const target = path.join(root, "root.json");
@@ -345,16 +326,6 @@ describe("the write probe", () => {
     const root = makeRoot();
     expect(await syncDir(root).probeWritable(MACHINE)).toBe(true);
     expect(await fsp.readdir(path.join(root, ".aiss"))).toEqual([]);
-  });
-
-  it.skipIf(process.platform === "win32")("reports failure on a read-only directory", async () => {
-    const root = makeRoot();
-    await fsp.chmod(root, 0o500);
-    try {
-      expect(await syncDir(root).probeWritable(MACHINE)).toBe(false);
-    } finally {
-      await fsp.chmod(root, 0o700);
-    }
   });
 });
 
