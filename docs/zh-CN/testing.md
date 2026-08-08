@@ -545,6 +545,34 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | X-02 | 迁移中途崩溃（`migration` 已写、文件未搬完） | 重跑迁移收敛到同一结果；恢复点存在；无 session 丢失 | M2 |
 | X-03 | manifest `schemaVersion` 高于本插件 | 文件仍正常搬运（全量扫描）；**manifest 文件字节未变**（与 L0 的 M-03 是同一语义的两层，故同属 M1） | M1 |
 
+#### M1 引擎级覆盖现状（批 3 收尾，2026-08-08）
+
+`describe` 名字里的编号就是本表的编号——**测试名与本表不一致视为缺陷**（review/3 §4.2 的教训：编号漂移让"S 矩阵已覆盖"无法被第三方核对）。
+
+| 编号 | 状态 | 落点 |
+|---|---|---|
+| S-01 / S-02 / S-03 | ✅ | `sync-engine.test.ts`（S-03 兼 U-07） |
+| S-04 / S-04b | ✅ | `quarantine.test.ts` |
+| S-05 | ✅ | `sync-engine.test.ts`（外部工具重写后先复观察再信任） |
+| S-06 / S-06c | ✅ | `sync-engine.test.ts` |
+| S-06b / S-07 | ✅ | `evidence-tiers.test.ts` |
+| S-09b | ✅ | `crash-points.test.ts`（R-06） |
+| S-12 | ✅ | `sync-engine.test.ts`（含"补齐后收敛"下半场） |
+| X-03 | ✅ | `evidence-tiers.test.ts`（引擎级）+ `manifest.test.ts` M-03（L0） |
+| U-11d / U-12b / U-12c / U-14 | ✅ | `sync-engine.test.ts` |
+| U-16 / U-17 | ✅ | `readiness.test.ts` |
+| U-18b / R-01 / R-04b / R-05 / R-06 / R-09 / R-10 | ✅ | `sync-engine.test.ts` / `crash-points.test.ts` / `lock.test.ts` |
+| S-04c | ⏳ 批 4 | `resolutionAction` 已就绪，缺命令注册与 UI 触发 |
+| S-08 / S-17 / S-18 / S-19 / S-20 | ⏳ 批 4 | 就绪状态机与 store 落盘都在，但 world 里 `remoteReadiness` 还是常量；接上组合根后这五条一起补 |
+| S-09a / R-12 | ⏳ 批 4 | 需要 `FaultyFsGateway`（按 errno 注入单文件失败） |
+| S-10 | ⏳ 批 4 | 需要 world 支持一对 replica 服务两个 workspace |
+| S-11 | ⏳ 批 4 | 需要第二个 adapter 替身；另注：当前 `healthCheck` 把"项目目录不存在"当作 provider 不可用，而这恰恰是**新机器该拉取**的情形，接组合根时一并校正 |
+| S-13 / S-28 / S-29 | ⏳ 批 4 | `classifyFileName` 的 L0 覆盖已全，缺引擎级"记录后忽略且不动源文件"的端到端断言 |
+| S-14a/b/c / S-15 / S-30 / S-30b | ⏳ M1 收尾 | 时钟差、删除不传播、公平性与饥饿提升 |
+| R-02 / R-03 / R-07 / R-08 / R-11 / R-13 | ⏳ M1 收尾 | 竞态矩阵的后半段；R-08 的残余窗口断言尤其要按"不断言无损"的口径写 |
+| S-21 | — | 已退役（OQ-8 实测） |
+| S-22…S-27 / X-01 / X-02 / R-14 | — | M2 |
+
 #### S-14：时钟差的正确断言
 
 原断言"两小时时钟差下决策结果**完全一致**"与"活跃判定依赖 `now - mtime`"自相矛盾。改为：

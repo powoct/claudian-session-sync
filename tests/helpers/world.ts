@@ -17,11 +17,22 @@ import { mkdirSync, mkdtempSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { LogicalId, SafeAbsolutePath } from "../../src/domain/types";
+import {
+  type CachedContentFacts,
+  type Manifest,
+  type ManifestEntry,
+  type ScrubTrigger,
+  emptyManifest,
+  parseManifest,
+  serialiseManifest,
+} from "../../src/domain/manifest";
+import type { FsGateway } from "../../src/infra/fs-gateway";
 import { fixedClock, sequentialIdGen } from "../../src/infra/clock";
 import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
 import { createClaudeCodeAdapter } from "../../src/providers/claude-code/adapter";
 import {
   type EngineDeps,
+  type EvidenceCache,
   type LedgerEntryView,
   type LedgerView,
   type MintOutcome,
@@ -141,6 +152,16 @@ export class Machine {
   private clock = fixedClock(1_700_000_000_000);
   private readonly ledger = new MemoryLedger();
   private readonly projectDir: string;
+  /**
+   * Stands in for the local half of `observations.json` (§5.5).
+   *
+   * In memory rather than on disk because the point of the split is *where the
+   * store lives*: this one is never synced, so `flush()` must not carry it and
+   * deleting the manifest must not touch it.
+   */
+  private readonly localEvidence = new Map<string, CachedContentFacts>();
+  /** Counts the reads a pass performs, which is how E1 is observable at all. */
+  readonly io = { readFile: 0, readTail: 0, lstat: 0 };
 
   constructor(
     readonly name: MachineName,
@@ -175,6 +196,18 @@ export class Machine {
   /** Forgets in-process state, as an Obsidian restart would. */
   restart(): void {
     this.ledger.clear();
+    this.localEvidence.clear();
+  }
+
+  resetIo(): void {
+    this.io.readFile = 0;
+    this.io.readTail = 0;
+    this.io.lstat = 0;
+  }
+
+  /** Where this machine's replica keeps the manifest (architecture §5.3). */
+  get manifestPath(): string {
+    return path.join(this.replicaRoot, ".aiss", `manifest-${WORKSPACE_ID}.json`);
   }
 
   /** Shared across passes on this machine, so R-09 is testable end to end. */
@@ -182,25 +215,102 @@ export class Machine {
   private lockEpoch = 0;
 
   async pass(options: { dryRun?: boolean; barrier?: Barrier; withLock?: boolean } = {}): Promise<PassReport> {
-    const deps = this.engineDeps(options);
-    if (!options.withLock) return runPass(deps);
+    // Load, run, write back — the real shape of a pass, and the reason this is
+    // here rather than in a mock: S-07 deletes the file between passes, so the
+    // manifest has to be genuinely read from and written to disk for that test
+    // to be testing anything.
+    const cache = await this.loadEvidence();
+    const deps = { ...this.engineDeps(options), evidence: cache };
 
-    let heldEpoch = 0;
-    return runPass({
-      ...deps,
-      lock: {
-        acquire: async () => {
-          if (this.passInFlight) return { ok: false, reason: "ALREADY_RUNNING" };
-          this.passInFlight = true;
-          heldEpoch = ++this.lockEpoch;
-          return { ok: true };
+    let report: PassReport;
+    if (!options.withLock) {
+      report = await runPass(deps);
+    } else {
+      let heldEpoch = 0;
+      report = await runPass({
+        ...deps,
+        lock: {
+          acquire: async () => {
+            if (this.passInFlight) return { ok: false, reason: "ALREADY_RUNNING" };
+            this.passInFlight = true;
+            heldEpoch = ++this.lockEpoch;
+            return { ok: true };
+          },
+          mayWrite: async () => heldEpoch === this.lockEpoch,
+          release: async () => {
+            this.passInFlight = false;
+          },
         },
-        mayWrite: async () => heldEpoch === this.lockEpoch,
-        release: async () => {
-          this.passInFlight = false;
-        },
+      });
+    }
+
+    if (!options.dryRun) await cache.persist();
+    return report;
+  }
+
+  /**
+   * Builds the pass's E1 cache from the two stores it actually has.
+   *
+   * Remote entries come from the manifest in the sync directory — untrusted,
+   * transported by `flush()`, deletable. Local entries come from this
+   * machine's own memory. A manifest that is missing or unreadable forces a
+   * full-read pass (trigger T4), which is what makes losing it cost I/O rather
+   * than correctness.
+   */
+  private async loadEvidence(): Promise<EvidenceCache & { persist(): Promise<void> }> {
+    const raw = await fsp
+      .readFile(this.manifestPath, "utf8")
+      .then((text) => JSON.parse(text) as unknown)
+      .catch(() => undefined);
+    const load = parseManifest(raw);
+    const manifest: Manifest =
+      load.status === "ok" || load.status === "migrate"
+        ? load.manifest
+        : emptyManifest(new Date(this.clock.nowMs()).toISOString());
+    const writable = load.status !== "unusable";
+    const forceFullRead = load.status !== "ok" && load.status !== "migrate";
+
+    const entries: Record<string, ManifestEntry> = { ...manifest.entries };
+    const key = (rel: string) => `${WORKSPACE_ID}/${rel}`;
+
+    // Arrow properties, not shorthand methods: `this` has to stay the machine.
+    return {
+      lookup: (rel, side) =>
+        side === "remote" ? entries[key(rel)] : this.localEvidence.get(rel),
+      scrub: (): ScrubTrigger | null => (forceFullRead ? "T4-manifest" : null),
+      record: (rel, side, facts) => {
+        if (side === "local") {
+          this.localEvidence.set(rel, facts);
+          return;
+        }
+        const previous = entries[key(rel)];
+        entries[key(rel)] = {
+          provider: rel.slice(0, rel.indexOf("/")),
+          workspaceId: WORKSPACE_ID,
+          logicalId: rel.slice(rel.lastIndexOf("/") + 1).replace(/\.jsonl$/, ""),
+          mode: "append-jsonl",
+          size: facts.e0.size,
+          lineCount: facts.lineCount,
+          contentHash: facts.contentHash,
+          e0: facts.e0,
+          lastWriter: this.name,
+          updatedAt: new Date(this.clock.nowMs()).toISOString(),
+          generation: (previous?.generation ?? 0) + 1,
+          ...(previous?.unknown ? { unknown: previous.unknown } : {}),
+        };
       },
-    });
+      persist: async () => {
+        // A manifest from a newer schema is never rewritten (§5.3.4): a newer
+        // client is demonstrably using this directory.
+        if (!writable) return;
+        const serialised = serialiseManifest(
+          { ...manifest, entries },
+          new Date(this.clock.nowMs()).toISOString(),
+        );
+        await fsp.mkdir(path.dirname(this.manifestPath), { recursive: true });
+        await fsp.writeFile(this.manifestPath, `${JSON.stringify(serialised, null, 2)}\n`);
+      },
+    };
   }
 
   /**
@@ -227,12 +337,15 @@ export class Machine {
   }
 
   private engineDeps(options: { dryRun?: boolean; barrier?: Barrier }): EngineDeps {
-    const fs = createNodeFsGateway({
-      ids: sequentialIdGen(),
-      platform: process.platform,
-      pid: process.pid,
-      sleep: async () => undefined,
-    });
+    const fs = countingGateway(
+      createNodeFsGateway({
+        ids: sequentialIdGen(),
+        platform: process.platform,
+        pid: process.pid,
+        sleep: async () => undefined,
+      }),
+      this.io,
+    );
 
     const adapter = createClaudeCodeAdapter({
       providerRoot: this.localRoot,
@@ -388,6 +501,32 @@ class MemoryLedger implements LedgerView {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Wraps a gateway to count reads.
+ *
+ * Without this, E1 is unobservable: a pass that reads every file and one that
+ * reads none produce the same report and the same bytes on disk. The whole
+ * point of the cache is the I/O it does not do, so the I/O is what gets
+ * asserted.
+ */
+function countingGateway(inner: FsGateway, counts: { readFile: number; readTail: number; lstat: number }): FsGateway {
+  return {
+    ...inner,
+    async lstat(target) {
+      counts.lstat++;
+      return inner.lstat(target);
+    },
+    async readFile(target) {
+      counts.readFile++;
+      return inner.readFile(target);
+    },
+    async readTail(target, n) {
+      counts.readTail++;
+      return inner.readTail(target, n);
+    },
+  };
+}
+
 /** Same character mapping as the real rule, applied to a test path. */
 function escapeForTest(absolutePath: string): string {
   let out = "";
@@ -434,9 +573,19 @@ async function copyTree(
   }
 }
 
+/**
+ * Walks a tree into the inventory the invariants are checked against.
+ *
+ * `.aiss/` is skipped deliberately. I1 says no *version of a session* may
+ * become unrecoverable; the manifest is a cache whose entire design is that
+ * losing it costs a slow pass and nothing else, so every rewrite of it would
+ * otherwise register as a version destroyed and I1 would be asserting the
+ * opposite of what the manifest is for.
+ */
 async function collect(root: string, prefix: string, into: Map<string, Version>): Promise<void> {
   const entries = await fsp.readdir(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
+    if (entry.name === ".aiss") continue;
     const full = path.join(root, entry.name);
     if (entry.isDirectory()) {
       await collect(full, `${prefix}/${entry.name}`, into);

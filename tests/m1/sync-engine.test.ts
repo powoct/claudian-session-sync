@@ -101,7 +101,56 @@ describe("S-02: continuing a conversation on the second machine", () => {
   });
 });
 
-describe("S-03: an unchanged session does nothing", () => {
+/**
+ * R-04b — the write window of a `*_NEW` action.
+ *
+ * `PULL_NEW` asserts the local file does not exist, and A8 confirmed that a few
+ * syscalls earlier. The gap that remains is not exotic: starting a conversation
+ * on this machine is exactly what creates a session file. A replacing rename
+ * would destroy it silently and with no backup — `*_NEW` never takes one,
+ * because by its own premise there is nothing to preserve.
+ *
+ * So the premise is enforced where nothing can slip in behind it: the syscall.
+ */
+describe("R-04b: the local CLI creates the same file during a PULL_NEW", () => {
+  it("loses the race rather than the file", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(10);
+    await settle(a);
+    await w.flush("A", "B");
+
+    // First pass observes; the second is the one that would write.
+    await b.pass();
+
+    const theirs = '{"uuid":"local","type":"user","text":"typed on B"}\n';
+    let injected = false;
+    const report = await b.pass({
+      barrier: async (point) => {
+        // Inside W1: A8 has passed, the rename has not happened yet.
+        if (point !== "P6:before-rename" || injected) return;
+        injected = true;
+        await b.cli.session(SID).appendRaw(theirs);
+      },
+    });
+
+    expect(injected, "the barrier must have fired, or this asserts nothing").toBe(true);
+
+    const entry = report.actions.find((x) => x.action === "PULL_NEW");
+    expect(entry?.result).toBe("ABORTED_PRECONDITION");
+    // What the user typed is still there, byte for byte.
+    expect(Buffer.from(await b.cli.session(SID).bytes()).toString("utf8")).toBe(theirs);
+
+    // And the next pass resolves it with bytes, which is the right machinery
+    // for two real files — this pass simply was not it.
+    const next = await settle(b);
+    expect(next.actions.map((x) => x.action)).not.toContain("PULL_NEW");
+  });
+});
+
+describe("a converged session does nothing", () => {
   it("reaches NOOP and stays there", async () => {
     const w = newWorld();
     const a = w.machine("A");
@@ -176,7 +225,7 @@ describe("U-18b: same size, same mtime, divergent content", () => {
   });
 });
 
-describe("U-07 at the engine level: a fork is never resolved by overwriting", () => {
+describe("S-03 / U-07: a fork is never resolved by overwriting", () => {
   it("reports CONFLICT even though one branch is longer", async () => {
     const w = newWorld();
     const a = w.machine("A");
@@ -210,7 +259,7 @@ describe("U-07 at the engine level: a fork is never resolved by overwriting", ()
   });
 });
 
-describe("S-08: a half-transferred file is never treated as content", () => {
+describe("S-12: a half-transferred file is never treated as content", () => {
   it("defers rather than landing a truncated record", async () => {
     const w = newWorld();
     const a = w.machine("A");
@@ -232,9 +281,87 @@ describe("S-08: a half-transferred file is never treated as content", () => {
     expect(landed.length, "a truncated record must not land").toBe(0);
     assertRecoverable(before, after);
   });
+
+  it("converges once the rest of the file arrives", async () => {
+    // Deferring is only the right answer if it ends. A file that stays
+    // deferred after a complete delivery is a stall, not caution.
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(10);
+    await settle(a);
+    const complete = await a.cli.session(SID).hash();
+
+    const full = await read(replicaFile(a));
+    await w.flush("A", "B", { truncateBytes: full.length - 15 });
+    await settle(b);
+
+    await w.flush("A", "B");
+    const report = await settle(b);
+
+    expect(report.actions.map((x) => x.action)).toContain("PULL_NEW");
+    expect(await b.cli.session(SID).hash()).toBe(complete);
+  });
 });
 
-describe("S-10: a zero-byte delivery never overwrites content", () => {
+/**
+ * U-11d — deferring forever is a failure mode, not a safe default.
+ *
+ * A truncated tail defers, and that is right while a transfer is in flight.
+ * But a file that has been deferring for five passes is not mid-transfer, it
+ * is broken, and from a report that only ever says DEFER the two are
+ * indistinguishable. The point of the counter is to make them distinguishable
+ * to the person who can act on it.
+ */
+describe("U-11d: a tail that stays broken becomes visible", () => {
+  it("keeps deferring, and says so out loud after five passes", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(10);
+    await settle(a);
+    const full = await read(replicaFile(a));
+    await w.flush("A", "B", { truncateBytes: full.length - 15 });
+
+    let notice: string | undefined;
+    let passes = 0;
+    for (; passes < 12 && notice === undefined; passes++) {
+      const report = await b.pass();
+      // Whatever else happens, it never stops being a DEFER.
+      for (const action of report.actions) expect(action.action).toBe("DEFER");
+      notice = report.notices.find((line) => line.includes("incomplete"));
+    }
+
+    expect(notice, "a permanently broken tail must reach the user").toBeDefined();
+    expect(notice).toContain(`claude-code/${SID}.jsonl`);
+    // Not on the first pass either — that would make every mid-transfer file
+    // shout, and a warning that fires constantly is one nobody reads.
+    expect(passes).toBeGreaterThan(5);
+    expect((await b.cli.session(SID).bytes()).length).toBe(0);
+  });
+
+  it("forgets the streak as soon as one pass sees a whole record", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(10);
+    await settle(a);
+    const full = await read(replicaFile(a));
+    await w.flush("A", "B", { truncateBytes: full.length - 15 });
+    for (let i = 0; i < 4; i++) await b.pass();
+
+    await w.flush("A", "B");
+    for (let i = 0; i < 4; i++) {
+      const report = await b.pass();
+      expect(report.notices.filter((line) => line.includes("incomplete"))).toEqual([]);
+    }
+  });
+});
+
+describe("U-12c: a zero-byte delivery never overwrites content", () => {
   it("defers instead of emptying the local file", async () => {
     const w = newWorld();
     const a = w.machine("A");
@@ -258,7 +385,7 @@ describe("S-10: a zero-byte delivery never overwrites content", () => {
   });
 });
 
-describe("an externally rewritten file is re-observed before it is trusted", () => {
+describe("S-05: an externally rewritten file is re-observed before it is trusted", () => {
   it("defers once after the sync tool touches it, then settles", async () => {
     const w = newWorld();
     const a = w.machine("A");
@@ -280,6 +407,103 @@ describe("an externally rewritten file is re-observed before it is trusted", () 
 
     const second = await b.pass();
     expect(second.actions.map((x) => x.action)).toEqual(["NOOP"]);
+  });
+});
+
+describe("S-06: the transport is slow", () => {
+  it("does nothing at all until the file actually arrives", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(7);
+    await settle(a);
+
+    // Three passes on B while the delivery is still in flight.
+    const before = await w.snapshot();
+    for (let i = 0; i < 3; i++) {
+      const report = await b.pass();
+      expect(report.actions, "nothing has arrived, so there is nothing to say").toEqual([]);
+    }
+    const after = await w.snapshot();
+    expect([...after.live.keys()].sort()).toEqual([...before.live.keys()].sort());
+
+    await w.flush("A", "B");
+    await settle(b);
+    expect(await b.cli.session(SID).hash()).toBe(await a.cli.session(SID).hash());
+  });
+});
+
+describe("S-06c: the same file is delivered three times", () => {
+  it("ends where delivering it once would have", async () => {
+    // Sync tools re-deliver. If a repeat did anything a single delivery does
+    // not, every network hiccup would become a divergence.
+    const once = newWorld();
+    const onceA = once.machine("A");
+    const onceB = once.machine("B");
+    await onceA.cli.session(SID).append(9);
+    await settle(onceA);
+    await once.flush("A", "B");
+    await settle(onceB);
+    const expected = await onceB.cli.session(SID).hash();
+    await once.dispose();
+
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+    await a.cli.session(SID).append(9);
+    await settle(a);
+    for (let i = 0; i < 3; i++) {
+      await w.flush("A", "B");
+      await settle(b);
+    }
+
+    expect(await b.cli.session(SID).hash()).toBe(expected);
+    const settled = await b.pass();
+    expect(settled.actions.map((x) => x.action)).toEqual(["NOOP"]);
+  });
+});
+
+describe("U-12b: a zero-byte local file is overwritten, and backed up first", () => {
+  it("keeps the empty version even though there is nothing in it", async () => {
+    // The rule has no exception for "there was nothing worth keeping". Deciding
+    // per file which versions deserve a backup is how the one that mattered
+    // gets skipped, so zero bytes is backed up like anything else.
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+
+    await a.cli.session(SID).append(10);
+    await settle(a);
+    const content = await a.cli.session(SID).hash();
+    await w.flush("A", "B");
+
+    // B has an empty file of the same name — a CLI that created it and never
+    // wrote, or a placeholder somebody left behind.
+    await fsp.writeFile(b.cli.session(SID).filePath, "");
+    const report = await settle(b);
+
+    const entry = report.actions.find((x) => x.action === "PULL_OVERWRITE");
+    expect(entry?.result).toBe("APPLIED");
+    expect(await b.cli.session(SID).hash()).toBe(content);
+
+    expect(entry?.backupPath, "an overwrite without a backup violates I1").toBeDefined();
+    const backed = await fsp.stat(entry?.backupPath as string);
+    expect(backed.size, "the zero-byte version is what was overwritten").toBe(0);
+    assertEveryOverwriteBacked(report);
+  });
+});
+
+describe("U-14: nothing to do", () => {
+  it("reports an empty action list rather than failing", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+
+    const report = await a.pass();
+
+    expect(report.outcome).toBe("ok");
+    expect(report.actions).toEqual([]);
+    expect(report.violations).toEqual([]);
   });
 });
 

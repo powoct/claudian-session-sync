@@ -61,6 +61,23 @@ export interface FsGateway {
    * which a crash loses the file outright.
    */
   writeFileAtomic(path: SafeAbsolutePath, bytes: Uint8Array, options?: WriteOptions): Promise<void>;
+  /**
+   * Same, but refuses to replace an existing target (architecture §9.2.1 A9).
+   *
+   * This is what the `*_NEW` actions must use. Their whole premise is "nothing
+   * is there", and a replacing rename turns that premise being wrong into a
+   * silently destroyed file — the target could be a session the local CLI
+   * created a millisecond after the last look. Making it fail at the syscall
+   * is the only check with no window behind it.
+   *
+   * Returns an outcome rather than throwing on `target-exists`, because that
+   * is a normal race to be replanned next pass, not an I/O failure.
+   */
+  writeFileNoReplace(
+    path: SafeAbsolutePath,
+    bytes: Uint8Array,
+    options?: WriteOptions,
+  ): Promise<WriteOutcome>;
   mkdirp(path: SafeAbsolutePath, mode?: number): Promise<void>;
   removeFile(path: SafeAbsolutePath): Promise<void>;
   /** Copies bytes, never links: a hard link would share an inode with the source. */
@@ -79,6 +96,17 @@ export interface WriteOptions {
 export type RenameOutcome =
   | { readonly ok: true; readonly noReplaceEnforced: boolean }
   | { readonly ok: false; readonly reason: "target-exists" | "io-error"; readonly code?: string };
+
+/**
+ * The result of a no-replace write.
+ *
+ * `noReplaceEnforced: false` means the platform could not give us the
+ * guarantee (no hard links on this filesystem) and the write fell back to a
+ * replacing rename. The caller must report that rather than swallow it: it is
+ * the difference between "nothing could have been overwritten" and "the last
+ * look was the only guard".
+ */
+export type WriteOutcome = RenameOutcome;
 
 /** Windows retry schedule for EPERM/EBUSY (architecture §9.2). */
 export const RENAME_RETRY_DELAYS_MS = [100, 300, 900] as const;

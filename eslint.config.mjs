@@ -310,6 +310,31 @@ export default tseslint.config(
   },
 
   {
+    // Type-aware rules. These need a TypeScript program, which the syntactic
+    // rules above do not, so they are scoped to files that really exist —
+    // `tests/build/eslint-rules.test.ts` lints *virtual* paths through the same
+    // config, and the project service cannot type-check a file that is not on
+    // disk. `disableTypeChecked` below is what keeps those runs working.
+    //
+    // `no-floating-promises` is the one that matters here: almost everything in
+    // this plugin is an async filesystem call inside a longer async function,
+    // and a dropped `await` there does not fail — it reorders a write past the
+    // check that was supposed to guard it.
+    files: ["src/**/*.{ts,mts,cts}", "tests/**/*.{ts,mts,cts}"],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/await-thenable": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+    },
+  },
+
+  {
     // Gate scripts and build tooling are plain Node ESM, not part of the plugin.
     files: ["scripts/**/*.mjs", "*.mjs"],
     languageOptions: { globals: { ...globals.node } },

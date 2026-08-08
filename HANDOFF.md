@@ -1,11 +1,11 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-07。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-08。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：M0 完成，M1 批 1–3 完成，剩批 4（Obsidian UI）与真机验收
+## 当前状态：M0 完成，M1 批 1–3 完成（含 review/3 整改），剩批 4（Obsidian UI）与真机验收
 
-领域层、infra 层、SyncEngine 与 L2 双 replica world 都已落地并全绿：**642 条测试、520 条 m1 阻塞用例、三平台 CI 全绿**。
+领域层、infra 层、SyncEngine 与 L2 双 replica world 都已落地并全绿：**665 条测试、541 条 m1 阻塞用例**。
 下一步是批 4 把 UI 接上，然后走 [testing.md §9.4](docs/zh-CN/testing.md) 的真机十步验收。
 
 | 阶段 | 状态 | 产物 |
@@ -18,7 +18,8 @@
 | **M0 脚手架** | ✅ **完成** | G-01…G-11 全部交付并自检；`npm run verify` 本地全绿（`npm test` 102 条 + `check:bundle` 20 条）。落地清单见 [testing.md §12.7](docs/zh-CN/testing.md) |
 | **M1 批 1 · 领域层** | ✅ **完成** | 5 个模块，230 条 m1 用例，domain 覆盖率 98%；[review/2](review/2_m1-batch1-domain-review.md) 的建议已处理（见下） |
 | **M1 批 2 · infra** | ✅ **完成** | FsGateway / PathGuard / Clock / 三处 store / 备份 |
-| **M1 批 3 · SyncEngine + L2** | ✅ **基本完成** | 九阶段 pass、双 replica world、冲突隔离、就绪状态机、崩溃矩阵、manifest、锁；520 条 m1 用例 |
+| **M1 批 3 · SyncEngine + L2** | ✅ **完成** | 九阶段 pass、双 replica world、冲突隔离、就绪状态机、崩溃矩阵、manifest、锁；541 条 m1 用例 |
+| **[review/3](review/3_m1-batch2-batch3-review.md) 整改** | ✅ **完成** | §3.1/§3.2/§3.3 三个正确性问题 + §4.1/§4.2/§4.4/§4.5 的覆盖与门禁欠账（见下） |
 | M1 批 4 · Obsidian UI | ⬜ 未开始 | — |
 
 ### M0 交付了什么
@@ -77,15 +78,31 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ⬜ 三条冲突命令的 UI 接线（领域层 `resolutionAction` 已就绪，命令注册属批 4）
   - ⬜ 锁的落盘实现（纯逻辑与引擎接线已就绪，缺 FsGateway 读写 `locks/<ws>.lock` 那一层）
 
+### review/3 整改（2026-08-08）
+
+[review/3](review/3_m1-batch2-batch3-review.md) 报了 1 高、1 中高、1 中和一批覆盖缺口，全部处理完：
+
+| 项 | 处理 | 落点 |
+|---|---|---|
+| §3.1 高：`*_NEW` 用覆盖式 rename | `FsGateway.writeFileNoReplace`（stage tmp → `link`+`unlink`）；`target-exists` → `ABORTED_PRECONDITION`；无硬链接的文件系统退化前先做存在性检查并在报告标 `noReplaceUnavailable`（ADR-36） | `fs-gateway.ts` / `node-fs-gateway.ts` / `sync-engine.ts`；用例 **R-04b** |
+| §3.2 中高：引擎绕过 E1/E2 分级 | P3 接上 `EvidenceCache`。**两侧 E1 命中且 hash 相等 → 不调用 `plan()`，直接 NOOP**——EV-1 由纪律变成控制流（ADR-35）。稳态 pass 现在 0 次全文读 | `sync-engine.ts` P3；用例 `evidence-tiers.test.ts`（含 S-06b / S-07 / X-03 与"伪造 manifest 的上限"） |
+| §3.3 中：`sameSignature` 漏 `ino` | 改为复用 `stability.signaturesEqual`，引擎不再自己写一份比较 | `sync-engine.ts` |
+| §4.1 U-12b / U-14 / `malformedTail`→Notice | 全部补齐；`truncatedTailPasses` 之前**从不递增**，U-11d 在引擎里根本不可达，已修 | `sync-engine.ts`；用例 U-11d / U-12b / U-14 |
+| §4.2 S 编号漂移 | 测试名对齐 testing.md，并在 [testing.md §7.2](docs/zh-CN/testing.md) 加了一张**引擎级覆盖现状表**（含每条未覆盖项的原因） | 各 `tests/m1/*.test.ts` |
+| §4.4 §11.2 字段禁令门禁 | 装上了；**第一版是死的**——`expectTypeOf().not.toHaveProperty(name)` 在 `name` 是联合类型时不判别，往 `ActionEntry` 加 `content` 也不红。改成逐条字面量后才真正拦得住 | `tests/m1/pass-report.test.ts` |
+| §4.5 type-aware lint | `no-floating-promises` / `await-thenable` / `no-misused-promises` 已开（`projectService`）。虚拟路径的 lint 自检必须关掉这三条——project service 找不到磁盘上的文件会直接 fatal | `eslint.config.mjs` / `tests/build/eslint-rules.test.ts` |
+
+**E1 的两个来源**（架构 §5.3.1 已补）：manifest 管 replica 侧（不可信），本机 `observations.json` 管本机侧（可信）。引擎刻意不区分——两者都只能授权 NOOP，信任度差别不改变它被允许做的事。由此得出恶意 manifest 的上限：它只能伪造一半，最坏结果是"本轮什么都不做"，`evidence-tiers.test.ts` 直接把这条断言了下来（并断言删掉 manifest 触发 T4 全量读后真相会浮出来）。
+
   **批 3 首批用例认领表**（来自 [review/2](review/2_m1-batch1-domain-review.md) §4，批 1 因分层归属写不了的那些，别漏）：
 
-  | 用例 | 内容 | 为什么现在写不了 |
+  | 用例 | 内容 | 状态 |
   |---|---|---|
-  | **U-18b 集成形态** | 真实 tmpdir：写 `R0` → 等长 `R1` + `utimes` 还原 mtime → 跑 pass → 必须 `CONFLICT` | 需要 FsGateway（批 2）+ SyncEngine。**U-18 的"最重要测试"地位要求它进批 3 首批**，批 1 只有领域层那一半 |
-  | U-12b 备份断言 | 0 字节被 `PULL_OVERWRITE` 覆盖时，备份区确实有那份 0 字节备份 | 需要备份模块（批 2） |
-  | `malformedTail` → Notice | planner 打 flag，报告层要真的渲染成 `MALFORMED_TAIL` + Notice | U-11d 要求"让用户看见"，planner 不产 Notice；这一半悬在批 3/4 |
-  | U-14 | 空目录 → 空 Action 列表，不报错 | work-list 层 |
-  | U-16 / U-17 | `AWAIT_INIT` 零写入；文件数骤降 → `NOT_READY` 且不解释成"远端删了" | 就绪状态机（§9.6） |
+  | **U-18b 集成形态** | 真实 tmpdir：写 `R0` → 等长 `R1` + `utimes` 还原 mtime → 跑 pass → 必须 `CONFLICT` | ✅ `sync-engine.test.ts` |
+  | U-12b 备份断言 | 0 字节被 `PULL_OVERWRITE` 覆盖时，备份区确实有那份 0 字节备份 | ✅ `sync-engine.test.ts`（review/3 §4.1 补齐） |
+  | `malformedTail` → Notice | planner 打 flag，报告层要真的渲染成 Notice | ✅ `sync-engine.test.ts` U-11d（连带修了"计数器从不递增"这个使它不可达的 bug） |
+  | U-14 | 空目录 → 空 Action 列表，不报错 | ✅ `sync-engine.test.ts` |
+  | U-16 / U-17 | `AWAIT_INIT` 零写入；文件数骤降 → `NOT_READY` 且不解释成"远端删了" | ✅ `readiness.test.ts` |
 - **批 4 · Obsidian UI** → 真机十步验收（[testing.md §9.4](docs/zh-CN/testing.md)；两台机器的 `~/aiss-probe` 都还留着可复用）
 
 批 1 从 `path-escape` 起步的具体理由：样本表已经全部实测（[testing.md §5.1](docs/zh-CN/testing.md) 12 条 `verified: true`），是唯一一个"输入输出都已知、可以纯表驱动写完"的模块，能顺带把 `tests/m1/` 建起来让 `check:no-skip` 从"M0 空跑"转成真门禁。
@@ -133,7 +150,8 @@ tmp/probe-results/               两台真机的原始产物（gitignore；报�
 
 - **文档去处**：技术决策只写 architecture.md（改动要同步 ADR 表）；CLAUDE.md 不复述技术决策（CI 的 `check:docs` 会挡）
 - **⚠️ 的效力**：仍标 ⚠️ 的假设不得作为破坏性写入的依据，依赖它的代码路径保持只读或 dry-run
-- **manifest 只能授权 NOOP**（架构 §5.3.2 授权矩阵）；`PlanInput` 类型上不得出现 manifest 派生的 hash 字段
+- **manifest 只能授权 NOOP**（架构 §5.3.2 授权矩阵）；`PlanInput` 类型上不得出现 manifest 派生的 hash 字段。引擎层的形式是：E1 命中走的那条分支**不调用 `plan()`**（ADR-35）——别为了"复用代码"把缓存 hash 塞进 `SideFacts.observedHash`
+- **`*_NEW` 只能用 `writeFileNoReplace`**（ADR-36）。它不备份，所以"目标不存在"这个前提出错就是无备份的销毁
 - **备份不可关闭**；任何覆盖前必有备份（含 `PUSH_OVERWRITE` 前把远端旧版本存进本机 `backups/remote/`）
 - 决策方向只由字节决定，**不读任何时间戳**；时钟只用于本机稳定性观察
 - 代码 / 注释 / commit message 用英文；文档与沟通用中文
@@ -166,6 +184,7 @@ M0 的自检把"门禁本身能不能拦住东西"验完了，但下面几项**�
 |---|---|---|
 | ~~`check:no-skip --min`~~ | ✅ 已装（`--min 100`，当前 162 条） | 加测试时不必调它；只有**大幅**扩容后才值得提高下限 |
 | Q-32 Windows 执行数 ≥ ubuntu 的 95% | M1 收尾 | 目前无任何实现；需要跨 job 比对 `reports/vitest.json` |
-| type-aware lint | 批 2 起 | `@typescript-eslint/no-floating-promises` 才能挡住漏写 `await this.barrier(...)`；需要开 `projectService`，会拖慢 lint，值得 |
-| §11.2 `PassReport` 字段禁令 | 批 3 | 类型层禁止 `content` / `buffer` / `bytes` / `lines: string[]` / `sample` / `head` / `tail`，配 `expectTypeOf` 断言 |
+| store / 锁 / manifest 的落盘门面 | 批 4 早期 | 纯逻辑与格式全就绪，缺的是 FsGateway 编排。**先做这个**，否则 S-08/S-17…S-20 在真机验收前始终没有端到端证据（review/3 §4.3）。`tests/helpers/world.ts` 里已经有一份真读真写 manifest 的实现可以照搬 |
+| ~~type-aware lint~~ | ✅ 已装 | `no-floating-promises` / `await-thenable` / `no-misused-promises`，靠 `projectService`。`eslint-rules.test.ts` 的虚拟路径必须 override 关掉它们，否则 project service 会 fatal；同文件底部有一条写真文件到 `src/` 再 lint 的自检，证明它真的会红 |
+| ~~§11.2 `PassReport` 字段禁令~~ | ✅ 已装 | `tests/m1/pass-report.test.ts`。**逐条字面量写**——循环形式的 `not.toHaveProperty(name)` 永远通过 |
 | `src/ui/**` 覆盖率归属 | 批 4 | 现在 UI 落在全局 80% 门槛下，表现层按 §4 是靠 stub smoke + 人工验收的，落地时要么显式 exclude（照 `main.ts` 的先例）要么补测试——**别顺手调低全局门槛** |

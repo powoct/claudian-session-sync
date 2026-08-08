@@ -20,10 +20,11 @@
  *    CrashSignal injected by a test reaches the test instead of being absorbed
  *    as an I/O failure (testing.md §3 requirement 9).
  */
-import { type Action, type PlanInput, type SideFacts, plan } from "../domain/planner";
+import { type Action, MALFORMED_TAIL_PASSES, type PlanInput, type SideFacts, plan } from "../domain/planner";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
-import { type E0Signature, judgeStability } from "../domain/stability";
+import { type E0Signature, judgeStability, signaturesEqual } from "../domain/stability";
 import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
+import { type CachedContentFacts, type ScrubTrigger, evidenceFor } from "../domain/manifest";
 import type { LogicalId, PathViolation, SafeAbsolutePath } from "../domain/types";
 import type { FsGateway } from "../infra/fs-gateway";
 import type { Clock, IdGen } from "../infra/clock";
@@ -69,6 +70,14 @@ export interface EngineDeps {
 
   /** Ledger from the previous pass, keyed by neutralRel. Empty when lost. */
   readonly ledger: LedgerView;
+  /**
+   * Content facts remembered from earlier full reads (§5.3).
+   *
+   * Optional, and losing it costs I/O rather than correctness — which is the
+   * whole design of the manifest. Absent, every stable file is read in full,
+   * which is what this engine did before the cache existed.
+   */
+  readonly evidence?: EvidenceCache;
   /** Hash of bytes; injected because domain and infra must stay separable. */
   readonly hashBytes: (bytes: Uint8Array) => string;
   /** Backup hook; returns the path written, or null when it could not be. */
@@ -138,6 +147,30 @@ export interface LedgerView {
   local(neutralRel: string): LedgerEntryView | null;
   remote(neutralRel: string): LedgerEntryView | null;
   record(neutralRel: string, side: "local" | "remote", entry: LedgerEntryView): void;
+}
+
+/**
+ * The E1 cache (architecture §5.3), behind an interface because its two halves
+ * live in different places with different trust levels.
+ *
+ * The remote side is backed by the sync directory's manifest, which any machine
+ * and any sync tool can rewrite; the local side by this machine's observations
+ * ledger, which nothing else touches. The engine deliberately cannot tell them
+ * apart: both may authorise exactly one outcome, so a difference in trust would
+ * change nothing about what it is allowed to do with either.
+ */
+export interface EvidenceCache {
+  /** What was remembered about this side, or undefined. */
+  lookup(neutralRel: string, side: "local" | "remote"): CachedContentFacts | undefined;
+  /**
+   * Non-null forces a full read this pass regardless of the cache (§5.3.3).
+   *
+   * The caller owns the bookkeeping (ages, sampling, budgets) because it owns
+   * the file those live in; the engine only needs the verdict.
+   */
+  scrub(neutralRel: string): ScrubTrigger | null;
+  /** Records an E2 result, so the next pass can answer from two stats. */
+  record(neutralRel: string, side: "local" | "remote", facts: CachedContentFacts): void;
 }
 
 export async function runPass(deps: EngineDeps): Promise<PassReport> {
@@ -218,8 +251,48 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const remoteStable = judgeSide(deps, remoteO1, remoteO2, deps.ledger.remote(file.neutralRel), nowMs, "remote");
 
       // ── P3 index ─────────────────────────────────────────────────────────
-      // Bytes are read here and nowhere else, and the hash used for any
-      // decision comes from this read (E2). Nothing cached may substitute.
+      // What has to be read here is decided by the authorisation matrix
+      // (§5.3.2), not by convenience. E1 — "both sides still match what we
+      // remember, and we remember them agreeing" — is consulted for exactly
+      // one question, "is there nothing to do?", and it answers by *not*
+      // calling `plan()`. That is rule EV-1 as control flow: a remembered hash
+      // has no route into a branch that writes, because the only branch it can
+      // reach produces no writes at all.
+      //
+      // This is also the whole of the steady-state I/O saving: N unchanged
+      // sessions cost two stats and a tail read each, not N full reads.
+      const scrub = deps.evidence?.scrub(file.neutralRel) ?? null;
+      const localE1 = cachedE1(deps, file.neutralRel, "local", localO2, localStable.stable, scrub);
+      const remoteE1 = cachedE1(deps, file.neutralRel, "remote", remoteO2, remoteStable.stable, scrub);
+
+      if (
+        deps.remoteReadiness === "ready" &&
+        localE1 !== null &&
+        remoteE1 !== null &&
+        localE1.contentHash === remoteE1.contentHash
+      ) {
+        actions.push({
+          ...entry(group, file.neutralRel, adapter.id, "NOOP", "e1-cache-hit", "APPLIED"),
+          evidence: {
+            level: "E1/E1",
+            localLines: localE1.lineCount,
+            remoteLines: remoteE1.lineCount,
+            relation: "equal",
+            stability: "stable / stable",
+            localHashPrefix: hashPrefix(localE1.contentHash),
+            remoteHashPrefix: hashPrefix(remoteE1.contentHash),
+          },
+        });
+        // Stability accounting still runs: skipping it would reset the quiet
+        // window every pass and make the file permanently un-actionable the
+        // moment it does change.
+        recordLedger(deps, file.neutralRel, "local", localO2, nowMs, null);
+        recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, null);
+        continue;
+      }
+
+      // Bytes are read here and nowhere else, and the hash behind any decision
+      // that writes comes from this read (E2). Nothing cached may substitute.
       const localBytes = localO2.exists && localStable.stable ? await readBytes(deps, localPath) : null;
       const remoteBytes = remoteO2.exists && remoteStable.stable ? await readBytes(deps, remotePath) : null;
       await barrier("P3:bytes-read", { neutralRel: file.neutralRel });
@@ -245,13 +318,33 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         maxFileSizeBytes: deps.settings.maxFileSizeBytes,
         pullNewFastPath: false,
         hints: { remoteHadNonZeroSize: deps.ledger.remote(file.neutralRel)?.remoteHadNonZeroSize ?? false },
-        history: { truncatedTailPasses: deps.ledger.remote(file.neutralRel)?.truncatedTailPasses ?? 0 },
+        history: {
+          // Either side can be the one with the half-written record, so the
+          // count that matters is the longer of the two streaks.
+          truncatedTailPasses: Math.max(
+            deps.ledger.local(file.neutralRel)?.truncatedTailPasses ?? 0,
+            deps.ledger.remote(file.neutralRel)?.truncatedTailPasses ?? 0,
+          ),
+        },
       };
       const decision = plan(input);
       await barrier("P4:planned", { neutralRel: file.neutralRel });
+
+      // U-11d. A truncated tail defers, and deferring is correct — but a file
+      // that has been deferring for five passes is not waiting for a transfer
+      // to finish, it is broken, and the difference is invisible from a report
+      // that only ever says DEFER. So it stops being a quiet decision and
+      // becomes something the user is told about.
+      if (decision.flags.includes("malformedTail")) {
+        notices.push(
+          `${file.neutralRel}: the last record has been incomplete for ${MALFORMED_TAIL_PASSES}+ passes; ` +
+            `nothing is being copied in either direction until it is whole`,
+        );
+      }
       await barrier("P5:guarded", { neutralRel: file.neutralRel });
 
       const evidence: DecisionEvidence = {
+        level: `${byteLevel(localBytes)}/${byteLevel(remoteBytes)}`,
         localLines: localBytes ? countLines(localBytes) : null,
         remoteLines: remoteBytes ? countLines(remoteBytes) : null,
         relation,
@@ -308,6 +401,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         evidence,
         ...(applied.backupPath ? { backupPath: applied.backupPath } : {}),
         ...(applied.errorCode ? { errorCode: applied.errorCode } : {}),
+        ...(applied.noReplaceUnavailable ? { noReplaceUnavailable: true } : {}),
         ...(quarantinedId ? { conflictId: quarantinedId } : {}),
       });
 
@@ -331,20 +425,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // converged pair take three passes to report NOOP instead of one.
       const wrote = applied.result === "APPLIED";
       const pulled = decision.action === "PULL_NEW" || decision.action === "PULL_OVERWRITE";
-      recordLedger(
-        deps,
-        file.neutralRel,
-        "local",
-        wrote && pulled ? await observe(deps, localPath) : localO2,
-        nowMs,
-      );
-      recordLedger(
-        deps,
-        file.neutralRel,
-        "remote",
-        wrote && !pulled ? await observe(deps, remotePath) : remoteO2,
-        nowMs,
-      );
+      const localPost = wrote && pulled ? await observe(deps, localPath) : localO2;
+      const remotePost = wrote && !pulled ? await observe(deps, remotePath) : remoteO2;
+      recordLedger(deps, file.neutralRel, "local", localPost, nowMs, tailTruncated(localBytes));
+      recordLedger(deps, file.neutralRel, "remote", remotePost, nowMs, tailTruncated(remoteBytes));
+
+      // Remember what was read, so the next pass can skip reading it.
+      //
+      // Only when the signature and the bytes provably describe the same
+      // instant: for a read that is `readStillValid` (O2 == O3), and for a
+      // write it is the bytes we just wrote against a stat taken immediately
+      // after, accepted only if the size still matches. A pair recorded across
+      // somebody else's append would make two divergent files look equal until
+      // the next scrub — which is exactly the residual risk §5.3.3 exists for,
+      // and there is no reason to feed it.
+      const source = pulled ? remoteBytes : localBytes;
+      recordEvidence(deps, file.neutralRel, "local", localPost, wrote && pulled ? source : readStillValid ? localBytes : null);
+      recordEvidence(deps, file.neutralRel, "remote", remotePost, wrote && !pulled ? source : readStillValid ? remoteBytes : null);
     }
   }
 
@@ -387,6 +484,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       flags: [],
       conflictKnown: false,
       evidence: {
+        level: "n/a",
         localLines: null,
         remoteLines: null,
         relation: "n/a",
@@ -424,6 +522,7 @@ async function applyAction(
   backupPath?: string;
   errorCode?: string;
   violation?: { violation: PathViolation; detail?: string };
+  noReplaceUnavailable?: boolean;
 }> {
   const writes: Action[] = ["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE"];
   if (!writes.includes(ctx.action)) {
@@ -481,8 +580,33 @@ async function applyAction(
   }
 
   await barrier("P6:before-rename", { neutralRel: ctx.neutralRel });
+  let noReplaceUnavailable = false;
   try {
-    await deps.fs.writeFileAtomic(minted.value, sourceBytes);
+    if (overwriting) {
+      await deps.fs.writeFileAtomic(minted.value, sourceBytes);
+    } else {
+      // A `*_NEW` action asserts the target does not exist, and A8 checked
+      // that a few syscalls ago. What A8 cannot cover is the gap that follows:
+      // the local CLI creating a session of the same name right then is not
+      // exotic, it is what starting a conversation does. A replacing rename
+      // would destroy it with no backup — `*_NEW` never takes one, because by
+      // its own premise there is nothing to back up. So the "does not exist"
+      // premise is enforced where there is no window behind it: the syscall.
+      const outcome = await deps.fs.writeFileNoReplace(minted.value, sourceBytes);
+      if (!outcome.ok) {
+        // Losing this race is ordinary. Next pass sees two real files and
+        // decides between them with bytes, which is the correct machinery for
+        // the situation — this one is simply not it.
+        return outcome.reason === "target-exists"
+          ? { result: "ABORTED_PRECONDITION", ...(backupPath ? { backupPath } : {}) }
+          : {
+              result: "FAILED_IO",
+              ...(outcome.code ? { errorCode: outcome.code } : {}),
+              ...(backupPath ? { backupPath } : {}),
+            };
+      }
+      noReplaceUnavailable = !outcome.noReplaceEnforced;
+    }
   } catch (error) {
     const code = errnoOf(error);
     // No catch-all: an unknown failure propagates, which is what lets a
@@ -492,7 +616,11 @@ async function applyAction(
   }
   await barrier("P6:after-rename", { neutralRel: ctx.neutralRel });
 
-  return { result: "APPLIED", ...(backupPath ? { backupPath } : {}) };
+  return {
+    result: "APPLIED",
+    ...(backupPath ? { backupPath } : {}),
+    ...(noReplaceUnavailable ? { noReplaceUnavailable: true } : {}),
+  };
 }
 
 /**
@@ -587,6 +715,54 @@ async function observe(deps: EngineDeps, target: string): Promise<SideObservatio
   };
 }
 
+/**
+ * E1 for one side, or null when the question has to be answered by reading.
+ *
+ * Null covers every reason not to trust the cache, and they are all cheap to
+ * state: no cache, no file, a file that is still moving, a scrub that has come
+ * due, or a signature that does not match the remembered one in all five
+ * components (rule EV-2 — "the size is the same" is not a hit).
+ */
+function cachedE1(
+  deps: EngineDeps,
+  neutralRel: string,
+  side: "local" | "remote",
+  observation: SideObservation,
+  stable: boolean,
+  scrub: ScrubTrigger | null,
+): { readonly contentHash: string; readonly lineCount: number } | null {
+  if (scrub !== null) return null; // A scrub *is* the instruction to read it.
+  if (!deps.evidence || !stable || !observation.exists || !observation.stat) return null;
+  const evidence = evidenceFor(observation.stat, deps.evidence.lookup(neutralRel, side));
+  return evidence.level === "E1" ? evidence : null;
+}
+
+function recordEvidence(
+  deps: EngineDeps,
+  neutralRel: string,
+  side: "local" | "remote",
+  observation: SideObservation,
+  bytes: Uint8Array | null,
+): void {
+  if (!deps.evidence || !bytes || !observation.stat) return;
+  if (observation.stat.size !== bytes.length) return;
+  deps.evidence.record(neutralRel, side, {
+    e0: observation.stat,
+    contentHash: deps.hashBytes(bytes),
+    lineCount: countLines(bytes),
+  });
+}
+
+/** Null when the side was not read: silence, not a claim that it is fine. */
+function tailTruncated(bytes: Uint8Array | null): boolean | null {
+  return bytes === null ? null : tailState(bytes) === "truncated";
+}
+
+/** What tier the report should show for a side: read this pass, or not read. */
+function byteLevel(bytes: Uint8Array | null): string {
+  return bytes ? "E2" : "E0";
+}
+
 function judgeSide(
   deps: EngineDeps,
   o1: SideObservation,
@@ -656,11 +832,18 @@ function indexOfDifference(a: Uint8Array, b: Uint8Array): number {
   return -1;
 }
 
+/**
+ * The O3/O5 recheck of §9.1.4: is this still the same file, byte for byte?
+ *
+ * Delegates to `signaturesEqual` rather than comparing fields here, so the
+ * engine cannot drift from the ledger's notion of sameness. `ino` is the part
+ * that matters and the part a hand-rolled comparison forgets: it is the only
+ * signal that the path was replaced by a *different* file — a rename-over or a
+ * delete-and-recreate can leave size, both timestamps and the tail identical.
+ */
 function sameSignature(a: E0Signature | null, b: E0Signature | null): boolean {
   if (a === null || b === null) return a === b;
-  return (
-    a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.tailHash === b.tailHash
-  );
+  return signaturesEqual(a, b);
 }
 
 function countLines(bytes: Uint8Array): number {
@@ -669,12 +852,18 @@ function countLines(bytes: Uint8Array): number {
   return count;
 }
 
+/**
+ * @param truncated Whether this side's last record was incomplete, or null when
+ * the side was not read and there is nothing to say. A null keeps the streak as
+ * it stands: an unread side is not evidence the file recovered.
+ */
 function recordLedger(
   deps: EngineDeps,
   neutralRel: string,
   side: "local" | "remote",
   observation: SideObservation,
   nowMs: number,
+  truncated: boolean | null,
 ): void {
   if (!observation.stat) return;
   const previous = side === "local" ? deps.ledger.local(neutralRel) : deps.ledger.remote(neutralRel);
@@ -684,10 +873,13 @@ function recordLedger(
     previous.sig.tailHash === observation.stat.tailHash &&
     previous.sig.mtimeMs === observation.stat.mtimeMs;
 
+  const streak = previous?.truncatedTailPasses ?? 0;
   deps.ledger.record(neutralRel, side, {
     sig: observation.stat,
     firstSeenMs: unchanged ? previous.firstSeenMs : nowMs,
-    truncatedTailPasses: previous?.truncatedTailPasses ?? 0,
+    // Consecutive, so a single good pass clears it — the flag is about a file
+    // that stays broken, not one that was caught mid-write once.
+    truncatedTailPasses: truncated === null ? streak : truncated ? streak + 1 : 0,
     remoteHadNonZeroSize:
       (previous?.remoteHadNonZeroSize ?? false) || (side === "remote" && observation.stat.size > 0),
   });

@@ -154,13 +154,33 @@ export function e0Matches(recorded: E0Signature, observed: E0Signature): boolean
 }
 
 /**
- * Promotes an observation to E1 when the manifest corroborates it exactly.
+ * The part of a remembered file a cache has to supply for E1 to be possible.
+ *
+ * Named separately from `ManifestEntry` because the manifest is not the only
+ * store that can corroborate an observation. The machine-local observations
+ * ledger (§5.5) records the same three facts from its own last full read, and
+ * it is strictly more trustworthy — it lives outside the sync directory, so no
+ * external tool writes it. Both are subject to the same two rules (EV-1, EV-2)
+ * and both may authorise exactly one outcome, so the engine has no reason to
+ * care which one answered.
+ */
+export interface CachedContentFacts {
+  readonly e0: E0Signature;
+  readonly contentHash: string;
+  readonly lineCount: number;
+}
+
+/**
+ * Promotes an observation to E1 when a cache corroborates it exactly.
  *
  * Returns E0 otherwise — never a partial guess. E1 saves essentially all of the
  * steady-state I/O (two stats and a small tail read per file, no full reads);
  * what it is not allowed to do is authorise a write.
  */
-export function evidenceFor(observed: E0Signature, entry: ManifestEntry | undefined): FileEvidence {
+export function evidenceFor(
+  observed: E0Signature,
+  entry: CachedContentFacts | undefined,
+): FileEvidence {
   if (entry && e0Matches(entry.e0, observed)) {
     return { level: "E1", e0: observed, contentHash: entry.contentHash, lineCount: entry.lineCount };
   }

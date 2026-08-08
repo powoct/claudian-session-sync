@@ -181,6 +181,45 @@ describe("renameNoReplace", () => {
   });
 });
 
+describe("no-replace write", () => {
+  it("writes when the target is free", async () => {
+    const root = makeRoot();
+    const target = path.join(root, "session.jsonl");
+
+    const outcome = await gateway.writeFileNoReplace(safe(target), enc('{"a":1}\n'));
+
+    expect(outcome).toEqual({ ok: true, noReplaceEnforced: true });
+    expect(readFileSync(target, "utf8")).toBe('{"a":1}\n');
+    expect(await fsp.readdir(root)).toEqual(["session.jsonl"]);
+  });
+
+  it("refuses rather than replacing a file that appeared meanwhile", async () => {
+    // This is the whole point: a `*_NEW` action believes nothing is there. When
+    // that belief is wrong the other file must survive, and the only check with
+    // no window behind it is the syscall.
+    const root = makeRoot();
+    const target = path.join(root, "session.jsonl");
+    writeFileSync(target, "somebody else got here first\n");
+
+    const outcome = await gateway.writeFileNoReplace(safe(target), enc("ours\n"));
+
+    expect(outcome).toMatchObject({ ok: false, reason: "target-exists" });
+    expect(readFileSync(target, "utf8")).toBe("somebody else got here first\n");
+  });
+
+  it("leaves no temp file behind after losing the race", async () => {
+    // A losing race happens once per pass for as long as it persists; leaking a
+    // staged copy each time would fill the directory with our own debris.
+    const root = makeRoot();
+    const target = path.join(root, "session.jsonl");
+    writeFileSync(target, "theirs\n");
+
+    await gateway.writeFileNoReplace(safe(target), enc("ours\n"));
+
+    expect(await fsp.readdir(root)).toEqual(["session.jsonl"]);
+  });
+});
+
 describe("platform behaviour", () => {
   it("skips directory fsync on Windows, where it returns EPERM", () => {
     // findings F-4: attempting it there is a guaranteed error, not durability.

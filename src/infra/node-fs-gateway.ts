@@ -19,6 +19,7 @@ import {
   retryOnTransient,
   type RenameOutcome,
   type WriteOptions,
+  type WriteOutcome,
   shouldFsyncDirectory,
   tempName,
 } from "./fs-gateway";
@@ -91,6 +92,10 @@ export function createNodeFsGateway(deps: NodeFsGatewayDeps): FsGateway {
       await writeAtomic(deps, target, bytes, options);
     },
 
+    async writeFileNoReplace(target, bytes, options) {
+      return writeNoReplace(deps, target, bytes, options);
+    },
+
     async mkdirp(target, mode = DEFAULT_DIR_MODE) {
       await fsp.mkdir(target, { recursive: true, mode });
     },
@@ -111,29 +116,7 @@ export function createNodeFsGateway(deps: NodeFsGatewayDeps): FsGateway {
     },
 
     async renameNoReplace(from, to) {
-      // Node exposes no RENAME_NOREPLACE, so the closest portable equivalent is
-      // a link + unlink pair: link() fails with EEXIST if the target exists,
-      // which is the atomic "do not replace" this needs.
-      try {
-        await fsp.link(from, to);
-        await fsp.unlink(from);
-        return { ok: true, noReplaceEnforced: true };
-      } catch (error) {
-        const code = codeOf(error);
-        if (code === "EEXIST") return { ok: false, reason: "target-exists", code };
-        // Filesystems without hard links (some FAT/exFAT, some network mounts)
-        // fall back to a plain rename. The caller's A8 check is then the only
-        // guard, which the report flags as `noReplaceUnavailable`.
-        if (code === "EPERM" || code === "ENOSYS" || code === "EXDEV" || code === "EMLINK") {
-          try {
-            await renameWithRetry(deps, from, to);
-            return { ok: true, noReplaceEnforced: false };
-          } catch (fallbackError) {
-            return ioError(codeOf(fallbackError));
-          }
-        }
-        return ioError(code);
-      }
+      return linkOrRename(deps, from, to);
     },
   };
 }
@@ -153,6 +136,56 @@ async function writeAtomic(
   bytes: Uint8Array,
   options: WriteOptions | undefined,
 ): Promise<void> {
+  const tmp = await stageTemp(deps, target, bytes, options);
+  try {
+    await renameWithRetry(deps, tmp, target);
+  } catch (error) {
+    await fsp.unlink(tmp).catch(() => undefined);
+    throw error;
+  }
+  await fsyncDirectoryOf(deps, target, options);
+}
+
+/**
+ * The same staged write, committed with a rename that will not replace.
+ *
+ * Splitting the commit out rather than adding a flag inside `writeAtomic`
+ * keeps the two failure shapes apart: this one has an outcome that is neither
+ * success nor error — "somebody else got there first" — and folding that into
+ * a throw would push the caller towards a catch-all.
+ *
+ * The temp file is removed on every non-success path. Leaving it behind would
+ * be harmless (the stale-temp sweeper collects it) but it would also mean a
+ * losing race leaks a file per pass for as long as the race persists.
+ */
+async function writeNoReplace(
+  deps: NodeFsGatewayDeps,
+  target: SafeAbsolutePath,
+  bytes: Uint8Array,
+  options: WriteOptions | undefined,
+): Promise<WriteOutcome> {
+  const tmp = await stageTemp(deps, target, bytes, options);
+  const outcome = await linkOrRename(deps, tmp, target);
+  if (!outcome.ok) {
+    await fsp.unlink(tmp).catch(() => undefined);
+    return outcome;
+  }
+  await fsyncDirectoryOf(deps, target, options);
+  return outcome;
+}
+
+/**
+ * Writes the bytes to an exclusive temp file beside the target and returns it.
+ *
+ * Beside, because same directory means same filesystem, which is what makes
+ * the commit a rename rather than a copy.
+ */
+async function stageTemp(
+  deps: NodeFsGatewayDeps,
+  target: SafeAbsolutePath,
+  bytes: Uint8Array,
+  options: WriteOptions | undefined,
+): Promise<string> {
   const mode = options?.mode ?? DEFAULT_FILE_MODE;
   const shouldFsync = options?.fsync ?? true;
   const directory = path.dirname(target);
@@ -170,22 +203,61 @@ async function writeAtomic(
     throw error;
   }
   await handle.close();
+  return tmp;
+}
 
+async function fsyncDirectoryOf(
+  deps: NodeFsGatewayDeps,
+  target: string,
+  options: WriteOptions | undefined,
+): Promise<void> {
+  if ((options?.fsync ?? true) === false) return;
+  if (!shouldFsyncDirectory(deps.platform)) return;
+  // Durability of the directory entry itself. Windows returns EPERM for this
+  // (findings F-4), so it is skipped there rather than failing every write.
+  const dirHandle = await fsp.open(path.dirname(target), "r").catch(() => null);
+  if (!dirHandle) return;
+  await dirHandle.sync().catch(() => undefined);
+  await dirHandle.close();
+}
+
+/**
+ * Moves `from` onto `to` without replacing an existing `to`.
+ *
+ * Node exposes no `RENAME_NOREPLACE`, so the closest portable equivalent is a
+ * link + unlink pair: `link()` fails with EEXIST if the target exists, which
+ * is the atomic "do not replace" this needs.
+ */
+async function linkOrRename(
+  deps: NodeFsGatewayDeps,
+  from: string,
+  to: string,
+): Promise<RenameOutcome> {
   try {
-    await renameWithRetry(deps, tmp, target);
+    await fsp.link(from, to);
+    await fsp.unlink(from);
+    return { ok: true, noReplaceEnforced: true };
   } catch (error) {
-    await fsp.unlink(tmp).catch(() => undefined);
-    throw error;
-  }
-
-  if (shouldFsync && shouldFsyncDirectory(deps.platform)) {
-    // Durability of the directory entry itself. Windows returns EPERM for this
-    // (findings F-4), so it is skipped there rather than failing every write.
-    const dirHandle = await fsp.open(directory, "r").catch(() => null);
-    if (dirHandle) {
-      await dirHandle.sync().catch(() => undefined);
-      await dirHandle.close();
+    const code = codeOf(error);
+    if (code === "EEXIST") return { ok: false, reason: "target-exists", code };
+    // Filesystems without hard links (some FAT/exFAT, some network mounts)
+    // fall back to a plain rename, which *does* replace. A non-atomic
+    // existence check first is not a guarantee, but the alternative on those
+    // filesystems is no check at all — and this is the branch where a `*_NEW`
+    // write could otherwise land on a file that appeared since the last look.
+    // `noReplaceEnforced: false` tells the caller the difference.
+    if (code === "EPERM" || code === "ENOSYS" || code === "EXDEV" || code === "EMLINK") {
+      if ((await fsp.lstat(to).catch(() => null)) !== null) {
+        return { ok: false, reason: "target-exists" };
+      }
+      try {
+        await renameWithRetry(deps, from, to);
+        return { ok: true, noReplaceEnforced: false };
+      } catch (fallbackError) {
+        return ioError(codeOf(fallbackError));
+      }
     }
+    return ioError(code);
   }
 }
 

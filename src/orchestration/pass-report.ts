@@ -38,6 +38,16 @@ export function isErrorResult(result: ActionResult): boolean {
  * their first 8 hex characters only.
  */
 export interface DecisionEvidence {
+  /**
+   * Which evidence tier each side rested on, as `"<local>/<remote>"`
+   * (architecture §5.3.1) — `"E2/E2"` for a pass that read both files,
+   * `"E1/E1"` for one answered entirely from cache.
+   *
+   * Reported because "we did not read this file" is a fact a user auditing a
+   * surprising NOOP needs, and because a cache that never falls back to E2 is
+   * a bug that is otherwise invisible from the outside.
+   */
+  readonly level: string;
   readonly localLines: number | null;
   readonly remoteLines: number | null;
   readonly relation: string;
@@ -66,6 +76,16 @@ export interface ActionEntry {
   /** Set when the deterministic quarantine directory was created or reused. */
   readonly conflictId?: string;
   readonly errorCode?: string;
+  /**
+   * Set on a `*_NEW` write that this filesystem could not make non-replacing
+   * (architecture §9.2.1 A9).
+   *
+   * The write still happened; what is missing is the syscall-level proof that
+   * nothing was there. Reported rather than swallowed, because "nothing could
+   * have been overwritten" and "the last look was the only guard" are
+   * different claims and the user is entitled to know which one holds.
+   */
+  readonly noReplaceUnavailable?: boolean;
 }
 
 export interface ViolationEntry {

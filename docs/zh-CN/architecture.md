@@ -293,8 +293,10 @@ docs/zh-CN/  scripts/
 | 等级 | 名称 | 内容 | 成本 |
 |---|---|---|---|
 | **E0** | stat 证据 | `size` / `mtimeMs` / `ctimeMs` / `ino` / `tailHash`（末 ≤ 4 KiB 的 sha256） | 1 次 stat + 1 次小读 |
-| **E1** | manifest 缓存证据 | E0 与记录全等时，**假定** `contentHash` / `lineCount` 仍成立 | 0 |
+| **E1** | 缓存证据 | E0 与记录全等时，**假定** `contentHash` / `lineCount` 仍成立 | 0 |
 | **E2** | 本次实读证据 | 本次 pass 打开句柄、流式读完相关字节算出的 hash / lineCount / 前缀关系 | O(size) |
+
+**E1 有两个来源，规则完全相同**：sync-dir 里的 manifest（描述 replica 侧，外部工具与其他机器都能改，不可信）与本机 `observations.json` 的 `contentHash`（描述本机 provider 侧，从不同步，可信）。两者都受 EV-1/EV-2 约束、都只能授权 `NOOP`，所以引擎刻意**不区分**是哪一个回答的——信任度的差别不改变它被允许做的事。反过来这也界定了恶意 manifest 的上限：它只能伪造 replica 那一半，本机那一半来自本机自己的 E2 实读，所以最坏结果是"两侧被谎称相等 → 本轮什么都不做"，而不是任何一次写。该残余风险正是 §5.3.3 scrub 存在的理由。
 
 #### 5.3.2 授权矩阵（硬性规则）
 
@@ -729,7 +731,7 @@ flowchart LR
 | P0 preflight | workspace 身份校验（§5.2.3）；sync-dir 可 stat 可写；读 `root.json` 跑就绪状态机（§9.6）；`formatVersion` / `schemaVersion` 分档；四 root 重叠检测（§9.7.5）；清理 > 1 h 的 `*.aiss-tmp-*` 与 `.aiss-stage-*`；读 pending journal；取本地锁 | 整个 pass 中止或降级只读，状态栏红点，**零改动** |
 | P1 discover | 对每个启用且 healthCheck 通过的 adapter 调 `listSessions()`；每个候选取 **O1 快照**（E0） | 单 provider 失败不影响其他 |
 | P2 stability-gate | 等 `probeDelayMs` 后取 **O2 快照**，与 O1 及 ledger 比对 → `stable/unstable`；unstable 直接 `DEFER`，**不进入 P3**（不读字节、不算 hash） | 纯计算 + stat |
-| P3 index | 对 stable 候选按 §5.3.2 授权矩阵决定 E1 复用还是 E2 实读；E2 读完取 **O3 快照**复查 | 单文件读失败 → `FAILED_IO`，不影响其他 |
+| P3 index | 对 stable 候选按 §5.3.2 授权矩阵决定 E1 复用还是 E2 实读；E2 读完取 **O3 快照**复查。**两侧同时 E1 命中且 `contentHash` 相等时，本文件不调用 `plan()`，直接产出 `NOOP`**——EV-1 由此变成控制流事实而非纪律：缓存 hash 唯一能到达的分支本身不产生任何写 | 单文件读失败 → `FAILED_IO`，不影响其他 |
 | P4 plan | 优先级短路 + 决策表（§7.2 / §7.2b）→ Action，每个携带两侧 `precondition` 快照；按 group 合成 | 纯函数，不会失败 |
 | P5 guard | `maxFileSizeMB`、`logicalIdPattern` 白名单、外部产物过滤、`maxFilesPerPass` / scrub 预算 + 轮转游标（§12.2）；**group 内任一 required 文件被拦下 → 整个 group DEFER** | 被过滤项记入报告 |
 | P6 apply | 逐 group 执行三段式（§6.6）+ 验证式覆盖协议（§9.2.1） | group 之间互不阻断；结果分类见下 |
@@ -1116,7 +1118,7 @@ interface OverwriteAction {
 - A5 改为 `lstat(localTarget)` 必须返回 `ENOENT`
 - A6 跳过备份（无可备份对象）
 - A8 的"最后一眼"改为再次 `lstat(localTarget)` 仍 `ENOENT`
-- A9 用**不覆盖**语义的 rename（Linux `renameat2(RENAME_NOREPLACE)`；Windows `MoveFileEx` 不带 `REPLACE_EXISTING`；macOS `renamex_np(RENAME_EXCL)`），让"目标已被别人创建"在系统调用层直接失败，而不是静默覆盖。⚠️ 平台不支持该标志时退化为"A8 检查 + 普通 rename"，并在报告中标 `noReplaceUnavailable`
+- A9 用**不覆盖**语义的 rename，让"目标已被别人创建"在系统调用层直接失败，而不是静默覆盖。Node 不暴露 `renameat2`/`renamex_np`，实现用 `link(tmp, target)` + `unlink(tmp)` 等价替代：目标存在时 `link` 报 `EEXIST`，这正是所需的原子语义。返回 `target-exists` → `ABORTED_PRECONDITION`，下轮按"两个真实文件"重新决策。⚠️ 文件系统不支持硬链接（部分 FAT/exFAT、部分网络挂载）时退化为普通 rename，退化前**先做一次非原子的存在性检查**（不是保证，但那条路径上的替代品是完全没有检查），并在报告中标 `noReplaceUnavailable`——"不可能覆盖到东西"与"只有最后一眼在守"是两种不同的断言，用户有权知道是哪一种
 
 **残余竞争窗口（诚实说明）**：
 
@@ -1771,6 +1773,8 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 32 | `formatVersion` 与 `schemaVersion` 分开；前者更高 → 完全只读，后者更高 → 可搬文件但不写回 | 共用一个版本号 | 布局版本描述真实数据位置（读错就写错地方），manifest 版本只描述缓存 |
 | 33 | 用 `logicalIdPattern` 白名单识别 session，冲突副本模式黑名单只用于报告文案 | 纯模式黑名单 | OneDrive 的 `*-<机器名>` 模式过宽会误隔离合法 session |
 | 34 | 插件永不移动/删除 sync-dir 里不认识的文件，只复制到隔离区 | 移入 `.quarantine/` | 移动会在原位置产生删除，被同步工具传播到所有机器，把误判代价放大 |
+| 35 | E1 命中且两侧 hash 相等时**不调用 `plan()`**，直接产出 `NOOP` | 把缓存 hash 作为 `SideFacts.observedHash` 喂进 planner | ADR-12 只有在缓存 hash **无路可走**时才是结构性的。喂进 planner 就得靠"planner 会正确处理它"，那是纪律；不调用 planner 则是控制流事实 |
+| 36 | `*_NEW` 的落地用 `link + unlink` 实现不覆盖 rename，`target-exists` 记 `ABORTED_PRECONDITION` | 与 `*_OVERWRITE` 共用覆盖式原子写 | `*_NEW` 从不备份（前提是"目标不存在"），所以前提错了就是无备份的静默销毁；而"本机 CLI 刚好新建了同名 session"不是奇景，是开始一段对话的常态 |
 
 ---
 

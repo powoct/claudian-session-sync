@@ -11,6 +11,7 @@
  * `lintText` is used with a virtual filePath so nothing is written into src/.
  */
 import { fileURLToPath } from "node:url";
+import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ESLint } from "eslint";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +21,27 @@ const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 let eslint: ESLint;
 
 beforeAll(async () => {
-  eslint = new ESLint({ cwd: REPO_ROOT });
+  eslint = new ESLint({
+    cwd: REPO_ROOT,
+    // The type-aware half of the config is switched off for this instance.
+    // Every path below is invented by `lintText` so nothing is written into
+    // src/, and the project service refuses outright on a file it cannot find
+    // — every assertion here would come back as one fatal parse error. What
+    // G-10 asserts is syntactic; the type-aware rules are exercised against
+    // the real tree by `npm run lint`, and by the fixture test at the bottom
+    // of this file.
+    overrideConfig: [
+      {
+        files: ["**/*.{ts,tsx,mts,cts}"],
+        languageOptions: { parserOptions: { projectService: false, project: false } },
+        rules: {
+          "@typescript-eslint/no-floating-promises": "off",
+          "@typescript-eslint/await-thenable": "off",
+          "@typescript-eslint/no-misused-promises": "off",
+        },
+      },
+    ],
+  });
   // `new ESLint()` is lazy: loading eslint.config.mjs pulls in typescript-eslint
   // and TypeScript itself, and that cost would otherwise land inside whichever
   // `it` happens to run first, against vitest's 5s per-test default. Pay it here,
@@ -264,4 +285,53 @@ describe("no direct require of fs anywhere (G-10 part 3)", () => {
     const code = `import { readFileSync } from "node:fs";\nexport const x = readFileSync;\n`;
     expect(await lintAs("src/infra/probe.ts", code)).toEqual([]);
   });
+});
+
+/**
+ * The type-aware half (review/3 §4.5).
+ *
+ * It cannot be tested through `lintText` with a virtual path — that is the
+ * whole reason the instance above turns it off — so the fixture is written to
+ * disk inside `src/`, where `tsconfig.json` can see it, and removed again. A
+ * leftover would break `npm run typecheck` loudly rather than quietly, which
+ * is the right failure mode for a file that should not exist.
+ */
+describe("type-aware rules (G-10 part 5)", () => {
+  const fixture = path.join(REPO_ROOT, "src", "__lint-fixture.ts");
+
+  async function lintOnDisk(code: string): Promise<string[]> {
+    await writeFile(fixture, code);
+    try {
+      const typed = new ESLint({ cwd: REPO_ROOT });
+      const [result] = await typed.lintFiles([fixture]);
+      return (result?.messages ?? []).map((m) => m.ruleId ?? `<fatal: ${m.message}>`);
+    } finally {
+      await rm(fixture, { force: true });
+    }
+  }
+
+  it("catches a promise nobody awaited", async () => {
+    // The shape this exists for: a write that is issued but not waited on,
+    // so the check that was supposed to guard it runs first and the write
+    // lands afterwards.
+    const rules = await lintOnDisk(
+      `async function write(): Promise<void> {}
+export function go(): void {
+  write();
+}
+`,
+    );
+    expect(rules).toContain("@typescript-eslint/no-floating-promises");
+  }, 60_000);
+
+  it("leaves an awaited one alone", async () => {
+    const rules = await lintOnDisk(
+      `async function write(): Promise<void> {}
+export async function go(): Promise<void> {
+  await write();
+}
+`,
+    );
+    expect(rules).toEqual([]);
+  }, 60_000);
 });

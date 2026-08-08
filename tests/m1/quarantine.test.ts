@@ -121,7 +121,7 @@ describe("a conflict preserves both branches", () => {
   });
 });
 
-describe("U-13 / U-20: a known conflict does not accumulate copies", () => {
+describe("S-04 / U-13 / U-20: a known conflict does not accumulate copies", () => {
   it("produces the same directory on every repeat, with nothing remembered", async () => {
     const { a } = await forkedWorld();
 
@@ -151,6 +151,22 @@ describe("U-13 / U-20: a known conflict does not accumulate copies", () => {
 
     // Same two files, same id, same directory — nothing had to remember that
     // this conflict existed.
+    expect((await fsp.readdir(quarantineRoot(a))).sort()).toEqual(dirBefore);
+    expect(dirBefore).toContain(first.actions[0]?.conflictId as string);
+  });
+
+  it("S-04b: behaves identically with the manifest deleted", async () => {
+    // The conflict identity is derived from the two hashes, so it cannot
+    // depend on the cache. Deleting the manifest is the cheapest way to prove
+    // that rather than assert it — if any part of the identity came from
+    // there, the next pass would land on a different directory.
+    const { a } = await forkedWorld();
+    const first = await settle(a);
+    const dirBefore = (await fsp.readdir(quarantineRoot(a))).sort();
+
+    await fsp.rm(a.manifestPath, { force: true });
+    for (let i = 0; i < 3; i++) await a.pass();
+
     expect((await fsp.readdir(quarantineRoot(a))).sort()).toEqual(dirBefore);
     expect(dirBefore).toContain(first.actions[0]?.conflictId as string);
   });
