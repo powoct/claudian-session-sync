@@ -13,8 +13,7 @@
  * and case sensitivity stay honest.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, promises as fsp } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, promises as fsp } from "node:fs";
 import path from "node:path";
 import type { LogicalId, SafeAbsolutePath } from "../../src/domain/types";
 import {
@@ -51,7 +50,7 @@ import {
   type PassReport,
   isCrashSignal,
 } from "../../src/orchestration/pass-report";
-import { removeTree } from "./fs-cleanup";
+import { makeRealTmpDir, removeTree } from "./fs-cleanup";
 
 import { DEFAULT_READINESS, type ReadinessThresholds } from "../../src/domain/readiness";
 
@@ -111,8 +110,10 @@ export class World {
   }
 
   static create(): World {
-    const root = mkdtempSync(path.join(tmpdir(), "aiss-world-"));
-    return new World(root);
+    // Realpath'd: the stores require it, and macOS `/var` -> `/private/var`
+    // plus Windows 8.3 short names make a raw tmpdir fail containment on two
+    // platforms out of three.
+    return new World(makeRealTmpDir("aiss-world-"));
   }
 
   machine(name: MachineName): Machine {

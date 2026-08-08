@@ -98,6 +98,7 @@ export interface PassOutcome {
 
 export type PreflightFailure =
   | { readonly kind: "root-overlap"; readonly detail: string }
+  | { readonly kind: "root-not-canonical"; readonly detail: string }
   | { readonly kind: "not-ready"; readonly reason: NotReadyReason }
   | { readonly kind: "await-init" }
   | { readonly kind: "probing" };
@@ -112,6 +113,22 @@ export type PreflightFailure =
 export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcome> {
   const nowMs = deps.clock.nowMs();
   const nowIso = new Date(nowMs).toISOString();
+
+  // ── the roots must be canonical ──────────────────────────────────────────
+  // Every containment check downstream compares against these strings, and
+  // `resolveUnderRoot` refuses anything whose resolved parent falls outside
+  // the root it was handed. Give it `/var/folders/...` on a Mac, where the
+  // real path is `/private/var/folders/...`, and *every* write is rejected as
+  // a symlink violation — technically correct, and completely unreadable as a
+  // diagnosis. One check here turns that into one sentence.
+  const nonCanonical = await findNonCanonicalRoots(deps);
+  if (nonCanonical !== null) {
+    return {
+      report: abortedReport(nowMs, deps, `root-not-canonical: ${nonCanonical}`),
+      readiness: await deps.home.loadRemote(deps.workspaceId, deps.binding.syncDirPath),
+      preflight: { kind: "root-not-canonical", detail: nonCanonical },
+    };
+  }
 
   // ── four-root overlap (§9.7.5) ───────────────────────────────────────────
   // Before anything reads or writes: nested roots make every later guarantee
@@ -410,6 +427,32 @@ function abortedReport(nowMs: number, deps: PassRunnerDeps, reason: string): Pas
     violations: [],
     notices: [],
   };
+}
+
+/**
+ * Returns a description of the first root that is not its own realpath.
+ *
+ * Only roots that exist are checked: a sync directory the user has typed but
+ * not created yet is the readiness state machine's problem, not this one's,
+ * and reporting it here would mask the message that actually helps.
+ */
+async function findNonCanonicalRoots(deps: PassRunnerDeps): Promise<string | null> {
+  const roots: Array<[string, string]> = [
+    ["vault", deps.vaultRoot],
+    ["syncDir", deps.binding.syncDirPath],
+    ...deps.providers.map((p): [string, string] => [`provider:${p.adapter.id}`, p.root]),
+  ];
+  for (const [name, target] of roots) {
+    const real = await deps.fs.realpath(target).catch(() => null);
+    if (real === null || samePath(deps, real, target)) continue;
+    return `${name} is not a canonical path`;
+  }
+  return null;
+}
+
+function samePath(deps: PassRunnerDeps, a: string, b: string): boolean {
+  const [left, right] = deps.guard.caseSensitive ? [a, b] : [a.toLowerCase(), b.toLowerCase()];
+  return deps.guard.splitPath(left).join("/") === deps.guard.splitPath(right).join("/");
 }
 
 function pushes(action: string): boolean {

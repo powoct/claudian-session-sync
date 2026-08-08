@@ -8,8 +8,7 @@
  * file read as valid JSON, a probe file left behind that makes the next pass
  * think the sync directory has contents.
  */
-import { mkdtempSync, promises as fsp } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
@@ -22,7 +21,7 @@ import { createHomeStore, emptyBinding } from "../../src/infra/home-store";
 import { createSyncDirStore, newRootFile } from "../../src/infra/sync-dir-store";
 import { createBackupWriter } from "../../src/infra/backup-writer";
 import { STATE_SCHEMA_VERSION, emptyObservations } from "../../src/infra/state-store";
-import { removeTree } from "../helpers/fs-cleanup";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -30,7 +29,7 @@ afterAll(() => {
 });
 
 function makeRoot(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "aiss-store-"));
+  const dir = makeRealTmpDir("aiss-store-");
   roots.push(dir);
   return dir;
 }

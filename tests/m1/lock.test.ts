@@ -214,14 +214,12 @@ describe("R-09 end to end: overlapping passes in one instance", () => {
 
 // ── on disk ────────────────────────────────────────────────────────────────
 
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { sequentialIdGen } from "../../src/infra/clock";
 import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
 import { type PathGuardDeps, splitPathSegments } from "../../src/infra/path-guard";
 import { createHomeStore } from "../../src/infra/home-store";
 import { createFileLock } from "../../src/orchestration/lock-file";
-import { removeTree } from "../helpers/fs-cleanup";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 describe("R-10 on disk: two Obsidian windows, one lock file", () => {
   const homes: string[] = [];
@@ -231,7 +229,7 @@ describe("R-10 on disk: two Obsidian windows, one lock file", () => {
 
   /** Two instances that differ only in pid, sharing one home directory. */
   function instances(nowMs: () => number) {
-    const stateRoot = mkdtempSync(nodePath.join(tmpdir(), "aiss-lock-"));
+    const stateRoot = makeRealTmpDir("aiss-lock-");
     homes.push(stateRoot);
     const fs = createNodeFsGateway({
       ids: sequentialIdGen(),

@@ -1,4 +1,6 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 /**
  * Windows releases file handles lazily: an antivirus scanner or a child process
@@ -18,4 +20,21 @@ export function removeTree(dir: string): void {
   } catch {
     // Best effort; the OS will reclaim the temp directory.
   }
+}
+
+/**
+ * A temp directory, **realpath'd**.
+ *
+ * Every store in this plugin documents that its root must already be a
+ * realpath, and `resolveUnderRoot` enforces it by refusing a path whose
+ * resolved parent falls outside the root it was given. A raw `mkdtempSync`
+ * breaks that on two of the three platforms and on neither of them obviously:
+ * macOS hands back `/var/folders/...` for `/private/var/folders/...`, and
+ * Windows hands back an 8.3 short name (`RUNNER~1` standing in for the real
+ * directory name). Both then
+ * fail as SYMLINK violations that look like a bug in the guard rather than in
+ * the fixture — which is exactly how this cost a CI round once already.
+ */
+export function makeRealTmpDir(prefix: string): string {
+  return realpathSync.native(mkdtempSync(path.join(tmpdir(), prefix)));
 }

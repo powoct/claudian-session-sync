@@ -5,8 +5,7 @@
  * sensitivity and permission errors are exactly what this plugin gets wrong,
  * and an in-memory filesystem models none of them faithfully.
  */
-import { mkdtempSync, promises as fsp, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsp, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { SafeAbsolutePath } from "../../src/domain/types";
@@ -19,7 +18,7 @@ import {
   shouldFsyncDirectory,
   tempName,
 } from "../../src/infra/fs-gateway";
-import { removeTree } from "../helpers/fs-cleanup";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -27,7 +26,7 @@ afterAll(() => {
 });
 
 function makeRoot(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "aiss-fsg-"));
+  const dir = makeRealTmpDir("aiss-fsg-");
   roots.push(dir);
   return dir;
 }

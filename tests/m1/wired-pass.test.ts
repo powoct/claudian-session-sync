@@ -271,6 +271,29 @@ describe("S-20: the observations ledger is lost", () => {
   });
 });
 
+describe("the roots must be canonical", () => {
+  it("says so plainly instead of rejecting every write as a symlink", async () => {
+    // Handing the stores a path that is not its own realpath makes
+    // `resolveUnderRoot` refuse everything under it — correctly, and
+    // completely unreadably. macOS does this by default: `/var/folders/...`
+    // is really `/private/var/folders/...`, and it cost a CI round once.
+    const w = newWorld();
+    const a = w.machine("A");
+    await a.initialiseSyncDir();
+
+    const link = path.join(path.dirname(a.replicaRoot), "replica-link");
+    await fsp.symlink(a.replicaRoot, link, "dir");
+
+    const outcome = await a.wiredPass({ binding: { syncDirPath: link } });
+
+    expect(outcome.preflight).toEqual({
+      kind: "root-not-canonical",
+      detail: "syncDir is not a canonical path",
+    });
+    expect(outcome.report.outcome).toBe("aborted");
+  });
+});
+
 describe("the four roots may not nest", () => {
   it("refuses to run at all when the sync directory is inside the vault", async () => {
     const w = newWorld();
