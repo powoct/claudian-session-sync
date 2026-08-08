@@ -35,6 +35,28 @@ const exists = async (target: string) =>
     .then(() => true)
     .catch(() => false);
 
+/**
+ * Every string value in a JSON file, parsed.
+ *
+ * Not a substring search over the raw text. A Windows path inside JSON is
+ * escaped — `C:\\Users\\…` — so `expect(text).toContain(windowsPath)` fails
+ * where it should pass, and worse, `not.toContain` *passes* where it should
+ * fail. The second direction is the one that matters: "no absolute path leaked
+ * into the vault" is the assertion, and it would have held vacuously on the
+ * one platform where paths look different.
+ */
+async function stringValuesIn(target: string): Promise<string[]> {
+  const parsed = JSON.parse(await fsp.readFile(target, "utf8")) as unknown;
+  const out: string[] = [];
+  const walk = (value: unknown): void => {
+    if (typeof value === "string") out.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  };
+  walk(parsed);
+  return out;
+}
+
 describe("first run", () => {
   it("asks for a workspace identity before anything else", async () => {
     const h = await makeHarness();
@@ -120,13 +142,13 @@ describe("machine identity", () => {
     // another machine, and a machine id is the definition of what does not.
     const h = await makeHarness();
     await h.configure();
-    const identity = await fsp.readFile(
-      path.join(h.vaultRoot, ".ai-session-sync", "workspace.json"),
-      "utf8",
-    );
+    const identityFile = path.join(h.vaultRoot, ".ai-session-sync", "workspace.json");
+    const values = await stringValuesIn(identityFile);
 
-    expect(identity).not.toContain(h.homedir);
-    expect(identity).not.toContain("machineId");
+    expect(values.some((value) => value.includes(h.homedir))).toBe(false);
+    expect(Object.keys(JSON.parse(await fsp.readFile(identityFile, "utf8")))).not.toContain(
+      "machineId",
+    );
   });
 });
 
@@ -160,19 +182,18 @@ describe("settings", () => {
     await h.configure();
     const workspaceId = h.runtime.currentStatus().workspaceId as string;
 
-    const binding = await fsp.readFile(
+    const binding = await stringValuesIn(
       path.join(h.homedir, ".ai-session-sync", "workspaces", `${workspaceId}.json`),
-      "utf8",
     );
     expect(binding).toContain(h.syncDir);
 
-    const identity = await fsp.readFile(
+    const identity = await stringValuesIn(
       path.join(h.vaultRoot, ".ai-session-sync", "workspace.json"),
-      "utf8",
     );
-    expect(identity, "an absolute path in the vault breaks the other machine").not.toContain(
-      h.syncDir,
-    );
+    expect(
+      identity.some((value) => value.includes(h.syncDir)),
+      "an absolute path in the vault breaks the other machine",
+    ).toBe(false);
   });
 });
 
