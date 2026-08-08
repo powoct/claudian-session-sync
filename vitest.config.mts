@@ -5,6 +5,15 @@ import { defineConfig } from "vitest/config";
 // tests/build/artifact-*.test.ts and runs from vitest.build.config.ts after
 // `npm run build` — see testing.md §13 for the CI ordering.
 export default defineConfig({
+  resolve: {
+    // `obsidian` has no npm package to resolve at test time — it is provided by
+    // the host at runtime and marked external in the bundle. Aliasing it to the
+    // recording stub is what lets `src/ui/**` be tested at all; without it the
+    // presentation layer could only ever be exercised through the built bundle,
+    // which is the slowest and least specific way to find out that a settings
+    // pane throws.
+    alias: { obsidian: new URL("./tests/helpers/obsidian-stub.ts", import.meta.url).pathname },
+  },
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
@@ -40,6 +49,11 @@ export default defineConfig({
         "src/domain/**": { lines: 90, functions: 90, branches: 85, statements: 90 },
         "src/infra/**": { lines: 80, functions: 80, branches: 70, statements: 80 },
         "src/providers/**": { lines: 70, functions: 70, branches: 60, statements: 70 },
+        // Lower on purpose, and not by much. The presentation layer is mostly
+        // strings and control wiring; what is worth asserting is that every
+        // pane renders and every control does what it says, not that each
+        // branch of a description sentence was reached (§4).
+        "src/ui/**": { lines: 70, functions: 60, branches: 55, statements: 70 },
       },
     },
   },

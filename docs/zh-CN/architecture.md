@@ -414,6 +414,15 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 }
 ```
 
+与草案相比，实现里 `local`/`remote` 的条目多了两个字段，两处偏差都记在这里：
+
+| 字段 | 为什么在这里而不在别处 |
+|---|---|
+| `verifiedSig` | E1 的判据是"E0 与记录全等"，但 `sig` 每次观察都会更新——包括那些**只看见文件在变、并没有读它**的 pass。把那样的 sig 与更早的 `contentHash` 配成一对，正是 E1 必须避免的错配。所以 hash 与"算它时的那个签名"要么一起存，要么都不算数（`verifiedSig === null`） |
+| `remoteHadNonZeroSize` | 决策表 #14 名义上要 manifest 的 size 历史，但 manifest 只有当前 size、没有历史，而且不可信。这是一条**本机单调观察**——"我在这里见过字节"——且只能把结果推向 `DEFER`，正是 EV-1 允许它做的事 |
+
+另：`local` 的 key 用 neutralRel 而非 `sha256(本机绝对路径)`。散列的唯一好处是不落绝对路径，而本文件在 (b) 里、绝对路径本来就合法，代价却是排障时看不懂。
+
 **丢失 / 损坏 / fingerprint 不匹配 → 视为全空**，所有条目的 `firstSeenMs` 重置为 now，于是本次 pass 中所有需要"稳定"前提的动作（全部 OVERWRITE、全部 CONFLICT 隔离、远端侧的 PULL_NEW —— **§9.1.3 的快速通道除外**）统统 `DEFER`，pass 退化为"只读 + 建立观察"（此时仍会在 P8 写回本文件，否则下一轮无从恢复），下一次恢复正常。这是**故意的 fail-safe**：丢 ledger 的代价是慢一轮，而不是误判。`lastSeenMs` 超过 30 天未出现的条目在 commit 时 GC。
 
 ### 5.6 三处存储与信任级别
@@ -1775,6 +1784,9 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 34 | 插件永不移动/删除 sync-dir 里不认识的文件，只复制到隔离区 | 移入 `.quarantine/` | 移动会在原位置产生删除，被同步工具传播到所有机器，把误判代价放大 |
 | 35 | E1 命中且两侧 hash 相等时**不调用 `plan()`**，直接产出 `NOOP` | 把缓存 hash 作为 `SideFacts.observedHash` 喂进 planner | ADR-12 只有在缓存 hash **无路可走**时才是结构性的。喂进 planner 就得靠"planner 会正确处理它"，那是纪律；不调用 planner 则是控制流事实 |
 | 36 | `*_NEW` 的落地用 `link + unlink` 实现不覆盖 rename，`target-exists` 记 `ABORTED_PRECONDITION` | 与 `*_OVERWRITE` 共用覆盖式原子写 | `*_NEW` 从不备份（前提是"目标不存在"），所以前提错了就是无备份的静默销毁；而"本机 CLI 刚好新建了同名 session"不是奇景，是开始一段对话的常态 |
+| 37 | 原子写自己建目标目录 | 每个调用点各自 `mkdirp` | `*_NEW` 的目标目录经常不存在（对端没用过的 workspace 子树、本机 CLI 没开过这个 vault 的 project 目录）。路径此时已被证明落在配置的 root 内，建到它的那串目录不会多给出任何触及范围；而"每个调用点记得建"的结果是有一个没记得——真实发生过，表现为每次 push 都 ENOENT |
+| 38 | 设置分两处：可移植行为参数进 vault 的 `data.json`，路径与 provider 开关进本机 binding | 全部放 `data.json` | 判据仍是 §5.6 规则 1——把 (a) 原样拷到另一台机器必须仍然正确。sync 目录路径是全插件最机器相关的值，放进随 vault 同步的文件里，Mac 的路径下一次同步就会盖掉 Windows 的，而且不报错 |
+| 39 | provider 默认关闭，默认存储路径永远可覆盖 | 探测到就启用 | "找到了某个 CLI 的目录"不等于用户同意把它的对话拷到另一台机器。而 CLI 布局会随版本变，转义规则是对某一个版本实测的——覆盖不是 bug 的逃生口，是"这个版本放在别处"的正式答案 |
 
 ---
 

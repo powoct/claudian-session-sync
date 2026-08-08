@@ -191,6 +191,15 @@ async function stageTemp(
   const directory = path.dirname(target);
   const tmp = path.join(directory, tempName(path.basename(target), deps.pid, deps.ids.token(4)));
 
+  // The directory is created here rather than by every caller. A `*_NEW`
+  // action routinely lands in a folder that does not exist yet — a workspace
+  // subtree the other machine has never used, a provider project directory on
+  // a machine where the CLI has not opened this vault — and requiring each
+  // call site to remember means one of them will not. The path has already
+  // been proved to sit inside a configured root, so creating the chain to it
+  // adds no reach that the write itself did not already have.
+  await fsp.mkdir(directory, { recursive: true, mode: DEFAULT_DIR_MODE });
+
   // "wx" — exclusive create. If the name is somehow taken, that is a collision
   // worth failing on, not one to write through.
   const handle = await fsp.open(tmp, "wx", mode);

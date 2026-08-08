@@ -1,12 +1,12 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-08。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-08（批 4 完成）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：M0 完成，M1 批 1–3 完成（含 review/3 整改），剩批 4（Obsidian UI）与真机验收
+## 当前状态：M1 代码完成，剩真机十步验收
 
-领域层、infra 层、SyncEngine 与 L2 双 replica world 都已落地并全绿：**665 条测试、541 条 m1 阻塞用例**。
-下一步是批 4 把 UI 接上，然后走 [testing.md §9.4](docs/zh-CN/testing.md) 的真机十步验收。
+批 1–4 全部落地：**757 条测试、632 条 m1 阻塞用例**。插件现在能在真机上跑——设置面板、状态栏、报告视图、三条冲突命令、定时 pass 都接好了，状态全部落盘。
+下一步是 [testing.md §9.4](docs/zh-CN/testing.md) 的真机十步验收（Mac ↔ Windows）。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
@@ -20,7 +20,9 @@
 | **M1 批 2 · infra** | ✅ **完成** | FsGateway / PathGuard / Clock / 三处 store / 备份 |
 | **M1 批 3 · SyncEngine + L2** | ✅ **完成** | 九阶段 pass、双 replica world、冲突隔离、就绪状态机、崩溃矩阵、manifest、锁；541 条 m1 用例 |
 | **[review/3](review/3_m1-batch2-batch3-review.md) 整改** | ✅ **完成** | §3.1/§3.2/§3.3 三个正确性问题 + §4.1/§4.2/§4.4/§4.5 的覆盖与门禁欠账（见下） |
-| M1 批 4 · Obsidian UI | ⬜ 未开始 | — |
+| **M1 批 4a · 状态落盘门面** | ✅ **完成** | json-file / home-store / sync-dir-store / backup-writer / lock-file / state-adapters / pass-runner；S-08、S-16…S-20 首次有端到端证据 |
+| **M1 批 4b · Obsidian UI** | ✅ **完成** | plugin-runtime（无 Obsidian 类型）+ 设置面板 / 报告 / 冲突面板 / 8 条命令；S-04c 三种解决方式全绿 |
+| M1 真机十步验收 | ⬜ 未开始 | [testing.md §9.4](docs/zh-CN/testing.md) |
 
 ### M0 交付了什么
 
@@ -75,8 +77,20 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
   - ✅ I1/I2a/I2b 属性测试（`tests/m1/property/`，nightly job 已能挑到）
   - ✅ `domain/manifest.ts`——M-01…M-08 全覆盖；E0/E1/E2 证据分级 + `mayAuthoriseWrite` 类型收窄（E2 才能授权写）；更高 schemaVersion 绝不重写；未知字段读改写后仍在；坏 entry 只丢那一条
   - ✅ `orchestration/lock.ts` + 引擎接线——R-09（同实例重叠 pass 立即 `ALREADY_RUNNING`，零写入）、R-10（陈旧锁可抢占 + **epoch 让被抢者的写入失效**）
-  - ⬜ 三条冲突命令的 UI 接线（领域层 `resolutionAction` 已就绪，命令注册属批 4）
-  - ⬜ 锁的落盘实现（纯逻辑与引擎接线已就绪，缺 FsGateway 读写 `locks/<ws>.lock` 那一层）
+  - ✅ 三条冲突命令与锁的落盘实现——都在批 4 里补齐了
+
+### 批 4（2026-08-08）
+
+**4a 落盘门面**：`json-file` / `home-store` / `sync-dir-store` / `backup-writer`（infra）+ `lock-file` / `state-adapters` / `pass-runner`（orchestration）。写这批的测试抓到两个真 bug：
+
+- **坏锁文件是永久的**。"没有文件"和"文件读不懂"都归 null，于是获取锁时对着那个刚被判定忽略的文件做独占创建、失败、报 `LOCK_HELD`——插件从此再也不同步。这正是 `parseLockFile` 把垃圾当"无人持有"要避免的结果。两种情形现已分开。
+- **NR-5 在每次 push 之后有一轮盲区**。就绪扫描在 pass 之前跑，所以记下的计数从不包含我们刚写进去的东西；那一轮里被清空的 sync 目录读起来就是"这里从来什么都没有"。写过的 pass 在 commit 时补一次扫描。
+
+**4b UI**：`plugin-runtime`（**不含任何 Obsidian 类型**，lint 强制）承载全部行为，`src/ui/**` 只做渲染。测试经 vitest alias 把 `obsidian` 指到 stub，因此表现层能在纯 Node 下跑。接 UI 时又抓到一个：
+
+- **原子写从不建目标目录**。world 的 `mintWritePath` 替身顺手 `mkdir` 了，把它盖了一路；换成真 PathGuard 后每次 `PUSH_NEW` 都 `FAILED_IO`。现在归 `stageTemp`（ADR-37）。
+
+三处刻意的偏差都记在了架构文档里：ledger 多存 `verifiedSig` 与 `remoteHadNonZeroSize`（§5.5 表格）、`local` 用 neutralRel 做 key（同处）、设置分两处（ADR-38）。
 
 ### review/3 整改（2026-08-08）
 
@@ -107,7 +121,11 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
 
 批 1 从 `path-escape` 起步的具体理由：样本表已经全部实测（[testing.md §5.1](docs/zh-CN/testing.md) 12 条 `verified: true`），是唯一一个"输入输出都已知、可以纯表驱动写完"的模块，能顺带把 `tests/m1/` 建起来让 `check:no-skip` 从"M0 空跑"转成真门禁。
 
-`src/main.ts` 目前是**纯装配骨架**：注册状态栏 / ribbon / 三个命令（`sync-now`、`dry-run`、`show-last-report`，都只弹 "not implemented"）/ 设置页，并把首次 pass 挂到 `onLayoutReady` 上排队。改动它时注意 `tests/build/artifact-smoke.test.ts` 里的 `EXPECTED_COMMAND_IDS` 是**故意写死的字面量**——增删命令必须同步改，这是让 UI 面变化被人过一遍眼的设计。
+`src/main.ts` 仍然只做装配：8 条命令、ribbon、状态栏、设置页、定时 pass，全部转手给 `PluginRuntime`。三条约束别破：
+
+- **`onload()` 不读文件系统**。`getRuntime()` 会 realpath vault 路径，所以设置页拿到的是**取值函数不是实例**；首次 pass 还要经 `setTimeout(…, 0)` 才排出去——从设置面板启用插件时 `onLayoutReady` 是**同步**回调，只"延到 layout-ready"并不够。
+- `tests/build/artifact-smoke.test.ts` 的 `EXPECTED_COMMAND_IDS` 是**故意写死的字面量**，增删命令必须同步改。
+- 那份 smoke 测试会把 `HOME` 指到临时目录再加载 bundle。别去掉：否则跑一次构建测试就会在开发者家目录里留下 `~/.ai-session-sync/machine.json`。
 
 ## 阻塞项
 
@@ -184,7 +202,8 @@ M0 的自检把"门禁本身能不能拦住东西"验完了，但下面几项**�
 |---|---|---|
 | ~~`check:no-skip --min`~~ | ✅ 已装（`--min 100`，当前 162 条） | 加测试时不必调它；只有**大幅**扩容后才值得提高下限 |
 | Q-32 Windows 执行数 ≥ ubuntu 的 95% | M1 收尾 | 目前无任何实现；需要跨 job 比对 `reports/vitest.json` |
-| store / 锁 / manifest 的落盘门面 | 批 4 早期 | 纯逻辑与格式全就绪，缺的是 FsGateway 编排。**先做这个**，否则 S-08/S-17…S-20 在真机验收前始终没有端到端证据（review/3 §4.3）。`tests/helpers/world.ts` 里已经有一份真读真写 manifest 的实现可以照搬 |
+| ~~store / 锁 / manifest 的落盘门面~~ | ✅ 批 4a 完成 | S-08/S-16…S-20 现在跑在 `runWorkspacePass` 上 |
 | ~~type-aware lint~~ | ✅ 已装 | `no-floating-promises` / `await-thenable` / `no-misused-promises`，靠 `projectService`。`eslint-rules.test.ts` 的虚拟路径必须 override 关掉它们，否则 project service 会 fatal；同文件底部有一条写真文件到 `src/` 再 lint 的自检，证明它真的会红 |
 | ~~§11.2 `PassReport` 字段禁令~~ | ✅ 已装 | `tests/m1/pass-report.test.ts`。**逐条字面量写**——循环形式的 `not.toHaveProperty(name)` 永远通过 |
+| ~~`src/ui/**` 覆盖率归属~~ | ✅ 已定 | 没有 exclude，改为单独门槛（lines 70 / functions 60 / branches 55），并真写了 `ui.test.ts`。全局门槛没动 |
 | `src/ui/**` 覆盖率归属 | 批 4 | 现在 UI 落在全局 80% 门槛下，表现层按 §4 是靠 stub smoke + 人工验收的，落地时要么显式 exclude（照 `main.ts` 的先例）要么补测试——**别顺手调低全局门槛** |

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as obsidianStub from "../helpers/obsidian-stub";
 import { makeStubApp, makeStubManifest, type Plugin as StubPlugin } from "../helpers/obsidian-stub";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const BUNDLE = path.join(REPO_ROOT, "main.js");
@@ -29,7 +30,16 @@ const BUNDLE = path.join(REPO_ROOT, "main.js");
  * purpose: if a command disappears from main.ts, this test should fail and make
  * someone confirm the removal was intended.
  */
-const EXPECTED_COMMAND_IDS = ["sync-now", "dry-run", "show-last-report"];
+const EXPECTED_COMMAND_IDS = [
+  "sync-now",
+  "dry-run",
+  "verify-all",
+  "show-last-report",
+  "show-conflicts",
+  "conflict-keep-local",
+  "conflict-keep-remote",
+  "conflict-reveal",
+];
 
 const FS_READ_METHODS = [
   "readFile",
@@ -106,14 +116,38 @@ function recordingProxy<T extends object>(target: T, label = ""): T {
       }
 
       if (typeof value === "function" && FS_READ_METHODS.includes(prop as never)) {
-        return (...args: unknown[]) => {
-          if (recording) fsCalls.push({ method: `${label}${String(prop)}`, target: String(args[0]) });
-          return (value as (...a: unknown[]) => unknown).apply(obj, args);
-        };
+        // A Proxy rather than a plain wrapper function, because these carry
+        // properties that matter: `fs.realpath.native` is what the gateway
+        // promisifies at module scope, and a wrapper that dropped it turned
+        // loading the bundle into a TypeError — a harness bug that looks
+        // exactly like a plugin bug.
+        return recordingFunction(value as FsFunction, obj, `${label}${String(prop)}`);
       }
       return value;
     },
   });
+}
+
+type FsFunction = (...args: unknown[]) => unknown;
+
+/** Records calls while leaving the function's own properties reachable. */
+function recordingFunction(fn: FsFunction, thisArg: object, label: string): FsFunction {
+  return new Proxy(fn, {
+    apply(target, _thisArg, args: unknown[]) {
+      if (recording) fsCalls.push({ method: label, target: String(args[0]) });
+      return Reflect.apply(target, thisArg, args);
+    },
+    get(target, prop, receiver) {
+      const nested = Reflect.get(target, prop, receiver) as unknown;
+      // `realpath.native` and `realpathSync.native` are reads too, and the
+      // gateway deliberately uses them (the escape rule's measured input is
+      // the OS's own resolution).
+      if (prop === "native" && typeof nested === "function") {
+        return recordingFunction(nested as FsFunction, thisArg, `${label}.native`);
+      }
+      return nested;
+    },
+  }) as FsFunction;
 }
 
 type LoadFn = (request: string, parent: unknown, isMain: boolean) => unknown;
@@ -181,7 +215,52 @@ afterAll(() => {
   liveTimers.clear();
 });
 
-afterEach(() => {
+/**
+ * Plugins built during a test, unloaded after it.
+ *
+ * A loaded plugin is a *running* plugin: from M1 on, `onload()` schedules the
+ * first pass, and a test that leaves one loaded lets that pass fire in the
+ * middle of a later test — where the recording fs proxy dutifully attributes
+ * its reads to whatever was being measured at the time. Unloading is not
+ * tidiness here, it is what keeps the assertions about the right process.
+ */
+const loadedPlugins: StubPlugin[] = [];
+
+/**
+ * A throwaway home and vault for the whole file.
+ *
+ * Without this the bundle writes `~/.ai-session-sync/machine.json` on whoever
+ * runs the suite — a build test that leaves state in a developer's home
+ * directory is a build test nobody trusts. `os.homedir()` reads these, and the
+ * plugin only calls it once the first pass starts, so setting them before the
+ * bundle loads is enough.
+ */
+let sandboxHome = "";
+let sandboxVault = "";
+const savedEnv: Record<string, string | undefined> = {};
+
+beforeAll(() => {
+  sandboxHome = makeRealTmpDir("aiss-smoke-home-");
+  sandboxVault = makeRealTmpDir("aiss-smoke-vault-");
+  for (const key of ["HOME", "USERPROFILE"]) savedEnv[key] = process.env[key];
+  process.env.HOME = sandboxHome;
+  process.env.USERPROFILE = sandboxHome;
+});
+
+afterAll(() => {
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  removeTree(sandboxHome);
+  removeTree(sandboxVault);
+});
+
+afterEach(async () => {
+  for (const plugin of loadedPlugins.splice(0)) plugin.unload();
+  // Drain whatever the plugin started before clearing the log: work still in
+  // flight would otherwise land inside the next test and be attributed to it.
+  await settle();
   fsCalls.length = 0;
   obsidianStub.Notice.instances.length = 0;
 });
@@ -193,9 +272,26 @@ function loadBundle(): { default: new (app: unknown, manifest: unknown) => StubP
   return requireFromHere(BUNDLE) as { default: new (app: unknown, manifest: unknown) => StubPlugin };
 }
 
-function instantiate(): StubPlugin {
+function instantiate(app = makeStubApp({ basePath: sandboxVault })): StubPlugin {
   const { default: PluginClass } = loadBundle();
-  return new PluginClass(makeStubApp(), makeStubManifest());
+  const plugin = new PluginClass(app, makeStubManifest());
+  loadedPlugins.push(plugin);
+  return plugin;
+}
+
+/** Lets queued microtasks and 0 ms timers run, as the host's event loop would. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+/** Polls until `predicate` holds, so a slow disk does not become a flake. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
 }
 
 describe("bundle stub smoke (§12.2b)", () => {
@@ -235,14 +331,36 @@ describe("bundle stub smoke (§12.2b)", () => {
     expect(tab?.containerEl.children.length, "display() rendered nothing").toBeGreaterThan(0);
   });
 
-  it("shows the user something when a stub command is invoked", async () => {
+  it("reports back to the user when a command is invoked", async () => {
+    // In M0 every command answered with a "not implemented" Notice. Now they
+    // do work, and the feedback channel is the status bar — so what this
+    // asserts is that invoking one is safe and visibly changes something,
+    // rather than that a particular popup appears.
+    const plugin = instantiate();
+    await plugin.onload();
+    const statusBar = plugin.statusBarItems[0];
+    const initial = statusBar?.textContent;
+
+    plugin.commands.find((command) => command.id === "sync-now")?.callback?.();
+    await waitUntil(() => statusBar?.textContent !== initial);
+
+    expect(statusBar?.textContent).toBeTruthy();
+    expect(statusBar?.textContent, "the status bar never moved off its initial text").not.toBe(
+      initial,
+    );
+  });
+
+  it("survives every command being invoked with nothing configured", async () => {
+    // The state a new user is in for the first minute. None of these may
+    // throw: an unconfigured plugin that errors on click is indistinguishable
+    // from a broken one.
     const plugin = instantiate();
     await plugin.onload();
 
-    obsidianStub.Notice.instances.length = 0;
-    plugin.commands.find((command) => command.id === "sync-now")?.callback?.();
-
-    expect(obsidianStub.Notice.instances).toHaveLength(1);
+    for (const command of plugin.commands) {
+      expect(() => command.callback?.(), `command ${command.id} threw`).not.toThrow();
+    }
+    await settle();
   });
 
   it("leaves no live timers after unload", async () => {
@@ -311,9 +429,8 @@ describe("onload does not block Obsidian startup (§12.2c)", () => {
   });
 
   it("defers its first pass to layout-ready rather than running it inline", async () => {
-    const app = makeStubApp();
-    const { default: PluginClass } = loadBundle();
-    const plugin = new PluginClass(app, makeStubManifest());
+    const app = makeStubApp({ basePath: sandboxVault });
+    const plugin = instantiate(app);
 
     await whileRecording(() => plugin.onload());
 
@@ -328,9 +445,8 @@ describe("onload does not block Obsidian startup (§12.2c)", () => {
     // Enabling the plugin from the settings pane hits this path: the callback
     // runs inline, inside onload(). Deferring to onLayoutReady is therefore not
     // by itself enough — the queued work must also be asynchronous.
-    const app = makeStubApp({ layoutAlreadyReady: true });
-    const { default: PluginClass } = loadBundle();
-    const plugin = new PluginClass(app, makeStubManifest());
+    const app = makeStubApp({ layoutAlreadyReady: true, basePath: sandboxVault });
+    const plugin = instantiate(app);
 
     const started = performance.now();
     await whileRecording(() => plugin.onload());

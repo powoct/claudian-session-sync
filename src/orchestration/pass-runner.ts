@@ -278,7 +278,7 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
       });
       return outcome.path;
     },
-    mintWritePath: (target) => mintWritePath(deps, target),
+    mintWritePath: createWritePathMinter(writeRootsFor(deps)),
     machineIdPrefix: deps.machineId.slice(0, 8),
     ...(deps.lock ? { lock: deps.lock } : {}),
     nowIso: () => new Date(deps.clock.nowMs()).toISOString(),
@@ -329,8 +329,14 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
   return { report, readiness: record };
 }
 
+/** Just enough to know which roots exist and how to compare paths. */
+export interface WriteRoots {
+  readonly guard: PathGuardDeps;
+  readonly roots: readonly string[];
+}
+
 /**
- * Turns an absolute target the engine produced into a validated path.
+ * Turns an absolute target into a validated path, or refuses it.
  *
  * This is the evil-adapter defence of §8.2 at its narrowest point. An adapter
  * is our code, but it is written to tolerate CLI layouts it has never seen, so
@@ -338,36 +344,48 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
  * The target is matched back to a known root and re-resolved through the
  * per-level symlink walk — a path belonging to no root cannot be written at
  * all, because there is no way to obtain the branded type for it.
+ *
+ * Exported because conflict resolution writes session files too, and a second
+ * "simpler" validator would be a second place for a traversal to land.
  */
-async function mintWritePath(deps: PassRunnerDeps, target: string): Promise<MintOutcome> {
-  const roots = [
-    deps.binding.syncDirPath,
-    ...deps.providers.map((p) => p.root),
-    deps.home.layout.backupsDir,
-  ];
-  for (const root of roots) {
-    const rel = relativeUnder(deps, root, target);
-    if (rel === null) continue;
-    const resolved = await resolveUnderRoot(deps.guard, root, rel);
-    return resolved.ok
-      ? { ok: true, value: resolved.value }
-      : {
-          ok: false,
-          violation: resolved.violation,
-          ...(resolved.detail ? { detail: resolved.detail } : {}),
-        };
-  }
-  return { ok: false, violation: "ROOT_OVERLAP", detail: "target belongs to no configured root" };
+export function createWritePathMinter(input: WriteRoots): (target: string) => Promise<MintOutcome> {
+  return async (target: string) => {
+    for (const root of input.roots) {
+      const rel = relativeUnder(input.guard, root, target);
+      if (rel === null) continue;
+      const resolved = await resolveUnderRoot(input.guard, root, rel);
+      return resolved.ok
+        ? { ok: true, value: resolved.value }
+        : {
+            ok: false,
+            violation: resolved.violation,
+            ...(resolved.detail ? { detail: resolved.detail } : {}),
+          };
+    }
+    return { ok: false, violation: "ROOT_OVERLAP", detail: "target belongs to no configured root" };
+  };
+}
+
+/** Every root this plugin is allowed to write into, for one workspace. */
+export function writeRootsFor(deps: PassRunnerDeps): WriteRoots {
+  return {
+    guard: deps.guard,
+    roots: [
+      deps.binding.syncDirPath,
+      ...deps.providers.map((p) => p.root),
+      deps.home.layout.backupsDir,
+    ],
+  };
 }
 
 /** POSIX-separated remainder of `target` under `root`, or null if outside. */
-function relativeUnder(deps: PassRunnerDeps, root: string, target: string): string | null {
-  const rootParts = deps.guard.splitPath(root);
-  const targetParts = deps.guard.splitPath(target);
+function relativeUnder(guard: PathGuardDeps, root: string, target: string): string | null {
+  const rootParts = guard.splitPath(root);
+  const targetParts = guard.splitPath(target);
   if (targetParts.length <= rootParts.length) return null;
 
   const same = (a: string, b: string) =>
-    deps.guard.caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
+    guard.caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
   for (const [index, part] of rootParts.entries()) {
     if (!same(part, targetParts[index] ?? "")) return null;
   }

@@ -83,13 +83,32 @@ describe("atomic write", () => {
     expect(await fsp.readdir(root)).toEqual(["session.jsonl"]);
   });
 
+  it("creates the directory the file is going into", async () => {
+    // A `*_NEW` action routinely lands somewhere that does not exist yet — a
+    // workspace subtree the other machine has never used, a provider project
+    // folder on a machine where the CLI has not opened this vault. Leaving it
+    // to each call site meant one of them forgot, and every push failed with
+    // ENOENT.
+    const root = makeRoot();
+    const target = path.join(root, "workspace", "claude-code", "session.jsonl");
+
+    await gateway.writeFileAtomic(safe(target), enc("x"));
+
+    expect(readFileSync(target, "utf8")).toBe("x");
+  });
+
   it("leaves the original intact when the write fails", async () => {
     const root = makeRoot();
-    const target = path.join(root, "sub", "session.jsonl");
-    // The parent does not exist, so the temp-file create fails before anything
-    // is replaced.
+    // The parent path is a *file*, so no directory can be made there and the
+    // write fails before anything is replaced. Portable: ENOTDIR on POSIX,
+    // ENOENT on Windows, an error either way.
+    writeFileSync(path.join(root, "blocker"), "not a directory");
+    const target = path.join(root, "blocker", "session.jsonl");
+
     await expect(gateway.writeFileAtomic(safe(target), enc("x"))).rejects.toThrow();
-    expect(await fsp.readdir(root)).toEqual([]);
+
+    expect(readFileSync(path.join(root, "blocker"), "utf8")).toBe("not a directory");
+    expect(await fsp.readdir(root)).toEqual(["blocker"]);
   });
 
   it("creates files 0600 by default", async () => {
