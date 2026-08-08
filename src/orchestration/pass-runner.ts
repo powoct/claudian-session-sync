@@ -1,0 +1,435 @@
+/**
+ * The composition root: everything a pass needs, assembled and taken down.
+ *
+ * `runPass` is deliberately ignorant of where its state lives — it is handed a
+ * ledger, a cache, a backup hook and a lock. This is where those come from real
+ * files, and where the preflight that decides whether a pass may run at all
+ * happens (architecture §7.1 P0).
+ *
+ * The order below is the design and is not interchangeable:
+ *
+ *   roots → overlap → machine identity → binding → workspace identity
+ *   → readiness → state load → runPass → commit
+ *
+ * Every step before `runPass` can abort with **zero writes on either side**,
+ * and each is placed where it is because the step after it would otherwise act
+ * on something unestablished. Checking readiness before knowing which directory
+ * we mean, or writing before proving the four roots do not nest, is how a
+ * misconfiguration becomes a sync between the wrong pair of directories.
+ */
+import { evaluateReadiness } from "../domain/readiness";
+import type { NotReadyReason, ReadinessThresholds, RemoteRecord } from "../domain/readiness";
+import type { MachineId, WorkspaceId } from "../domain/types";
+import type { Clock, IdGen } from "../infra/clock";
+import type { FsGateway } from "../infra/fs-gateway";
+import type { HomeStore, WorkspaceBinding } from "../infra/home-store";
+import { createBackupWriter } from "../infra/backup-writer";
+import { type PathGuardDeps, findRootOverlaps, resolveUnderRoot } from "../infra/path-guard";
+import {
+  type SyncDirStore,
+  SUPPORTED_FORMAT_VERSION,
+  manifestIsWritable,
+  manifestOrEmpty,
+} from "../infra/sync-dir-store";
+import type { ProviderAdapter } from "../providers/provider-adapter";
+import { type PassReport, type Barrier } from "./pass-report";
+import { type EngineDeps, type MintOutcome, runPass } from "./sync-engine";
+import { type ScrubContext, createPassState, recordOutcomes } from "./state-adapters";
+
+/** T6's per-pass sample size (§5.3.3): min(20, 2% of what we know about). */
+const SCRUB_SAMPLE_MAX = 20;
+const SCRUB_SAMPLE_FRACTION = 0.02;
+const DEFAULT_SCRUB_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export interface PassRunnerDeps {
+  readonly fs: FsGateway;
+  readonly guard: PathGuardDeps;
+  readonly clock: Clock;
+  readonly ids: IdGen;
+  readonly joinPath: (...parts: string[]) => string;
+  readonly hashBytes: (bytes: Uint8Array) => string;
+
+  readonly home: HomeStore;
+  readonly syncDir: SyncDirStore;
+  readonly binding: WorkspaceBinding;
+  readonly machineId: MachineId;
+  readonly workspaceId: WorkspaceId;
+
+  /** Adapters plus the root each may write into, both already realpath'd. */
+  readonly providers: readonly ProviderRuntime[];
+  /** Realpath of the vault, for the four-root overlap check. */
+  readonly vaultRoot: string;
+
+  readonly settings: PassSettings;
+  readonly lock?: EngineDeps["lock"];
+  readonly barrier?: Barrier;
+  readonly dryRun: boolean;
+  /** True on the first pass after Obsidian started (scrub trigger T2). */
+  readonly firstPassAfterStartup: boolean;
+  readonly msSinceLastStartupScrub: number;
+  /** True when the user asked for `Verify all files` (T7). */
+  readonly verifyAll: boolean;
+  readonly readiness?: ReadinessThresholds;
+}
+
+export interface ProviderRuntime {
+  readonly adapter: ProviderAdapter;
+  /** Realpath of the directory this adapter owns; writes are confined to it. */
+  readonly root: string;
+}
+
+export interface PassSettings {
+  readonly maxFileSizeBytes: number;
+  readonly maxFilesPerPass: number;
+  readonly probeDelayMs: number;
+  readonly localQuietMs: number;
+  readonly remoteQuietMs: number;
+  readonly clockSkewToleranceMs: number;
+  readonly backupKeep: number;
+  readonly scrubMaxAgeMs?: number;
+}
+
+export interface PassOutcome {
+  readonly report: PassReport;
+  readonly readiness: RemoteRecord;
+  /** Set when the pass never reached the engine. */
+  readonly preflight?: PreflightFailure;
+}
+
+export type PreflightFailure =
+  | { readonly kind: "root-overlap"; readonly detail: string }
+  | { readonly kind: "not-ready"; readonly reason: NotReadyReason }
+  | { readonly kind: "await-init" }
+  | { readonly kind: "probing" };
+
+/**
+ * Runs one pass against real files, from preflight to commit.
+ *
+ * Returns a report even when nothing ran. "The pass did nothing and here is
+ * why" is a result the status bar and the dry-run view both need; throwing
+ * would make the caller invent that answer itself.
+ */
+export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcome> {
+  const nowMs = deps.clock.nowMs();
+  const nowIso = new Date(nowMs).toISOString();
+
+  // ── four-root overlap (§9.7.5) ───────────────────────────────────────────
+  // Before anything reads or writes: nested roots make every later guarantee
+  // meaningless, because "inside the sync directory" and "inside the provider
+  // directory" stop being different questions.
+  const overlaps = findRootOverlaps(deps.guard, [
+    { name: "vault", realPath: deps.vaultRoot },
+    { name: "syncDir", realPath: deps.binding.syncDirPath },
+    { name: "backupDir", realPath: deps.home.layout.backupsDir },
+    ...deps.providers.map((p) => ({ name: `provider:${p.adapter.id}`, realPath: p.root })),
+  ]);
+  if (overlaps.length > 0) {
+    const detail = overlaps.map((o) => `${o.a} ${o.relation} ${o.b}`).join("; ");
+    return {
+      report: abortedReport(nowMs, deps, `root-overlap: ${detail}`),
+      readiness: await deps.home.loadRemote(deps.workspaceId, deps.binding.syncDirPath),
+      preflight: { kind: "root-overlap", detail },
+    };
+  }
+
+  // ── state, loaded before readiness because NR-8 needs it ─────────────────
+  // "This remote file used to have content" is a fact only the ledger holds,
+  // and NR-8 is the question "and now it is empty?". Reading the ledger first
+  // costs nothing — it is a local file and the pass needs it regardless.
+  const fingerprint = deps.hashBytes(new TextEncoder().encode(deps.binding.syncDirPath));
+  const loaded = await deps.home.loadObservations({
+    workspaceId: deps.workspaceId,
+    machineId: deps.machineId,
+    syncDirFingerprint: fingerprint,
+  });
+
+  // ── readiness (§9.6) ─────────────────────────────────────────────────────
+  const previous = await deps.home.loadRemote(deps.workspaceId, deps.binding.syncDirPath);
+  const reachable = await deps.syncDir.reachable();
+  const root = reachable ? await deps.syncDir.readRoot() : ({ status: "missing" } as const);
+  const scan = reachable
+    ? await deps.syncDir.scanWorkspace(deps.workspaceId)
+    : { counts: { files: 0, bytes: 0 }, zeroByteRels: [] };
+  const verdict = evaluateReadiness(
+    previous,
+    {
+      reachable,
+      root,
+      syncDirEmpty: reachable ? await deps.syncDir.isEmpty() : false,
+      workspaceSubtreeExists: reachable
+        ? await deps.syncDir.workspaceSubtreeExists(deps.workspaceId)
+        : false,
+      counts: scan.counts,
+      // NR-8: a file the ledger saw with bytes is now empty. That is the sync
+      // tool doing something wrong — a placeholder, a rollback, an interrupted
+      // transfer — and it is a whole-directory signal, not a per-file one.
+      remoteRegression: scan.zeroByteRels.some(
+        (rel) => loaded.file.remote[rel]?.remoteHadNonZeroSize === true,
+      ),
+      nowMs,
+    },
+    SUPPORTED_FORMAT_VERSION,
+    deps.readiness,
+  );
+
+  // The write probe is only asked once `root.json` is there. Asking earlier
+  // would create `.aiss/` in a directory the user has not initialised, and the
+  // next pass would then read that as "not empty" and refuse to offer them the
+  // one button that unblocks it.
+  const writable =
+    verdict.state === "READY" || verdict.state === "PROBING"
+      ? await deps.syncDir.probeWritable(deps.machineId)
+      : false;
+
+  const record: RemoteRecord =
+    verdict.state === "READY" && !writable
+      ? { ...verdict.record, state: "PROBING" }
+      : verdict.record;
+
+  await deps.home.saveRemote(deps.workspaceId, record, {
+    syncDirPath: deps.binding.syncDirPath,
+    nowIso,
+    initializedAt: root.status === "ok" ? nowIso : null,
+  });
+
+  if (record.state === "UNCONFIGURED" || record.state === "AWAIT_INIT") {
+    // AWAIT_INIT is read-only *including* the ledger: §7.2 S-16 says an
+    // uninitialised sync directory receives nothing at all, not even `.aiss/`.
+    return {
+      report: abortedReport(nowMs, deps, record.state === "AWAIT_INIT" ? "await-init" : "unconfigured"),
+      readiness: record,
+      ...(record.state === "AWAIT_INIT" ? { preflight: { kind: "await-init" as const } } : {}),
+    };
+  }
+
+  const remoteReadiness: EngineDeps["remoteReadiness"] =
+    record.state === "READY"
+      ? "ready"
+      : record.notReadyReason === "NR-4-format-too-new"
+        ? "unsupported-format"
+        : "not-ready";
+
+  // ── the manifest (§5.3) ──────────────────────────────────────────────────
+  const manifestLoad = await deps.syncDir.loadManifest();
+  const manifestWritable = manifestIsWritable(manifestLoad);
+
+  const state = createPassState({
+    observations: loaded.file,
+    manifest: manifestOrEmpty(manifestLoad, nowIso),
+    manifestWritable,
+    workspaceId: deps.workspaceId,
+    machineId: deps.machineId,
+    nowMs,
+    nowIso,
+    scrub: scrubContext(deps, loaded.file.remote, manifestLoad.status !== "ok", previous, record),
+  });
+
+  // ── the pass ─────────────────────────────────────────────────────────────
+  const backupWriter = createBackupWriter({
+    fs: deps.fs,
+    home: deps.home,
+    joinPath: deps.joinPath,
+    hashBytes: deps.hashBytes,
+    nowMs: () => deps.clock.nowMs(),
+    randomSuffix: () => deps.ids.token(4),
+    keep: deps.settings.backupKeep,
+  });
+
+  const report = await runPass({
+    fs: deps.fs,
+    clock: deps.clock,
+    ids: deps.ids,
+    adapters: deps.providers.map((p) => p.adapter),
+    ...(deps.barrier ? { barrier: deps.barrier } : {}),
+    replicaRoot: deps.binding.syncDirPath,
+    workspaceId: deps.workspaceId,
+    joinPath: deps.joinPath,
+    settings: deps.settings,
+    remoteReadiness,
+    dryRun: deps.dryRun,
+    ledger: state.ledger,
+    evidence: state.evidence,
+    hashBytes: deps.hashBytes,
+    backup: async (request) => {
+      const outcome = await backupWriter.backup({
+        sourcePath: request.sourcePath,
+        workspaceId: deps.workspaceId,
+        providerId: providerOf(request.neutralRel),
+        logicalId: request.logicalId,
+        remote: request.remote,
+        action: request.action,
+      });
+      return outcome.path;
+    },
+    mintWritePath: (target) => mintWritePath(deps, target),
+    machineIdPrefix: deps.machineId.slice(0, 8),
+    ...(deps.lock ? { lock: deps.lock } : {}),
+    nowIso: () => new Date(deps.clock.nowMs()).toISOString(),
+  });
+
+  // ── commit (§7.1 P8) ─────────────────────────────────────────────────────
+  // Unconditional, including after a partial or failed pass: the observations
+  // of files that were skipped are what let the next pass make progress on
+  // them. A dry run writes nothing, which is the one promise it makes.
+  if (!deps.dryRun) {
+    const observations = recordOutcomes(
+      state,
+      report.actions.map((action) => ({
+        neutralRel: action.neutralRel,
+        action: action.action,
+        result: action.result,
+      })),
+    );
+    await deps.home.saveObservations(deps.workspaceId, observations, nowMs);
+
+    const manifest = state.manifest();
+    // Not rewritten when a newer client is demonstrably using this directory
+    // (§5.3.4), and not written at all unless the remote is ready — a manifest
+    // describing a half-hydrated directory is worse than none.
+    if (manifest !== null && remoteReadiness === "ready") {
+      await deps.syncDir.saveManifest(manifest, nowIso);
+    }
+
+    // Re-scan when this pass added to the subtree, and record the new counts.
+    //
+    // The readiness scan runs before the pass, so without this the recorded
+    // counts are always one pass behind whatever we ourselves just wrote —
+    // and NR-5 ("the subtree vanished although we recorded files in it") would
+    // be blind for exactly one pass after every push. That is one pass in
+    // which an emptied sync directory reads as "nothing was ever here", which
+    // is the reading the whole state machine exists to refuse. A directory
+    // walk on the passes that actually wrote is a cheap price for closing it.
+    if (report.actions.some((action) => action.result === "APPLIED" && pushes(action.action))) {
+      const after = await deps.syncDir.scanWorkspace(deps.workspaceId);
+      await deps.home.saveRemote(
+        deps.workspaceId,
+        { ...record, lastKnownCounts: maxCounts(record.lastKnownCounts, after.counts) },
+        { syncDirPath: deps.binding.syncDirPath, nowIso, initializedAt: nowIso },
+      );
+    }
+  }
+
+  return { report, readiness: record };
+}
+
+/**
+ * Turns an absolute target the engine produced into a validated path.
+ *
+ * This is the evil-adapter defence of §8.2 at its narrowest point. An adapter
+ * is our code, but it is written to tolerate CLI layouts it has never seen, so
+ * a structure change upstream can make it emit a path outside its own root.
+ * The target is matched back to a known root and re-resolved through the
+ * per-level symlink walk — a path belonging to no root cannot be written at
+ * all, because there is no way to obtain the branded type for it.
+ */
+async function mintWritePath(deps: PassRunnerDeps, target: string): Promise<MintOutcome> {
+  const roots = [
+    deps.binding.syncDirPath,
+    ...deps.providers.map((p) => p.root),
+    deps.home.layout.backupsDir,
+  ];
+  for (const root of roots) {
+    const rel = relativeUnder(deps, root, target);
+    if (rel === null) continue;
+    const resolved = await resolveUnderRoot(deps.guard, root, rel);
+    return resolved.ok
+      ? { ok: true, value: resolved.value }
+      : {
+          ok: false,
+          violation: resolved.violation,
+          ...(resolved.detail ? { detail: resolved.detail } : {}),
+        };
+  }
+  return { ok: false, violation: "ROOT_OVERLAP", detail: "target belongs to no configured root" };
+}
+
+/** POSIX-separated remainder of `target` under `root`, or null if outside. */
+function relativeUnder(deps: PassRunnerDeps, root: string, target: string): string | null {
+  const rootParts = deps.guard.splitPath(root);
+  const targetParts = deps.guard.splitPath(target);
+  if (targetParts.length <= rootParts.length) return null;
+
+  const same = (a: string, b: string) =>
+    deps.guard.caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
+  for (const [index, part] of rootParts.entries()) {
+    if (!same(part, targetParts[index] ?? "")) return null;
+  }
+  return targetParts.slice(rootParts.length).join("/");
+}
+
+function scrubContext(
+  deps: PassRunnerDeps,
+  remoteEntries: Readonly<Record<string, unknown>>,
+  manifestUnusable: boolean,
+  previous: RemoteRecord,
+  current: RemoteRecord,
+): ScrubContext {
+  return {
+    maxAgeMs: deps.settings.scrubMaxAgeMs ?? DEFAULT_SCRUB_MAX_AGE_MS,
+    firstPassAfterStartup: deps.firstPassAfterStartup,
+    msSinceLastStartupScrub: deps.msSinceLastStartupScrub,
+    manifestUnusable,
+    // T5: coming back from NOT_READY means the directory may have been
+    // something else in the meantime, so nothing remembered about it counts.
+    justBecameReady: previous.state !== "READY" && current.state === "READY",
+    manuallyRequested: deps.verifyAll,
+    sampled: sampleForScrub(deps, Object.keys(remoteEntries)),
+  };
+}
+
+/**
+ * T6, the random sample.
+ *
+ * Its value is that it does not depend on a clock — which matters because a
+ * broken clock is one of the conditions T1 is meant to catch, and T1 reads a
+ * clock. Selection is by hashing each key with a per-pass token, so it is
+ * uniform, reproducible from that token when a test needs it, and needs no
+ * `Math.random` (banned outright below the infra layer).
+ */
+function sampleForScrub(deps: PassRunnerDeps, keys: readonly string[]): ReadonlySet<string> {
+  if (keys.length === 0) return new Set();
+  const size = Math.min(SCRUB_SAMPLE_MAX, Math.ceil(keys.length * SCRUB_SAMPLE_FRACTION));
+  const token = deps.ids.token(8);
+  const ranked = [...keys].sort((a, b) =>
+    deps.hashBytes(new TextEncoder().encode(token + a)) <
+    deps.hashBytes(new TextEncoder().encode(token + b))
+      ? -1
+      : 1,
+  );
+  return new Set(ranked.slice(0, size));
+}
+
+function abortedReport(nowMs: number, deps: PassRunnerDeps, reason: string): PassReport {
+  return {
+    startedAtMs: nowMs,
+    finishedAtMs: deps.clock.nowMs(),
+    outcome: "aborted",
+    dryRun: deps.dryRun,
+    abortReason: reason,
+    actions: [],
+    violations: [],
+    notices: [],
+  };
+}
+
+function pushes(action: string): boolean {
+  return action === "PUSH_NEW" || action === "PUSH_OVERWRITE";
+}
+
+/**
+ * The high-water mark, never lowered here.
+ *
+ * `evaluateReadiness` already keeps counts monotone while things are healthy;
+ * repeating the rule at the commit point matters because a scan taken straight
+ * after a write can race the sync tool moving a file out from under it, and
+ * writing a *smaller* number would arm the shrink detector against our own
+ * measurement noise.
+ */
+function maxCounts(a: RemoteRecord["lastKnownCounts"], b: RemoteRecord["lastKnownCounts"]) {
+  return { files: Math.max(a.files, b.files), bytes: Math.max(a.bytes, b.bytes) };
+}
+
+function providerOf(neutralRel: string): string {
+  const at = neutralRel.indexOf("/");
+  return at === -1 ? "" : neutralRel.slice(0, at);
+}

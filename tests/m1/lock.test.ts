@@ -210,3 +210,115 @@ describe("R-09 end to end: overlapping passes in one instance", () => {
     expect(sha256(landed)).toBe(await a.cli.session(SID).hash());
   });
 });
+
+
+// ── on disk ────────────────────────────────────────────────────────────────
+
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { sequentialIdGen } from "../../src/infra/clock";
+import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
+import { type PathGuardDeps, splitPathSegments } from "../../src/infra/path-guard";
+import { createHomeStore } from "../../src/infra/home-store";
+import { createFileLock } from "../../src/orchestration/lock-file";
+import { removeTree } from "../helpers/fs-cleanup";
+
+describe("R-10 on disk: two Obsidian windows, one lock file", () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    while (homes.length) removeTree(homes.pop() as string);
+  });
+
+  /** Two instances that differ only in pid, sharing one home directory. */
+  function instances(nowMs: () => number) {
+    const stateRoot = mkdtempSync(nodePath.join(tmpdir(), "aiss-lock-"));
+    homes.push(stateRoot);
+    const fs = createNodeFsGateway({
+      ids: sequentialIdGen(),
+      platform: process.platform,
+      pid: process.pid,
+      sleep: async () => undefined,
+    });
+    const guard: PathGuardDeps = {
+      fs,
+      platform: process.platform,
+      caseSensitive: process.platform === "linux",
+      joinPath: (...parts) => nodePath.join(...parts),
+      dirnameOf: (target) => nodePath.dirname(target),
+      splitPath: splitPathSegments,
+    };
+    const home = createHomeStore({ fs, guard, joinPath: (...p) => nodePath.join(...p), stateRoot });
+    const make = (pid: number) => {
+      let busy = false;
+      return createFileLock({
+        fs,
+        home,
+        workspaceId: "ws",
+        machineId: MACHINE,
+        pid,
+        nowMs,
+        inProcessBusy: () => busy,
+        onAcquired: () => {
+          busy = true;
+        },
+        onReleased: () => {
+          busy = false;
+        },
+      });
+    };
+    return { first: make(101), second: make(202), stateRoot };
+  }
+
+  it("grants it to one of them and refuses the other", async () => {
+    const { first, second } = instances(() => T0);
+
+    expect(await first.acquire()).toEqual({ ok: true });
+    expect(await second.acquire()).toMatchObject({ ok: false, reason: "LOCK_HELD" });
+  });
+
+  it("frees it on release", async () => {
+    const { first, second } = instances(() => T0);
+    await first.acquire();
+    await first.release();
+    expect(await second.acquire()).toEqual({ ok: true });
+  });
+
+  it("lets a stale lock be stolen, and stops the original from writing", async () => {
+    // Both halves matter. Without stealing, one crash wedges the plugin until
+    // a human finds and deletes a file. Without the epoch re-check, stealing
+    // means two passes writing the same file believing they each hold it.
+    let now = T0;
+    const { first, second } = instances(() => now);
+
+    await first.acquire();
+    expect(await first.mayWrite()).toBe(true);
+
+    now = T0 + STALE_AFTER_MS + 1;
+    expect(await second.acquire()).toEqual({ ok: true });
+    expect(await first.mayWrite(), "the original holder must notice").toBe(false);
+    expect(await second.mayWrite()).toBe(true);
+  });
+
+  it("does not remove a lock that was taken from it", async () => {
+    // Releasing the thief's lock would hand a third instance a free
+    // acquisition while the thief is mid-write.
+    let now = T0;
+    const { first, second } = instances(() => now);
+    await first.acquire();
+    now = T0 + STALE_AFTER_MS + 1;
+    await second.acquire();
+
+    await first.release();
+
+    expect(await second.mayWrite(), "the thief still holds it").toBe(true);
+  });
+
+  it("is not wedged by a corrupt lock file", async () => {
+    const { first, stateRoot } = instances(() => T0);
+    const lockPath = nodePath.join(stateRoot, "locks", "ws.lock");
+    await fsp.mkdir(nodePath.dirname(lockPath), { recursive: true });
+    await fsp.writeFile(lockPath, "{ this is not json");
+
+    expect(await first.acquire()).toEqual({ ok: true });
+  });
+});

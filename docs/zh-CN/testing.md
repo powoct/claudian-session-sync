@@ -562,8 +562,9 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | U-11d / U-12b / U-12c / U-14 | ✅ | `sync-engine.test.ts` |
 | U-16 / U-17 | ✅ | `readiness.test.ts` |
 | U-18b / R-01 / R-04b / R-05 / R-06 / R-09 / R-10 | ✅ | `sync-engine.test.ts` / `crash-points.test.ts` / `lock.test.ts` |
+| S-08 / S-16 / S-17 / S-18 / S-19 / S-20 | ✅ | `wired-pass.test.ts`——跑真实组合根 `runWorkspacePass`，状态全部落盘 |
+| R-10 落盘形态 | ✅ | `lock.test.ts` 尾部：两实例共用一个锁文件，含陈旧抢占与 epoch 失效 |
 | S-04c | ⏳ 批 4 | `resolutionAction` 已就绪，缺命令注册与 UI 触发 |
-| S-08 / S-17 / S-18 / S-19 / S-20 | ⏳ 批 4 | 就绪状态机与 store 落盘都在，但 world 里 `remoteReadiness` 还是常量；接上组合根后这五条一起补 |
 | S-09a / R-12 | ⏳ 批 4 | 需要 `FaultyFsGateway`（按 errno 注入单文件失败） |
 | S-10 | ⏳ 批 4 | 需要 world 支持一对 replica 服务两个 workspace |
 | S-11 | ⏳ 批 4 | 需要第二个 adapter 替身；另注：当前 `healthCheck` 把"项目目录不存在"当作 provider 不可用，而这恰恰是**新机器该拉取**的情形，接组合根时一并校正 |

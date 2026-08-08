@@ -59,7 +59,30 @@ export interface LedgerEntryRecord {
   readonly firstSeenMs: number;
   readonly lastSeenMs: number;
   readonly lastFullVerifyMs: number;
+  /**
+   * Hash from the last full read, and **the signature it was computed
+   * against** (§5.3.1 E1).
+   *
+   * The two travel together or not at all. `sig` above moves every time the
+   * file is observed, including passes that only watched it change without
+   * reading it — pairing that signature with an older hash is exactly the
+   * "stat says one thing, content says another" mistake E1 exists to avoid.
+   * `verifiedSig === null` means there is no usable pair, whatever
+   * `contentHash` says.
+   */
+  readonly verifiedSig: E0Signature | null;
   readonly contentHash: string;
+  readonly verifiedLineCount: number;
+  /**
+   * Has this remote file ever been observed with content? (decision table #14).
+   *
+   * Kept here rather than in the manifest, which §5.3 nominally makes the home
+   * of the size history: the manifest records only a current size, has no
+   * history to consult, and is untrusted besides. This is a machine-local
+   * monotone observation — "I have seen bytes here" — and it may only ever push
+   * a decision towards DEFER, which is what rule EV-1 permits it to do.
+   */
+  readonly remoteHadNonZeroSize: boolean;
   readonly lastAction: string;
   readonly lastResult: string;
   readonly abortStreak: number;
@@ -191,7 +214,13 @@ function asLedgerEntry(value: unknown): LedgerEntryRecord | null {
     firstSeenMs: v.firstSeenMs,
     lastSeenMs: typeof v.lastSeenMs === "number" ? v.lastSeenMs : v.firstSeenMs,
     lastFullVerifyMs: typeof v.lastFullVerifyMs === "number" ? v.lastFullVerifyMs : 0,
+    // A malformed verified signature degrades to "no pair", which costs a full
+    // read. Repairing it by keeping the hash would be the one outcome that
+    // costs correctness.
+    verifiedSig: asSignature(v.verifiedSig),
     contentHash: typeof v.contentHash === "string" ? v.contentHash : "",
+    verifiedLineCount: typeof v.verifiedLineCount === "number" ? v.verifiedLineCount : 0,
+    remoteHadNonZeroSize: v.remoteHadNonZeroSize === true,
     lastAction: typeof v.lastAction === "string" ? v.lastAction : "",
     lastResult: typeof v.lastResult === "string" ? v.lastResult : "",
     abortStreak: typeof v.abortStreak === "number" ? v.abortStreak : 0,
@@ -199,6 +228,21 @@ function asLedgerEntry(value: unknown): LedgerEntryRecord | null {
       typeof v.skippedForBudgetPasses === "number" ? v.skippedForBudgetPasses : 0,
     truncatedTailPasses: typeof v.truncatedTailPasses === "number" ? v.truncatedTailPasses : 0,
   };
+}
+
+function asSignature(value: unknown): E0Signature | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Partial<E0Signature>;
+  if (
+    typeof v.size !== "number" ||
+    typeof v.mtimeMs !== "number" ||
+    typeof v.ctimeMs !== "number" ||
+    typeof v.ino !== "number" ||
+    typeof v.tailHash !== "string"
+  ) {
+    return null;
+  }
+  return { size: v.size, mtimeMs: v.mtimeMs, ctimeMs: v.ctimeMs, ino: v.ino, tailHash: v.tailHash };
 }
 
 /** Drops entries not seen for LEDGER_GC_AGE_MS, at commit time (§5.5). */

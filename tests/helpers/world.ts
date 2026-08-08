@@ -29,6 +29,12 @@ import {
 import type { FsGateway } from "../../src/infra/fs-gateway";
 import { fixedClock, sequentialIdGen } from "../../src/infra/clock";
 import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
+import { type PathGuardDeps, splitPathSegments } from "../../src/infra/path-guard";
+import { type WorkspaceBinding, createHomeStore } from "../../src/infra/home-store";
+import { createSyncDirStore, newRootFile } from "../../src/infra/sync-dir-store";
+import { type PassOutcome, runWorkspacePass } from "../../src/orchestration/pass-runner";
+import { createFileLock } from "../../src/orchestration/lock-file";
+import { STATE_SCHEMA_VERSION } from "../../src/infra/state-store";
 import { createClaudeCodeAdapter } from "../../src/providers/claude-code/adapter";
 import {
   type EngineDeps,
@@ -47,7 +53,21 @@ import {
 } from "../../src/orchestration/pass-report";
 import { removeTree } from "./fs-cleanup";
 
+import { DEFAULT_READINESS, type ReadinessThresholds } from "../../src/domain/readiness";
+
 export type MachineName = "A" | "B";
+
+export interface WiredPassOptions {
+  readonly dryRun?: boolean;
+  /** Overrides part of the workspace binding, e.g. to point at a bad syncDir. */
+  readonly binding?: Partial<WorkspaceBinding>;
+  readonly barrier?: Barrier;
+  readonly withLock?: boolean;
+  readonly backupKeep?: number;
+  readonly firstPassAfterStartup?: boolean;
+  readonly verifyAll?: boolean;
+  readonly readiness?: ReadinessThresholds;
+}
 
 export const WORKSPACE_ID = "3f1a9c2e-6b47-4d18-9a03-5e7c8d21b4f6";
 
@@ -144,6 +164,8 @@ export class World {
 export class Machine {
   readonly localRoot: string;
   readonly replicaRoot: string;
+  /** `<homedir>/.ai-session-sync` for this machine (§5.5), a real directory. */
+  readonly homeRoot: string;
   readonly backupRoot: string;
   readonly quarantineRoot: string;
   readonly vaultPath: string;
@@ -160,8 +182,15 @@ export class Machine {
    * deleting the manifest must not touch it.
    */
   private readonly localEvidence = new Map<string, CachedContentFacts>();
-  /** Counts the reads a pass performs, which is how E1 is observable at all. */
-  readonly io = { readFile: 0, readTail: 0, lstat: 0 };
+  /**
+   * Counts the reads a pass performs, which is how E1 is observable at all.
+   *
+   * `readPaths` matters once the real stores are in play: a wired pass reads
+   * `observations.json`, `root.json` and the manifest through the same
+   * gateway, so a bare count cannot tell "we re-read every session" from "we
+   * loaded our own state".
+   */
+  readonly io = { readFile: 0, readTail: 0, lstat: 0, readPaths: [] as string[] };
 
   constructor(
     readonly name: MachineName,
@@ -170,7 +199,10 @@ export class Machine {
   ) {
     this.localRoot = path.join(root, "local");
     this.replicaRoot = path.join(root, "replica");
-    this.backupRoot = path.join(root, "backups");
+    this.homeRoot = path.join(root, "home", ".ai-session-sync");
+    // Inside the home root, as §5.5 puts it — so the wired path and the
+    // in-memory one write to the same place and `snapshot()` sees both.
+    this.backupRoot = path.join(this.homeRoot, "backups");
     this.quarantineRoot = path.join(root, "quarantine");
     this.vaultPath = path.join(root, "vault");
     this.clock = fixedClock(now());
@@ -178,7 +210,14 @@ export class Machine {
     // The escape rule is exercised for real: the project directory name is
     // derived from this machine's vault path, so A and B genuinely differ.
     this.projectDir = path.join(this.localRoot, escapeForTest(this.vaultPath));
-    for (const dir of [this.projectDir, this.replicaRoot, this.backupRoot, this.quarantineRoot, this.vaultPath]) {
+    for (const dir of [
+      this.projectDir,
+      this.replicaRoot,
+      this.homeRoot,
+      this.backupRoot,
+      this.quarantineRoot,
+      this.vaultPath,
+    ]) {
       mkdirSync(dir, { recursive: true });
     }
     mkdirSync(path.join(this.replicaRoot, WORKSPACE_ID, "claude-code"), { recursive: true });
@@ -203,6 +242,12 @@ export class Machine {
     this.io.readFile = 0;
     this.io.readTail = 0;
     this.io.lstat = 0;
+    this.io.readPaths.length = 0;
+  }
+
+  /** Full reads of session files only, excluding this plugin's own state. */
+  sessionReads(): string[] {
+    return this.io.readPaths.filter((target) => target.endsWith(".jsonl"));
   }
 
   /** Where this machine's replica keeps the manifest (architecture §5.3). */
@@ -314,6 +359,180 @@ export class Machine {
   }
 
   /**
+   * Runs a pass through the real composition root (§7.1 P0–P8).
+   *
+   * The difference from `pass()` is where the state comes from: everything —
+   * ledger, manifest, readiness record, lock, backups — is read from and
+   * written to real files under this machine's own roots. That is what makes
+   * the readiness scenarios testable at all, because they are about what
+   * survives between passes rather than what one pass computes.
+   *
+   * Readiness thresholds default to "no waiting" so a scenario does not have
+   * to sit out 90 seconds; a test that cares about the window passes its own.
+   */
+  async wiredPass(options: WiredPassOptions = {}): Promise<PassOutcome> {
+    const guard = await this.pathGuard();
+    const fs = countingGateway(this.nodeGateway(), this.io);
+    const home = createHomeStore({ fs, guard, joinPath: path.join, stateRoot: this.homeRoot });
+    const syncDir = createSyncDirStore({
+      fs,
+      guard,
+      joinPath: path.join,
+      syncDirRoot: this.replicaRoot,
+    });
+
+    const lock = options.withLock
+      ? createFileLock({
+          fs,
+          home,
+          workspaceId: WORKSPACE_ID,
+          machineId: this.machineId,
+          pid: this.name === "A" ? 4001 : 4002,
+          nowMs: () => this.clock.nowMs(),
+          inProcessBusy: () => this.passInFlight,
+          onAcquired: () => {
+            this.passInFlight = true;
+          },
+          onReleased: () => {
+            this.passInFlight = false;
+          },
+        })
+      : undefined;
+
+    return runWorkspacePass({
+      fs,
+      guard,
+      clock: this.clock,
+      ids: sequentialIdGen(),
+      joinPath: path.join,
+      hashBytes: sha256,
+      home,
+      syncDir,
+      binding: { ...this.binding(), ...options.binding },
+      machineId: this.machineId as never,
+      workspaceId: WORKSPACE_ID as never,
+      providers: [{ adapter: this.adapter(), root: this.localRoot }],
+      vaultRoot: this.vaultPath,
+      settings: {
+        maxFileSizeBytes: 20 * 1024 * 1024,
+        maxFilesPerPass: 200,
+        probeDelayMs: 0,
+        localQuietMs: 0,
+        remoteQuietMs: 0,
+        clockSkewToleranceMs: 5000,
+        backupKeep: options.backupKeep ?? 3,
+      },
+      ...(lock ? { lock } : {}),
+      ...(options.barrier ? { barrier: options.barrier } : {}),
+      dryRun: options.dryRun ?? false,
+      firstPassAfterStartup: options.firstPassAfterStartup ?? false,
+      msSinceLastStartupScrub: 0,
+      verifyAll: options.verifyAll ?? false,
+      readiness: options.readiness ?? { ...DEFAULT_READINESS, probes: 1, minAgeMs: 0 },
+    });
+  }
+
+  /** Two wired passes: the first observes, the second can act (see `settle`). */
+  async wiredSettle(options: WiredPassOptions = {}): Promise<PassOutcome> {
+    await this.wiredPass(options);
+    return this.wiredPass(options);
+  }
+
+  /** What the user clicking "initialise this sync directory" does (§9.6.3). */
+  async initialiseSyncDir(rootId = `root-${this.name}`): Promise<void> {
+    const guard = await this.pathGuard();
+    const store = createSyncDirStore({
+      fs: this.nodeGateway(),
+      guard,
+      joinPath: path.join,
+      syncDirRoot: this.replicaRoot,
+    });
+    await store.initialise(
+      newRootFile({
+        rootId,
+        nowIso: new Date(this.clock.nowMs()).toISOString(),
+        machineId: this.machineId,
+        label: this.name,
+        platform: process.platform,
+      }),
+    );
+  }
+
+  get machineId(): string {
+    return this.name === "A"
+      ? "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+      : "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+  }
+
+  binding(): WorkspaceBinding {
+    return {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      workspaceId: WORKSPACE_ID as never,
+      syncDirPath: this.replicaRoot,
+      providers: { "claude-code": { enabled: true } },
+      createdAt: "2026-08-08T00:00:00.000Z",
+    };
+  }
+
+  private guardCache: PathGuardDeps | null = null;
+
+  /**
+   * Case sensitivity by experiment, not by platform (§9.7.4).
+   *
+   * Guessing from `process.platform` is exactly what the probe exists to
+   * avoid: macOS can be formatted case-sensitive and a Linux CI runner can
+   * mount a filesystem that is not, and either way a wrong answer turns the
+   * four-root overlap check into a formality.
+   */
+  private async pathGuard(): Promise<PathGuardDeps> {
+    if (this.guardCache) return this.guardCache;
+    const probe = path.join(this.homeRoot, "case-probe");
+    await fsp.writeFile(probe, "");
+    const caseSensitive = !(await fsp
+      .stat(path.join(this.homeRoot, "CASE-PROBE"))
+      .then(() => true)
+      .catch(() => false));
+    await fsp.rm(probe, { force: true });
+
+    this.guardCache = {
+      fs: this.nodeGateway(),
+      platform: process.platform,
+      caseSensitive,
+      joinPath: (...parts) => path.join(...parts),
+      dirnameOf: (target) => path.dirname(target),
+      splitPath: splitPathSegments,
+    };
+    return this.guardCache;
+  }
+
+  private nodeGateway() {
+    return createNodeFsGateway({
+      ids: sequentialIdGen(),
+      platform: process.platform,
+      pid: process.pid,
+      sleep: async () => undefined,
+    });
+  }
+
+  private adapter() {
+    return createClaudeCodeAdapter({
+      providerRoot: this.localRoot,
+      vaultRealPath: this.vaultPath,
+      customDirName: escapeForTest(this.vaultPath),
+      joinPath: (...parts) => path.join(...parts),
+      listDir: async (dir) =>
+        (await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])).map((e) => ({
+          name: e.name,
+          isFile: e.isFile(),
+        })),
+      statFile: async (target) => {
+        const st = await fsp.stat(target).catch(() => null);
+        return st ? { mtimeMs: st.mtimeMs } : null;
+      },
+    });
+  }
+
+  /**
    * Runs a pass that dies at `at`, the way a killed process would.
    *
    * The signal is not an Error, so nothing in the engine can catch it — commit
@@ -337,31 +556,8 @@ export class Machine {
   }
 
   private engineDeps(options: { dryRun?: boolean; barrier?: Barrier }): EngineDeps {
-    const fs = countingGateway(
-      createNodeFsGateway({
-        ids: sequentialIdGen(),
-        platform: process.platform,
-        pid: process.pid,
-        sleep: async () => undefined,
-      }),
-      this.io,
-    );
-
-    const adapter = createClaudeCodeAdapter({
-      providerRoot: this.localRoot,
-      vaultRealPath: this.vaultPath,
-      customDirName: escapeForTest(this.vaultPath),
-      joinPath: (...parts) => path.join(...parts),
-      listDir: async (dir) =>
-        (await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])).map((e) => ({
-          name: e.name,
-          isFile: e.isFile(),
-        })),
-      statFile: async (target) => {
-        const st = await fsp.stat(target).catch(() => null);
-        return st ? { mtimeMs: st.mtimeMs } : null;
-      },
-    });
+    const fs = countingGateway(this.nodeGateway(), this.io);
+    const adapter = this.adapter();
 
     return {
       fs,
@@ -509,7 +705,10 @@ class MemoryLedger implements LedgerView {
  * point of the cache is the I/O it does not do, so the I/O is what gets
  * asserted.
  */
-function countingGateway(inner: FsGateway, counts: { readFile: number; readTail: number; lstat: number }): FsGateway {
+function countingGateway(
+  inner: FsGateway,
+  counts: { readFile: number; readTail: number; lstat: number; readPaths: string[] },
+): FsGateway {
   return {
     ...inner,
     async lstat(target) {
@@ -518,6 +717,7 @@ function countingGateway(inner: FsGateway, counts: { readFile: number; readTail:
     },
     async readFile(target) {
       counts.readFile++;
+      counts.readPaths.push(target);
       return inner.readFile(target);
     },
     async readTail(target, n) {
