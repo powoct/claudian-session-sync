@@ -1782,7 +1782,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 32 | `formatVersion` 与 `schemaVersion` 分开；前者更高 → 完全只读，后者更高 → 可搬文件但不写回 | 共用一个版本号 | 布局版本描述真实数据位置（读错就写错地方），manifest 版本只描述缓存 |
 | 33 | 用 `logicalIdPattern` 白名单识别 session，冲突副本模式黑名单只用于报告文案 | 纯模式黑名单 | OneDrive 的 `*-<机器名>` 模式过宽会误隔离合法 session |
 | 34 | 插件永不移动/删除 sync-dir 里不认识的文件，只复制到隔离区 | 移入 `.quarantine/` | 移动会在原位置产生删除，被同步工具传播到所有机器，把误判代价放大 |
-| 35 | E1 命中且两侧 hash 相等时**不调用 `plan()`**，直接产出 `NOOP` | 把缓存 hash 作为 `SideFacts.observedHash` 喂进 planner | ADR-12 只有在缓存 hash **无路可走**时才是结构性的。喂进 planner 就得靠"planner 会正确处理它"，那是纪律；不调用 planner 则是控制流事实 |
+| 35 | E1 命中且两侧 hash 相等时**不调用 `plan()`**，直接产出 `NOOP` | 把缓存 hash 作为 `SideFacts.observedHash` 喂进 planner | ADR-12 只有在缓存 hash **无路可走**时才是结构性的。喂进 planner 就得靠"planner 会正确处理它"，那是纪律；不调用 planner 则是控制流事实。**这条分支不带 `conflictKnown` 是对的**：它只在两侧 hash 相等时可达，而内容相同就不存在需要"已知"的分歧；曾经冲突过的一对在内容一致后，旧 conflictId 自然不再被算出（U-21） |
 | 36 | `*_NEW` 的落地用 `link + unlink` 实现不覆盖 rename，`target-exists` 记 `ABORTED_PRECONDITION` | 与 `*_OVERWRITE` 共用覆盖式原子写 | `*_NEW` 从不备份（前提是"目标不存在"），所以前提错了就是无备份的静默销毁；而"本机 CLI 刚好新建了同名 session"不是奇景，是开始一段对话的常态 |
 | 37 | 原子写自己建目标目录 | 每个调用点各自 `mkdirp` | `*_NEW` 的目标目录经常不存在（对端没用过的 workspace 子树、本机 CLI 没开过这个 vault 的 project 目录）。路径此时已被证明落在配置的 root 内，建到它的那串目录不会多给出任何触及范围；而"每个调用点记得建"的结果是有一个没记得——真实发生过，表现为每次 push 都 ENOENT |
 | 38 | 设置分两处：可移植行为参数进 vault 的 `data.json`，路径与 provider 开关进本机 binding | 全部放 `data.json` | 判据仍是 §5.6 规则 1——把 (a) 原样拷到另一台机器必须仍然正确。sync 目录路径是全插件最机器相关的值，放进随 vault 同步的文件里，Mac 的路径下一次同步就会盖掉 Windows 的，而且不报错 |

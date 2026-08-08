@@ -1,12 +1,13 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-08（批 4 完成）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-09（批 4 完成 + review/4 整改，验收套件已备好）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
 ## 当前状态：M1 代码完成，剩真机十步验收
 
-批 1–4 全部落地：**757 条测试、632 条 m1 阻塞用例**。插件现在能在真机上跑——设置面板、状态栏、报告视图、三条冲突命令、定时 pass 都接好了，状态全部落盘。
-下一步是 [testing.md §9.4](docs/zh-CN/testing.md) 的真机十步验收（Mac ↔ Windows）。
+批 1–4 全部落地并通过 [review/4](review/4_m1-batch4-review.md)（0 Blocker / 0 高危）：**759 条测试、632 条 m1 阻塞用例**。插件现在能在真机上跑——设置面板、状态栏、报告视图、三条冲突命令、定时 pass 都接好了，状态全部落盘。
+
+**下一步是真机十步验收**（Mac ↔ Windows）。执行套件已备好：**`tmp/acceptance/`**（见下方「真机验收怎么跑」）。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
@@ -22,7 +23,8 @@
 | **[review/3](review/3_m1-batch2-batch3-review.md) 整改** | ✅ **完成** | §3.1/§3.2/§3.3 三个正确性问题 + §4.1/§4.2/§4.4/§4.5 的覆盖与门禁欠账（见下） |
 | **M1 批 4a · 状态落盘门面** | ✅ **完成** | json-file / home-store / sync-dir-store / backup-writer / lock-file / state-adapters / pass-runner；S-08、S-16…S-20 首次有端到端证据 |
 | **M1 批 4b · Obsidian UI** | ✅ **完成** | plugin-runtime（无 Obsidian 类型）+ 设置面板 / 报告 / 冲突面板 / 8 条命令；S-04c 三种解决方式全绿 |
-| M1 真机十步验收 | ⬜ 未开始 | [testing.md §9.4](docs/zh-CN/testing.md) |
+| **[review/4](review/4_m1-batch4-review.md) 整改** | ✅ **完成** | 2 条中低危讨论点已处理；写验收脚本时另抓到一个 dry-run 违反 ADR-27 的真 bug |
+| M1 真机十步验收 | ⬜ **待执行**，套件已备好 | [testing.md §9.4](docs/zh-CN/testing.md) + `tmp/acceptance/` |
 
 ### M0 交付了什么
 
@@ -92,6 +94,56 @@ npm run verify      # check:pinned-deps → typecheck → lint → check:secrets
 
 三处刻意的偏差都记在了架构文档里：ledger 多存 `verifiedSig` 与 `remoteHadNonZeroSize`（§5.5 表格）、`local` 用 neutralRel 做 key（同处）、设置分两处（ADR-38）。
 
+### review/4 整改（2026-08-09）
+
+[review/4](review/4_m1-batch4-review.md) 报了 **0 Blocker、0 高危**，两条中低危讨论点都已处理：
+
+| 项 | 处理 |
+|---|---|
+| §3.1 E1 分支跳过 `conflictKnown` | 在 `sync-engine.ts` 的分支上方与 ADR-35 各补了推论：**这条分支只在两侧 hash 相等时可达，内容相同就没有需要"已知"的分歧**；曾冲突过的一对在内容一致后旧 conflictId 自然不再被算出（U-21） |
+| §3.2 `remote-not-ready` 文案 | `describeOutcome` 补一句"只有保留本机版本才写 sync 目录，保留对方版本写本机、仍然可用"——两个按钮在用户眼里对称，只说一个不能用会读成"冲突没法解决" |
+
+**写真机验收脚本时抓到的 bug（review/4 未发现）**：**dry-run 违反 ADR-27**。写到步骤 1 的「五棵树字节零变化」时去核对代码，发现两处：
+
+1. 就绪的**可写探测**会建一个 `.aiss/.probe-<id>` 再删掉——没有净变化，但仍然是一次写；
+2. **`remote.json` 无条件写回**——文件内容确实变了，而且它改变的是*下一次* pass 的判断。
+
+ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住的例外**。现在 dry-run 不探测（改用上一次真实 pass 证明过的可写性）、不写 remote.json，并有用例 `plugin-runtime.test.ts` 的「leaves all five trees byte-identical」把五棵树逐字节钉死——去掉修复它就红。
+
+顺带把 `conflict-commands.test.ts` 与 `ui.test.ts` 里跑双机多轮 pass 的用例标了显式 `SLOW = 30_000`：它们在覆盖率插桩下会超过 vitest 5 秒默认值，而那个默认值本身值得保留在全局。
+
+## 真机验收怎么跑
+
+套件在 **`tmp/acceptance/`**（`tmp/` 在 gitignore 里，所以它不入库，**要手工拷到两台机器**，和当年的探测套件一样）。
+
+| 文件 | 干什么 |
+|---|---|
+| `README.md` | 给人看：先决条件、打包分发、跑不过时先看哪几条 |
+| `AGENTS.md` | 给目标机器上的 agent 看：§0 安全红线 + 十步逐条的做法、期望、证据 |
+| `evidence.mjs` | 证据工具（零依赖）：给「五棵树」拍快照、出 [testing.md §9.3](docs/zh-CN/testing.md) 的表格、`diff`、**`check`（验 I1，退出码非 0 就是最严重那类失败）** |
+| `scripts/install-plugin.{sh,ps1}` | 把 `main.js` + `manifest.json` 装进 vault 的插件目录 |
+| `templates/record.md` | §9.3 的验收记录模板 |
+
+最短路径：
+
+```bash
+npm run verify && npm run build          # 开发机；记下 git rev-parse --short HEAD
+tar czf aiss-acceptance.tgz -C tmp acceptance
+mkdir -p /tmp/aiss-plugin && cp main.js manifest.json /tmp/aiss-plugin/
+# 把这两样拷到 Mac 与 Windows，在目标机器上：
+#   ./scripts/install-plugin.sh "<vault>" "<产物目录>"
+#   node evidence.mjs config --vault "<vault>"
+# 然后让 agent 读 AGENTS.md 往下走
+```
+
+**三个最容易浪费时间的点**（README 里都写了，这里再点一次）：
+
+1. **workspace identity 只在机器 A 创建一次**，B 上手工拷 `<vault>/.ai-session-sync/workspace.json` 过去。两边各点一次 Create 会生成两个 id、两棵互不可见的子树，而且**不报错**——ADR-20 要防的正是这个。
+2. **就绪要等**：READY 需要连续 2 次 pass 且首末跨度 ≥ 90 秒。状态栏停在 `checking folder` 不是错误。
+3. **B 上按 ID resume**，不要用 picker（F-1：picker 只列交互式来源的会话，同步过来的看不见）。
+
+跑完把 `out/` 里除 `blobs/` 外的东西拿回来，按 §9.3 合成记录，归档到 `docs/zh-CN/findings/<日期>-m1-acceptance.md`。**`out/blobs/` 是对话原文，只在步骤 8 产生，跑完就删。**
+
 ### review/3 整改（2026-08-08）
 
 [review/3](review/3_m1-batch2-batch3-review.md) 报了 1 高、1 中高、1 中和一批覆盖缺口，全部处理完：
@@ -160,8 +212,9 @@ tests/build/                     脚手架自检：bundle 合同、门禁脚本�
 .github/workflows/ci.yml         三平台 job + nightly property job
 .gitattributes                   eol=lf；fixtures 与 *.jsonl 完全不转换
 
-tmp/probe/                       探测套件（gitignore，一次性交付物；留作 CLI 大版本升级后的回归复测工具）
+tmp/probe/                       2026-08 的探测套件（gitignore；留作 CLI 大版本升级后的回归复测工具）
 tmp/probe-results/               两台真机的原始产物（gitignore；报告已归档进 findings，原始 JSON 快照只在本地）
+tmp/acceptance/                  **M1 真机十步验收套件**（gitignore，要手工拷到两台机器）——见上方「真机验收怎么跑」
 ```
 
 ### 必须遵守的约定（写代码时最容易违反的几条）

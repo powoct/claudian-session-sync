@@ -193,8 +193,16 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
   // would create `.aiss/` in a directory the user has not initialised, and the
   // next pass would then read that as "not empty" and refuse to offer them the
   // one button that unblocks it.
-  const writable =
-    verdict.state === "READY" || verdict.state === "PROBING"
+  //
+  // A dry run does not probe at all. The probe writes a file and deletes it,
+  // which leaves no net change but is still a write — and ADR-27 makes dry-run
+  // absolutely read-only precisely so that "the trees are byte-identical
+  // afterwards" is a claim with no exceptions to remember. What it uses
+  // instead is the last real pass's answer: writability was proved then, and a
+  // dry run's job is to report what a real pass would do, not to re-prove it.
+  const writable = deps.dryRun
+    ? previous.state === "READY"
+    : verdict.state === "READY" || verdict.state === "PROBING"
       ? await deps.syncDir.probeWritable(deps.machineId)
       : false;
 
@@ -203,11 +211,16 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
       ? { ...verdict.record, state: "PROBING" }
       : verdict.record;
 
-  await deps.home.saveRemote(deps.workspaceId, record, {
-    syncDirPath: deps.binding.syncDirPath,
-    nowIso,
-    initializedAt: root.status === "ok" ? nowIso : null,
-  });
+  // Not persisted on a dry run either: advancing the readiness probe counter
+  // is a change to what the *next* pass will decide, which is exactly the kind
+  // of side effect "changes nothing" has to exclude.
+  if (!deps.dryRun) {
+    await deps.home.saveRemote(deps.workspaceId, record, {
+      syncDirPath: deps.binding.syncDirPath,
+      nowIso,
+      initializedAt: root.status === "ok" ? nowIso : null,
+    });
+  }
 
   if (record.state === "UNCONFIGURED" || record.state === "AWAIT_INIT") {
     // AWAIT_INIT is read-only *including* the ledger: §7.2 S-16 says an

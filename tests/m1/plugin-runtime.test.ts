@@ -7,6 +7,7 @@
  * initialised directory are all things the plugin will not invent — so each
  * needs to be a state the user can see and act on rather than silence.
  */
+import { createHash } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -219,7 +220,84 @@ describe("providers", () => {
   });
 });
 
+/**
+ * Every byte under a directory, as a comparable list.
+ *
+ * `readdir` alone would only catch files appearing and disappearing; the
+ * interesting dry-run failure is a file being *rewritten* with the same name,
+ * which is what `observations.json` and `remote.json` do on a real pass.
+ */
+async function treeDigest(root: string, prefix = ""): Promise<string[]> {
+  const entries = await fsp.readdir(root, { withFileTypes: true }).catch(() => []);
+  const out: string[] = [];
+  for (const entry of entries) {
+    const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) out.push(...(await treeDigest(full, rel)));
+    else if (entry.isFile()) {
+      const bytes = await fsp.readFile(full);
+      out.push(`${rel}:${bytes.length}:${createHash("sha256").update(bytes).digest("hex")}`);
+    }
+  }
+  return out.sort();
+}
+
+/** The five trees of testing.md §8.6, for one machine. */
+async function fiveTrees(h: RuntimeHarness): Promise<string[]> {
+  const roots = [
+    ["local", h.providerRoot],
+    ["replica", h.syncDir],
+    ["state", path.join(h.homedir, ".ai-session-sync")],
+    ["vault", path.join(h.vaultRoot, ".ai-session-sync")],
+  ] as const;
+  const out: string[] = [];
+  for (const [name, root] of roots) {
+    out.push(...(await treeDigest(root)).map((line) => `${name}/${line}`));
+  }
+  return out;
+}
+
 describe("dry run", () => {
+  it("leaves all five trees byte-identical (ADR-27, §8.6)", async () => {
+    // "Absolutely read-only" has to have no exceptions to remember, or the
+    // promise stops being checkable. Two of them existed: the readiness write
+    // probe (writes a file and deletes it — no net change, still a write) and
+    // persisting the readiness record (no visible file change, but it moves
+    // what the *next* pass decides).
+    const h = await makeHarness();
+    await h.appendSession(SID, 6);
+    await h.configure();
+    await h.settle();
+
+    const before = await fiveTrees(h);
+    await h.runtime.syncNow({ dryRun: true });
+    await h.runtime.syncNow({ dryRun: true });
+    const after = await fiveTrees(h);
+
+    expect(after).toEqual(before);
+  });
+
+  it("still reports what it would have done", async () => {
+    const h = await makeHarness();
+    await h.appendSession(SID, 6);
+    await h.configure();
+    await h.settle();
+    await h.appendSession(SID, 3);
+    await h.runtime.syncNow();
+    h.advanceClock(95_000);
+
+    const before = await fiveTrees(h);
+    await h.runtime.syncNow({ dryRun: true });
+    const after = await fiveTrees(h);
+
+    const report = h.runtime.lastPassReport();
+    expect(report?.dryRun).toBe(true);
+    // It decided to push and said so, without pushing.
+    expect(report?.actions.map((a) => a.action)).toContain("PUSH_OVERWRITE");
+    expect(report?.actions.every((a) => a.result !== "APPLIED")).toBe(true);
+    expect(after).toEqual(before);
+  });
+
   it("produces a report and changes nothing", async () => {
     const h = await makeHarness();
     await h.appendSession(SID, 6);

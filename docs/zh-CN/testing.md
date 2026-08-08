@@ -567,6 +567,7 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | S-04c | ✅ | `conflict-commands.test.ts`——三种解决方式各一条，且都断言"没被选中的那支仍然可达" |
 | UI 层（设置面板 / 报告 / 冲突面板） | ✅ | `ui.test.ts`——经 vitest alias 把 `obsidian` 指向 stub；断言的是"每一次拒绝都带着理由到达屏幕"，不是渲染出了节点 |
 | 组合根（首次运行三步、机器身份、设置钳制） | ✅ | `plugin-runtime.test.ts` |
+| §8.6 dry-run 五棵树零变化（ADR-27） | ✅ | `plugin-runtime.test.ts`——真机验收脚本写到步骤 1 时才发现当时还不成立：可写探测与就绪记录都在 dry-run 里写了 |
 | S-09a / R-12 | ⏳ 批 4 | 需要 `FaultyFsGateway`（按 errno 注入单文件失败） |
 | S-10 | ⏳ 批 4 | 需要 world 支持一对 replica 服务两个 workspace |
 | S-11 | ⏳ 批 4 | 需要第二个 adapter 替身；另注：当前 `healthCheck` 把"项目目录不存在"当作 provider 不可用，而这恰恰是**新机器该拉取**的情形，接组合根时一并校正 |

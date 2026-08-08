@@ -265,6 +265,14 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const localE1 = cachedE1(deps, file.neutralRel, "local", localO2, localStable.stable, scrub);
       const remoteE1 = cachedE1(deps, file.neutralRel, "remote", remoteO2, remoteStable.stable, scrub);
 
+      // Note what this branch does *not* carry: `conflictKnown`. Skipping
+      // `plan()` skips its "this pair is already quarantined, do not pile up
+      // another copy" case — and that is sound rather than an omission,
+      // because the branch is only reachable when the two hashes are equal,
+      // and equal content is not a disagreement to know about. A pair that was
+      // in conflict and is now identical has already stopped being one: the
+      // conflict id is derived from the two hashes, so the old one is simply
+      // never computed again (U-21).
       if (
         deps.remoteReadiness === "ready" &&
         localE1 !== null &&

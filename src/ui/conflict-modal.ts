@@ -116,7 +116,14 @@ export function describeOutcome(
     case "branch-moved":
       return "That session changed since this list was drawn, so this is no longer the same disagreement. Run a sync and try again.";
     case "remote-not-ready":
-      return "The sync folder is not ready, so nothing may be written to it yet.";
+      // Naming the other button matters: from the user's side the two look
+      // symmetric, and being told one of them is unavailable without being
+      // told the other still works reads as "conflicts cannot be resolved".
+      return (
+        "The sync folder is not ready, so nothing may be written to it yet. " +
+        "Only keeping this machine's version writes to the sync folder — keeping the other " +
+        "machine's version writes here and is still available."
+      );
     case "backup-failed":
       return "The backup could not be written, so nothing was overwritten.";
     case "unknown-conflict":

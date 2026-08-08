@@ -19,6 +19,17 @@ afterEach(async () => {
   while (machines.length) await machines.pop()?.dispose();
 });
 
+/**
+ * Every case here drives two real machines through several full passes, and a
+ * pass deliberately waits: readiness wants two observations spanning 90 s and
+ * stability wants a file to hold still across a pass, so the harness jumps a
+ * fake clock and runs three passes per `settle()`. Under coverage
+ * instrumentation that comfortably exceeds vitest's 5 s default — which is a
+ * useful default and worth keeping global, so the exception is stated here
+ * rather than raised for the whole suite.
+ */
+const SLOW = 30_000;
+
 const read = async (target: string) =>
   new Uint8Array(await fsp.readFile(target).catch(() => Buffer.alloc(0)));
 
@@ -65,7 +76,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     expect(only?.meta.localLineCount).toBeGreaterThan(0);
     expect(only?.meta.remoteLineCount).toBeGreaterThan(0);
     expect(JSON.stringify(only?.meta)).not.toContain('"text"');
-  });
+  }, SLOW);
 
   it("keeps this machine's version, and the other stays reachable", async () => {
     const { b, workspaceId } = await forked();
@@ -85,7 +96,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     if (outcome.ok && outcome.action !== "REVEAL") {
       expect(sha256(await read(outcome.backupPath as string))).toBe(theirs);
     }
-  });
+  }, SLOW);
 
   it("keeps the other machine's version, and this one stays reachable", async () => {
     const { b, workspaceId } = await forked();
@@ -100,7 +111,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     if (outcome.ok && outcome.action !== "REVEAL") {
       expect(sha256(await read(outcome.backupPath as string))).toBe(mine);
     }
-  });
+  }, SLOW);
 
   it("shows both without writing anything", async () => {
     // The third option is not padding: two buttons force a guess, and the
@@ -122,7 +133,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
       sha256(await read(b.sessionPath(SID))),
       sha256(await read(b.replicaPath(workspaceId, SID))),
     ]).toEqual(before);
-  });
+  }, SLOW);
 
   it("converges after a resolution instead of conflicting again", async () => {
     const { b, workspaceId } = await forked();
@@ -138,7 +149,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     for (const action of b.runtime.lastPassReport()?.actions ?? []) {
       expect(action.action, JSON.stringify(action)).not.toBe("CONFLICT");
     }
-  });
+  }, SLOW);
 });
 
 describe("a resolution refuses when it is no longer the same disagreement", () => {
@@ -152,7 +163,7 @@ describe("a resolution refuses when it is no longer the same disagreement", () =
     const outcome = await b.runtime.resolve(only?.conflictId as string, "keep-local");
 
     expect(outcome).toEqual({ ok: false, reason: "branch-moved" });
-  });
+  }, SLOW);
 
   it("declines an id that is not there", async () => {
     const { b } = await forked();
@@ -160,7 +171,7 @@ describe("a resolution refuses when it is no longer the same disagreement", () =
       ok: false,
       reason: "unknown-conflict",
     });
-  });
+  }, SLOW);
 
   it("declines to push into a sync folder that is not ready", async () => {
     // Keeping *this* machine's version writes into the sync folder, and that
@@ -182,5 +193,5 @@ describe("a resolution refuses when it is no longer the same disagreement", () =
       reason: "remote-not-ready",
     });
     expect((await b.runtime.resolve(only?.conflictId as string, "keep-remote")).ok).toBe(true);
-  });
+  }, SLOW);
 });

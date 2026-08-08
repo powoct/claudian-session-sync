@@ -14,6 +14,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -50,23 +51,32 @@ describe("typecheck covers the code it is meant to guard", () => {
 });
 
 describe("lint covers the code it is meant to guard", () => {
-  it("reports on src/, tests/ and scripts/", () => {
-    const eslintBin = path.join(REPO_ROOT, "node_modules", "eslint", "bin", "eslint.js");
-    const result = spawnSync(process.execPath, [eslintBin, ".", "--format", "json"], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-    });
+  /**
+   * Asked of ESLint's config resolution, not of a full lint run.
+   *
+   * The question is "would this file be linted", and `isPathIgnored` answers
+   * exactly that in milliseconds. Actually linting the repo answers it too,
+   * and used to — but once type-aware rules were switched on that meant
+   * building a TypeScript program inside a test worker while the rest of the
+   * suite ran, which is slow enough to be flaky and heavy enough to be killed.
+   * The old form also swallowed that: `JSON.parse(stdout || "[]")` turns "the
+   * linter died" into "the linter reported nothing", and the two need
+   * different fixes.
+   */
+  it("reports on src/, tests/, scripts/ — and never on build output", async () => {
+    const eslint = new ESLint({ cwd: REPO_ROOT });
+    const linted = async (rel: string) =>
+      !(await eslint.isPathIgnored(path.join(REPO_ROOT, rel)));
 
-    const linted = (JSON.parse(result.stdout || "[]") as Array<{ filePath: string }>).map((entry) =>
-      path.relative(REPO_ROOT, entry.filePath).split("\\").join("/"),
-    );
+    expect(await linted("src/main.ts")).toBe(true);
+    expect(await linted("src/domain/planner.ts")).toBe(true);
+    expect(await linted("eslint.config.mjs")).toBe(true);
+    expect(await linted("scripts/build.mjs")).toBe(true);
+    expect(await linted("tests/helpers/world.ts")).toBe(true);
 
-    expect(linted).toContain("src/main.ts");
-    expect(linted).toContain("eslint.config.mjs");
-    expect(linted.some((file) => file.startsWith("scripts/"))).toBe(true);
-    expect(linted.some((file) => file.startsWith("tests/"))).toBe(true);
-    // The build output must never be linted; it is generated, not authored.
-    expect(linted).not.toContain("main.js");
-  }, 180_000);
+    // Generated, not authored. Linting it would report on esbuild's output and
+    // teach nobody anything.
+    expect(await linted("main.js")).toBe(false);
+    expect(await linted("coverage/index.html")).toBe(false);
+  }, 60_000);
 });

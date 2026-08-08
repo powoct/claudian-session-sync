@@ -66,6 +66,14 @@ function makeTab(harness: RuntimeHarness): AiSessionSyncSettingTab {
  * while actually being a `FakeElement`. Casting in one named place keeps that
  * seam visible instead of scattering `as unknown as` through the assertions.
  */
+/**
+ * The two conflict cases drive two real machines through several full passes,
+ * and a pass deliberately waits (readiness window, stability window). Under
+ * coverage that exceeds vitest's 5 s default, which is a good default and
+ * stays global — so the exception is named here instead.
+ */
+const SLOW = 30_000;
+
 const asFake = (element: HTMLElement): FakeElement => element as unknown as FakeElement;
 
 const named = (name: string) => settingsCreated.find((setting) => setting.name === name);
@@ -249,7 +257,7 @@ describe("the conflict view", () => {
     expect(text.toLowerCase()).not.toContain("remote version");
     expect(text).not.toContain("on A");
     expect(text).not.toContain("on B");
-  });
+  }, SLOW);
 
   it("resolves when a button is pressed", async () => {
     const a = await newHarness();
@@ -278,7 +286,7 @@ describe("the conflict view", () => {
     const workspaceId = b.runtime.currentStatus().workspaceId as string;
     expect(await fsp.readFile(b.replicaPath(workspaceId, SID), "utf8")).toBe(mine);
     expect(Notice.instances.at(-1)?.message).toContain("still in quarantine");
-  });
+  }, SLOW);
 
   it("says there is nothing to do when there is nothing to do", async () => {
     const h = await newHarness();
