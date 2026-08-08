@@ -192,6 +192,10 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 - ✅ **三平台 CI 已全绿**（2026-08-07，run 31186382661）。此前从 M0 起连续 5 次 push 都是 Linux 绿、macOS/Windows 红而没人看——**推完记得看一眼 `gh run list`**，红了五次和红了一次的修复成本差很多
   - 三个 bug 都在测试侧，且**都朝着"看起来成功"的方向失败**：Windows 上 `split(path.sep)` 让四 root 重叠检测变成空转（找不到重叠 = 通过）；`tsc --listFiles` 在 Windows 输出正斜杠而 REPO_ROOT 是反斜杠，于是 toolchain 测试报"tsc 检查了空程序"；macOS 的 `/var` → `/private/var` 让 `resolveUnderRoot` 正确地拒绝了一切（参数就叫 realRoot，测试没给 realpath）
   - 教训已固化：`path-guard` 导出 `splitPathSegments`（两种分隔符都吃），别让每个调用方自己写一个
+- 批 4 又红了三次，同一类：**Linux 绿、另外两个平台红，且都朝"看起来成功"的方向失败**。三条已固化的对策——
+  - **临时目录必须 realpath**（用 `tests/helpers/fs-cleanup.ts` 的 `makeRealTmpDir`）。裸 `mkdtempSync` 在 macOS 给 `/var/folders/…`（真身是 `/private/var/…`）、在 Windows 给 8.3 短名，两边都会让 `resolveUnderRoot` 判 SYMLINK——看起来像 guard 有 bug。现在 `runWorkspacePass` 的 preflight 会先查一遍并报 `root-not-canonical`，把这一类变成一句话
+  - **断言别对 JSON 原文做子串搜索**。Windows 路径在 JSON 里是转义的，`toContain` 会红（吵，但无害），`not.toContain` 会**假绿**——"vault 里不许出现绝对路径"这条正好是后者
+  - **`tests/m1/` 里不许 `skipIf`**，`check:no-skip` 会拦。平台条件用例放 `tests/posix/`（testing.md §8.5 早就写了）
 - ⚠️ **branch protection 在私有仓库上不生效**：已配 Rulesets，但 GitHub 提示私有仓库需 Team 组织账户才强制执行。在仓库转公开或升级前，**门禁的实际强制点是本地 `npm run verify` + 推完看 `gh run list`**，不是 GitHub
 
 ### M1 期间必须补上的门禁欠账
