@@ -41,7 +41,7 @@ export interface HomeStoreDeps {
   readonly fs: FsGateway;
   readonly guard: PathGuardDeps;
   readonly joinPath: (...parts: string[]) => string;
-  /** `<homedir>/.ai-session-sync`, already realpath'd by the caller. */
+  /** `<homedir>/.claudian-session-sync`, already realpath'd by the caller. */
   readonly stateRoot: string;
 }
 

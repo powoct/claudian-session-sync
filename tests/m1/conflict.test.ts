@@ -94,14 +94,33 @@ describe("quarantine layout", () => {
     ]);
   });
 
-  it("names each copy by its own hash prefix, so the two are distinguishable", () => {
-    expect(layout.localCopy).toMatch(/^local-[0-9a-f]{8}\.jsonl$/);
-    expect(layout.remoteCopy).toMatch(/^remote-[0-9a-f]{8}\.jsonl$/);
-    expect(layout.localCopy).not.toBe(layout.remoteCopy);
+  it("names each copy by its content hash, never by side", () => {
+    // "local" and "remote" swap meaning between the two machines, and the
+    // directory is shared: both machines detect the same disagreement and
+    // write here. Side-named copies made the second machine's write a second
+    // pair — hash-named copies make it byte-identical to the first (M1
+    // acceptance defect D-3).
+    expect(layout.copies).toHaveLength(2);
+    for (const copy of layout.copies) {
+      expect(copy.name).toMatch(/^branch-[0-9a-f]{8}\.jsonl$/);
+    }
+    expect(layout.copies[0]?.name).not.toBe(layout.copies[1]?.name);
+  });
+
+  it("orders the copies by hash, so both machines produce the same layout", () => {
+    const swapped = quarantineLayout({
+      workspaceId: "3f1a9c2e-6b47-4d18-9a03-5e7c8d21b4f6",
+      providerId: "claude-code",
+      conflictId: "abcdef0123456789",
+      localHash: HASH_B,
+      remoteHash: HASH_A,
+      extension: ".jsonl",
+    });
+    expect(swapped.copies).toEqual(layout.copies);
   });
 
   it("keeps the original extension, which OQ-5 showed the CLI tolerates", () => {
-    expect(layout.localCopy.endsWith(".jsonl")).toBe(true);
+    expect(layout.copies.every((copy) => copy.name.endsWith(".jsonl"))).toBe(true);
   });
 });
 
@@ -125,7 +144,7 @@ describe("conflict metadata carries no content", () => {
       expect(Object.keys(meta)).not.toContain(forbidden);
     }
     // Hash prefixes, never whole digests.
-    expect(meta.localHashPrefix).toHaveLength(8);
+    for (const branch of meta.branches) expect(branch.hashPrefix).toHaveLength(8);
     expect(serialised).not.toContain(HASH_A.slice(7));
   });
 
@@ -135,9 +154,26 @@ describe("conflict metadata carries no content", () => {
     expect(meta.detectedBy).toBe("3f2504e0");
   });
 
-  it("keeps both sides' sizes and line counts, which is what a user compares", () => {
-    expect(meta.localLineCount).toBe(40);
-    expect(meta.remoteLineCount).toBe(80);
+  it("carries no side labels, and both machines build identical branches", () => {
+    // Which branch is "local" depends on which machine you ask; the shared
+    // meta must not answer. Sizes and line counts stay — they are what a user
+    // compares — attached to a hash, not a side.
+    expect(JSON.stringify(meta)).not.toMatch(/local|remote/i);
+    const swapped = buildConflictMeta({
+      logicalId: SID,
+      conflictId: "abcdef0123456789",
+      localHash: HASH_B,
+      remoteHash: HASH_A,
+      localSize: 8192,
+      remoteSize: 4096,
+      localLineCount: 80,
+      remoteLineCount: 40,
+      machineIdPrefix: "3f2504e0",
+      detectedAtIso: "2026-08-07T12:00:00.000Z",
+    });
+    expect(swapped.branches).toEqual(meta.branches);
+    const counts = meta.branches.map((branch) => branch.lineCount).sort((x, y) => x - y);
+    expect(counts).toEqual([40, 80]);
   });
 });
 

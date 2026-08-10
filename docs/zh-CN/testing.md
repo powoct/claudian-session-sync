@@ -1,4 +1,4 @@
-# AI Session Sync — 测试策略与验收方法
+# Claudian Session Sync — 测试策略与验收方法
 
 > **文档状态**：设计稿（pre-implementation）。测试要求先于实现确定，实现时按本文建脚手架。
 > **最后更新**：2026-08-06（第 2 版，已吸收 [review/1_architecture-and-testing-review.md](../../review/1_architecture-and-testing-review.md) 的审核意见）
@@ -805,7 +805,7 @@ it("dry-run 期间不得有任何写调用", async () => {
 });
 ```
 
-五棵树 = 本机 provider root / replica 全树（含 `.aiss/`、`.quarantine/`）/ backup 区（含 `index.jsonl`）/ vault 内 `.ai-session-sync/**` 与 `data.json` / 本机状态目录。比较维度：文件全集 + size + mtimeMs + sha256（不比较 atime），排除日志树。
+五棵树 = 本机 provider root / replica 全树（含 `.aiss/`、`.quarantine/`）/ backup 区（含 `index.jsonl`）/ vault 内 `.claudian-session-sync/**` 与 `data.json` / 本机状态目录。比较维度：文件全集 + size + mtimeMs + sha256（不比较 atime），排除日志树。
 
 场景至少覆盖：workspace 未初始化（断言只报 `WORKSPACE_NOT_INITIALIZED` 并列出将创建什么）、有 tmp 残留（断言**不清理**）、有待 pull 的新文件、有 CONFLICT、有 `PathViolation`、machineId 身份漂移（断言不写盘、只在报告里标注）。
 
@@ -915,9 +915,9 @@ console.log(JSON.stringify(rows, null, 2));
 | 5 | Win：继续聊 2 轮，等 60 s，手动同步 | replica 行数增加；`manifest.lastWriter` = Win 的 machineId | manifest 片段 + evidence |
 | 6 | Mac：手动同步 | `PULL_OVERWRITE`；备份区有覆盖前副本（sha256 == 步骤 2 的值）；弹出"请重启该会话"Notice；resume 能看到 Win 的 2 轮 | 备份目录 evidence + 截图 |
 | 7 | 双向再跑 2 轮 | 全程无 CONFLICT | PassReport ×4 |
-| 8 | **分叉验证**：断开同步，两边各聊 2 轮，恢复同步 | `CONFLICT` + Notice；两侧 primary 字节未变；两分支都在 inventory；连续 3 轮不新增隔离副本 | §9.3 的两张表 |
+| 8 | **分叉验证**：断开同步，两边各聊 2 轮，恢复同步；随后**每台续写过的机器各解决一次**（2026-08-10 实测补入） | `CONFLICT` + Notice（恢复后的第一轮 pass 是观察轮，冲突在下一轮检出，属设计）；两侧 primary 字节未变；两分支都在 inventory；隔离目录 = `branch-<hash8>` × 2 + `meta.json`，连续 3 轮**字节级**不变；A 解决后 B 检出自己的冲突、「保另一台」一次成功；解决后双机收敛无 CONFLICT | §9.3 的两张表 |
 | 9 | **回滚验证**：从备份手动恢复一份，resume | 恢复的文件 CLI 可正常加载；sha256 == 备份 sha256 | evidence + 截图 |
-| 10 | 关掉 Obsidian 期间在 CLI 里聊，再开 Obsidian | 启动同步捕获到新内容 | PassReport + evidence |
+| 10 | 关掉 Obsidian 期间在 CLI 里聊，再开 Obsidian | 启动后**两轮 pass 之内**（启动观察轮 + 下一轮/一次手动同步）捕获到新内容（首轮只观察，属设计——2026-08-10 裁决） | PassReport + evidence |
 
 ### 9.5 各里程碑 Exit Criteria
 
@@ -988,7 +988,7 @@ console.log(JSON.stringify(rows, null, 2));
 | **OQ-6** | OpenCode / Grok / Pi 存储结构（M2/M3） | 各装一个、跑一个最小会话、记录落盘位置与结构、试 resume；填"provider 调研表"（存储根、logicalId 来源、是否 append-only、是否有外部索引、是否含绝对路径） | 满足 Tier A 条件 → 接入；否则留 Tier C |
 | **OQ-7** | 规模性能基准（M2） | 合成 1000 个 session（p95 < 1 MB，最大 20 MB），量测无变更 pass、100 变更 pass、全量 scrub、manifest 重建、备份区体积增长 | 达到[架构 §12.3](./architecture.md) 的目标；不达标 → 引入持久化增量索引；备份膨胀明显 → 加总量上限 |
 | **OQ-9** | Windows junction / 8.3 短名（阻塞 M1） | 构造 junction、reparse point、`PROGRA~1` 形态路径，观察 `fs.lstat().isSymbolicLink()` 与 `fs.realpath()` 的行为 | 若 `lstat` 不能识别 junction → 必须改用 `fs.readlink` 或读文件属性位补齐；`realpath` 若展开短名则字符串层的 `SHORTNAME_LIKE` 拒绝可放宽为告警 |
-| **OQ-10** | 漫游 profile（M2） | 在企业域机器上观察 `%USERPROFILE%\.ai-session-sync` 是否被漫游同步 | 若会 → M2 改用 `%LOCALAPPDATA%` |
+| **OQ-10** | 漫游 profile（M2） | 在企业域机器上观察 `%USERPROFILE%\.claudian-session-sync` 是否被漫游同步 | 若会 → M2 改用 `%LOCALAPPDATA%` |
 
 ---
 
@@ -1234,7 +1234,7 @@ jobs:
 | Q-05 | 0 字节 / 高 schemaVersion / mtime / 备份开关语义统一 | §5.2.3 / M-03 / S-14 / Q-06 |
 | Q-06 | 备份不可关闭 | 类型级：`expectTypeOf<PortableSettings["backup"]>().not.toHaveProperty("enabled")` |
 | Q-07 | 并发保证已降为 best-effort 并写明不保证的情况 | 人工；R-11 是它的可执行版本 |
-| Q-08 | 三处状态存储边界明确 | 单测：`machineId` 只从 `<homedir>/.ai-session-sync/machine.json` 读，断言不从 `data.json` 读；`PortableSettings` 序列化后不含绝对路径（正则断言） |
+| Q-08 | 三处状态存储边界明确 | 单测：`machineId` 只从 `<homedir>/.claudian-session-sync/machine.json` 读，断言不从 `data.json` 读；`PortableSettings` 序列化后不含绝对路径（正则断言） |
 
 ### 15.2 M1 阻塞 Spike
 

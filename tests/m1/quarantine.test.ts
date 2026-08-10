@@ -74,16 +74,16 @@ describe("a conflict preserves both branches", () => {
     const dir = path.join(quarantineRoot(a), conflictId as string);
     const entries = (await fsp.readdir(dir)).sort();
     expect(entries).toHaveLength(3);
-    expect(entries.some((n) => n.startsWith("local-"))).toBe(true);
-    expect(entries.some((n) => n.startsWith("remote-"))).toBe(true);
+    // Copies are named by content hash, never by side: the directory is
+    // shared, and "local"/"remote" swap meaning between the two machines.
+    expect(entries.filter((n) => /^branch-[0-9a-f]{8}\.jsonl$/.test(n))).toHaveLength(2);
     expect(entries).toContain("meta.json");
 
     // The copies are byte-identical to the originals — quarantining is not
     // allowed to transform anything (§1.2: "quarantine is not an I1 exception").
-    const localCopy = entries.find((n) => n.startsWith("local-")) as string;
-    const remoteCopy = entries.find((n) => n.startsWith("remote-")) as string;
-    expect(sha256(await read(path.join(dir, localCopy)))).toBe(localBefore);
-    expect(sha256(await read(path.join(dir, remoteCopy)))).toBe(remoteBefore);
+    const copies = entries.filter((n) => n !== "meta.json");
+    const hashes = await Promise.all(copies.map(async (n) => sha256(await read(path.join(dir, n)))));
+    expect(hashes.sort()).toEqual([localBefore, remoteBefore].sort());
   });
 
   it("leaves both originals exactly where they were (I1-b)", async () => {
@@ -111,9 +111,13 @@ describe("a conflict preserves both branches", () => {
     const dir = path.join(quarantineRoot(a), report.actions[0]?.conflictId as string);
 
     const meta = JSON.parse(await fsp.readFile(path.join(dir, "meta.json"), "utf8"));
-    expect(meta.localLineCount).toBeGreaterThan(0);
-    expect(meta.remoteLineCount).toBeGreaterThan(0);
-    expect(meta.localHashPrefix).toHaveLength(8);
+    expect(meta.branches).toHaveLength(2);
+    for (const branch of meta.branches) {
+      expect(branch.lineCount).toBeGreaterThan(0);
+      expect(branch.hashPrefix).toHaveLength(8);
+    }
+    // No side labels — the file is shared, and sides swap between machines.
+    expect(JSON.stringify(meta)).not.toMatch(/"local|"remote/);
     // Nothing that could carry a line of the conversation.
     for (const key of ["content", "bytes", "lines", "sample", "text"]) {
       expect(meta).not.toHaveProperty(key);
@@ -126,18 +130,26 @@ describe("S-04 / U-13 / U-20: a known conflict does not accumulate copies", () =
     const { a } = await forkedWorld();
 
     const first = await settle(a);
+    const dir = path.join(quarantineRoot(a), first.actions[0]?.conflictId as string);
     const dirBefore = (await fsp.readdir(quarantineRoot(a))).sort();
-    const filesBefore = await fsp.readdir(path.join(quarantineRoot(a), first.actions[0]?.conflictId as string));
+    const filesBefore = await fsp.readdir(dir);
+    const metaBefore = await read(path.join(dir, "meta.json"));
 
-    // Repeat the pass several times. The id is derived from the two hashes, so
-    // the same disagreement lands on the same paths — the exclusive create
-    // fails and nothing is added.
-    for (let i = 0; i < 3; i++) await a.pass();
+    // Repeat the pass several times, with the clock moving — a re-stamped
+    // `detectedAt` must show up as changed bytes, not hide behind a frozen
+    // clock. The id is derived from the two hashes, so the same disagreement
+    // lands on the same paths — the exclusive create fails, nothing is added.
+    for (let i = 0; i < 3; i++) {
+      a.advanceClock(60_000);
+      await a.pass();
+    }
 
     expect((await fsp.readdir(quarantineRoot(a))).sort()).toEqual(dirBefore);
-    expect(
-      (await fsp.readdir(path.join(quarantineRoot(a), first.actions[0]?.conflictId as string))).sort(),
-    ).toEqual([...filesBefore].sort());
+    expect((await fsp.readdir(dir)).sort()).toEqual([...filesBefore].sort());
+    // Byte-stable, not merely name-stable: a re-detected conflict must not
+    // re-stamp `detectedAt` — the shared directory stays quiet (acceptance
+    // defect D-2: the meta was rewritten, same size, every pass).
+    expect(sha256(await read(path.join(dir, "meta.json")))).toBe(sha256(metaBefore));
   });
 
   it("survives losing every trace of local state", async () => {

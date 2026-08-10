@@ -1,13 +1,25 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-09（批 4 完成 + review/4 整改，验收套件已备好）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-11（首轮真机验收已跑完；阻塞缺陷 D-3 已修；插件改名 Claudian Session Sync）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：M1 代码完成，剩真机十步验收
+## 当前状态：首轮验收跑完（9/10 步过、D-3 阻塞已修），待复验步骤 8
 
-批 1–4 全部落地并通过 [review/4](review/4_m1-batch4-review.md)（0 Blocker / 0 高危）：**759 条测试、632 条 m1 阻塞用例**。插件现在能在真机上跑——设置面板、状态栏、报告视图、三条冲突命令、定时 pass 都接好了，状态全部落盘。
+**2026-08-10 首轮真机验收已执行**（Mac ↔ Windows，记录在验收机器的
+`tmp/acceptance/out/`，脱敏摘要入库为
+[findings/2026-08-10-m1-acceptance.md](docs/zh-CN/findings/2026-08-10-m1-acceptance.md)）。
+核心断言（跨机按 ID resume）通过，会话数据 I1 全程成立；**M1 Exit 首轮判定不通过**，
+唯一阻塞是 D-3：非发起方机器上冲突解决被 stale 守卫锁死。
 
-**下一步是真机十步验收**（Mac ↔ Windows）。执行套件已备好：**`tmp/acceptance/`**（见下方「真机验收怎么跑」）。
+**2026-08-11 批次（本批）**：修复 D-3（隔离目录机器中立化，ADR-40）、D-1（manifest
+静默 pass 不重写，ADR-41）、D-2（隔离 meta 字节稳定）、D-4（状态栏冲突计数与文案，
+ADR-42）、D-5（轮转补 pruned 索引行）；D-6 裁决为 by design 并改剧本；同批完成
+**改名 Claudian Session Sync**（ADR-43：插件 id / home 目录 / vault 身份目录随名，
+`.aiss/` 与 root.json 的 magic 不动）。
+
+**下一步：在两台真机上做改名迁移（AGENTS.md §3 P0，mv 三个目录）后复验步骤 8
+的完整闭环**（分叉 → 双机各解决一次 → 收敛），顺带核对步骤 1 附加的 D-1 回归检查。
+其余八步无需重跑。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
@@ -24,7 +36,9 @@
 | **M1 批 4a · 状态落盘门面** | ✅ **完成** | json-file / home-store / sync-dir-store / backup-writer / lock-file / state-adapters / pass-runner；S-08、S-16…S-20 首次有端到端证据 |
 | **M1 批 4b · Obsidian UI** | ✅ **完成** | plugin-runtime（无 Obsidian 类型）+ 设置面板 / 报告 / 冲突面板 / 8 条命令；S-04c 三种解决方式全绿 |
 | **[review/4](review/4_m1-batch4-review.md) 整改** | ✅ **完成** | 2 条中低危讨论点已处理；写验收脚本时另抓到一个 dry-run 违反 ADR-27 的真 bug |
-| M1 真机十步验收 | ⬜ **待执行**，套件已备好 | [testing.md §9.4](docs/zh-CN/testing.md) + `tmp/acceptance/` |
+| **M1 真机十步验收（首轮）** | ✅ 已执行（2026-08-10）：9/10 过，D-3 阻塞 | [findings/2026-08-10-m1-acceptance.md](docs/zh-CN/findings/2026-08-10-m1-acceptance.md)；原始记录在验收机 `tmp/acceptance/out/` |
+| **验收缺陷整改 + 改名（2026-08-11）** | ✅ **完成**：D-1/2/3/4/5 修复、D-6 裁决、ADR-40…43、改名 Claudian Session Sync | 本批 commit；剧本与套件已同步更新 |
+| 步骤 8 复验（迁移后） | ⬜ **待执行** | AGENTS.md §3 P0 迁移 + §4 步骤 8 新流程 |
 
 ### M0 交付了什么
 
@@ -112,6 +126,33 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
 
 顺带把 `conflict-commands.test.ts` 与 `ui.test.ts` 里跑双机多轮 pass 的用例标了显式 `SLOW = 30_000`：它们在覆盖率插桩下会超过 vitest 5 秒默认值，而那个默认值本身值得保留在全局。
 
+### 验收缺陷整改 + 改名（2026-08-11）
+
+首轮验收（2026-08-10）的缺陷全部处置完毕，判定与修复对照见
+[findings/2026-08-10-m1-acceptance.md](docs/zh-CN/findings/2026-08-10-m1-acceptance.md)。要点：
+
+- **D-3 的根因不是守卫太严，而是共享目录里的视角标签**：conflictId 对双方对称（设计如此），
+  但副本叫 `local-*`/`remote-*`、meta 存 local/remote 字段——第二台检出同一冲突的机器往
+  同一目录写入镜像的一对，`readEntry` 用 `find()` 各取第一个，把同一分支同时当两侧，
+  解决从此永远 `branch-moved`。修法（ADR-40）：副本按内容哈希命名（`branch-<hash8>`，
+  双机写出的字节与文件名全同）、meta v2 无侧标签、no-replace 写入；解决命令在点击当下
+  哈希活文件判定视角，只校验**被保留侧**等于某个隔离分支——被覆盖侧无论持有什么都先
+  备份，所以不校验它不损失安全（这同时解开了 Claudian ai-title 追加造成的锁死，R-1）。
+  回归：B 机场景 + 旧版 4 副本目录各一条端到端用例。
+- **quarantineConflict 的注释一直声称 exclusive create，代码用的却是 `writeFileAtomic`**
+  ——D-2（meta 每轮重写）就藏在这句谎里。教训与 review/3 的「死 gate」同款：
+  声称的性质要有一条会红的测试钉住（现在有：meta 字节级稳定，拨钟后注入覆盖式写会红）。
+- **D-1**（ADR-41）：entry 内容与签名全等就不改写、无变化不保存 manifest。验证手段
+  同样是注入（把保存条件改回无条件，quiet-manifest 用例红）。
+- **D-4**（ADR-42）：冲突计数改取 pass 报告的去重会话数；`summarise` 不再把 CONFLICT
+  计入 change；解决落地后自动补跑一轮 pass，计数即时归零。
+- **改名 Claudian Session Sync**（ADR-43）：改 id / 显示名 / `~/.claudian-session-sync` /
+  vault 内 `.claudian-session-sync/`；**不改** `.aiss/` 与 root.json 的
+  `magic: "ai-session-sync"`（wire format，改了会把已初始化目录判成 NR-2）。
+  真机迁移步骤在验收套件 AGENTS.md §3 P0（三个 mv + 重装，保 machineId 与备份）。
+- 注意：**测试里对未提交修复做 `git checkout <file>` 会连修复一起洗掉**——本批注入
+  验证时发生过一次，靠"注入后测试红得不对劲"发现。注入验证请用可逆的 sed/patch。
+
 ## 真机验收怎么跑
 
 套件在 **`tmp/acceptance/`**（`tmp/` 在 gitignore 里，所以它不入库，**要手工拷到两台机器**，和当年的探测套件一样）。
@@ -138,11 +179,11 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 
 **三个位置别搞混**（README §2.2 有表）：验收套件放 `~/aiss-acceptance/`（别放同步目录里）；
 `main.js` + `manifest.json` 先放任意中转目录；**插件的最终位置是
-`<vault>/.obsidian/plugins/ai-session-sync/`，由 `install-plugin` 脚本搬进去，不用手动拷**。
+`<vault>/.obsidian/plugins/claudian-session-sync/`，由 `install-plugin` 脚本搬进去，不用手动拷**。
 
 **三个最容易浪费时间的点**（README 里都写了，这里再点一次）：
 
-1. **workspace identity 只在机器 A 创建一次**，B 上手工拷 `<vault>/.ai-session-sync/workspace.json` 过去。两边各点一次 Create 会生成两个 id、两棵互不可见的子树，而且**不报错**——ADR-20 要防的正是这个。
+1. **workspace identity 只在机器 A 创建一次**，B 上手工拷 `<vault>/.claudian-session-sync/workspace.json` 过去。两边各点一次 Create 会生成两个 id、两棵互不可见的子树，而且**不报错**——ADR-20 要防的正是这个。
 2. **就绪要等**：READY 需要连续 2 次 pass 且首末跨度 ≥ 90 秒。状态栏停在 `checking folder` 不是错误。
 3. **B 上按 ID resume**，不要用 picker（F-1：picker 只列交互式来源的会话，同步过来的看不见）。
 
@@ -181,7 +222,7 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 
 - **`onload()` 不读文件系统**。`getRuntime()` 会 realpath vault 路径，所以设置页拿到的是**取值函数不是实例**；首次 pass 还要经 `setTimeout(…, 0)` 才排出去——从设置面板启用插件时 `onLayoutReady` 是**同步**回调，只"延到 layout-ready"并不够。
 - `tests/build/artifact-smoke.test.ts` 的 `EXPECTED_COMMAND_IDS` 是**故意写死的字面量**，增删命令必须同步改。
-- 那份 smoke 测试会把 `HOME` 指到临时目录再加载 bundle。别去掉：否则跑一次构建测试就会在开发者家目录里留下 `~/.ai-session-sync/machine.json`。
+- 那份 smoke 测试会把 `HOME` 指到临时目录再加载 bundle。别去掉：否则跑一次构建测试就会在开发者家目录里留下 `~/.claudian-session-sync/machine.json`。
 
 ## 阻塞项
 
@@ -190,7 +231,7 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 | 项 | 性质 | 说明 |
 |---|---|---|
 | OQ-7 规模性能基准 | 非阻塞（M2） | 1000 session 的 pass 耗时与备份膨胀 |
-| OQ-10 漫游 profile | 非阻塞（M2） | `%USERPROFILE%\.ai-session-sync` 是否被漫游同步 |
+| OQ-10 漫游 profile | 非阻塞（M2） | `%USERPROFILE%\.claudian-session-sync` 是否被漫游同步 |
 | OQ-6 生命周期 | 非阻塞（M2/M3） | OpenCode/Grok/Pi 结构已摸清，append-only 未验证 |
 | UNC 路径 | 非阻塞 | 未测（无权限），实测前按不支持处理 |
 | `memory/` 子目录归属 | 非阻塞 | M1 白名单不同步它，记为已知限制（F-7） |

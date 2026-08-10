@@ -73,9 +73,18 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     const only = conflicts[0];
     expect(only?.logicalIdPrefix).toBe(SID.slice(0, 8));
     // Counts and hash prefixes only — never a line of either conversation.
-    expect(only?.meta.localLineCount).toBeGreaterThan(0);
-    expect(only?.meta.remoteLineCount).toBeGreaterThan(0);
-    expect(JSON.stringify(only?.meta)).not.toContain('"text"');
+    expect(only?.branches).toHaveLength(2);
+    for (const branch of only?.branches ?? []) {
+      expect(branch.lineCount).toBeGreaterThan(0);
+      expect(branch.size).toBeGreaterThan(0);
+    }
+    // Which branch is whose is computed from the live files at read time,
+    // never from stored labels — the labels are what deadlocked machine B
+    // during the M1 acceptance run.
+    expect(only?.branches.filter((branch) => branch.onThisMachine)).toHaveLength(1);
+    expect(only?.branches.filter((branch) => branch.inSyncFolder)).toHaveLength(1);
+    expect(only?.superseded).toBe(false);
+    expect(JSON.stringify(only?.branches)).not.toContain('"text"');
   }, SLOW);
 
   it("keeps this machine's version, and the other stays reachable", async () => {
@@ -193,5 +202,81 @@ describe("a resolution refuses when it is no longer the same disagreement", () =
       reason: "remote-not-ready",
     });
     expect((await b.runtime.resolve(only?.conflictId as string, "keep-remote")).ok).toBe(true);
+  }, SLOW);
+});
+
+describe("the acceptance-run deadlock (D-3): the second machine can always take the settled version", () => {
+  it("keep-remote succeeds although this machine's branch has moved on", async () => {
+    const { b, workspaceId } = await forked();
+    // A third-party writer appends to B's branch after it was quarantined —
+    // the acceptance run saw Claudian's ai-title feature do exactly this to a
+    // conflicted session, which under the frozen-viewpoint rule locked
+    // resolution on B permanently.
+    await b.appendRaw(SID, '{"uuid":"b2","type":"ai-title","note":"third-party append"}\n');
+    await b.settle(); // quarantines the fresh pair under its own conflict id
+
+    const conflicts = await b.runtime.conflicts();
+    const live = conflicts.find((c) => c.branches.some((branch) => branch.inSyncFolder));
+    expect(live).toBeTruthy();
+    const alpha = sha256(await read(b.replicaPath(workspaceId, SID)));
+    const betaPrime = sha256(await read(b.sessionPath(SID)));
+    expect(alpha).not.toBe(betaPrime);
+
+    const outcome = await b.runtime.resolve(live?.conflictId as string, "keep-remote");
+
+    expect(outcome).toMatchObject({ ok: true, action: "PULL_OVERWRITE" });
+    // B's local is now the settled version; the discarded branch — including
+    // the third-party line nobody reviewed — is in the backups.
+    expect(sha256(await read(b.sessionPath(SID)))).toBe(alpha);
+    if (outcome.ok && outcome.action !== "REVEAL") {
+      expect(sha256(await read(outcome.backupPath as string))).toBe(betaPrime);
+    }
+    // And the machines converge instead of re-conflicting.
+    const after = await b.settle();
+    expect(after.readiness).toBe("READY");
+    for (const action of b.runtime.lastPassReport()?.actions ?? []) {
+      expect(action.action, JSON.stringify(action)).not.toBe("CONFLICT");
+    }
+  }, SLOW);
+
+  it("resolves a pre-fix directory holding both machines' viewpoint pairs", async () => {
+    // Before the fix, each machine wrote its own `local-*`/`remote-*` pair
+    // into the shared directory — four copies naming the same two branches,
+    // and a picker that could pair the same branch as both sides. Directories
+    // like this exist on real machines; they must still resolve.
+    const { b, workspaceId } = await forked();
+    const only = (await b.runtime.conflicts())[0];
+    const dir = only?.directory as string;
+    const alpha = await fsp.readFile(b.replicaPath(workspaceId, SID));
+    const beta = await fsp.readFile(b.sessionPath(SID));
+    for (const name of await fsp.readdir(dir)) await fsp.rm(path.join(dir, name));
+    await fsp.writeFile(path.join(dir, "local-c1166ecf.jsonl"), alpha);
+    await fsp.writeFile(path.join(dir, "remote-4d2413fa.jsonl"), beta);
+    await fsp.writeFile(path.join(dir, "local-4d2413fa.jsonl"), beta);
+    await fsp.writeFile(path.join(dir, "remote-c1166ecf.jsonl"), alpha);
+    await fsp.writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        logicalId: SID,
+        conflictId: only?.conflictId,
+        localHashPrefix: "c1166ecf",
+        remoteHashPrefix: "4d2413fa",
+        localSize: alpha.length,
+        remoteSize: beta.length,
+        localLineCount: 6,
+        remoteLineCount: 7,
+        detectedBy: "aaaaaaaa",
+        detectedAt: "2026-08-10T18:04:29.000Z",
+      }),
+    );
+
+    const listed = (await b.runtime.conflicts())[0];
+    expect(listed?.branches, "four copies, two branches").toHaveLength(2);
+
+    const outcome = await b.runtime.resolve(listed?.conflictId as string, "keep-remote");
+
+    expect(outcome).toMatchObject({ ok: true, action: "PULL_OVERWRITE" });
+    expect(sha256(await read(b.sessionPath(SID)))).toBe(sha256(new Uint8Array(alpha)));
   }, SLOW);
 });

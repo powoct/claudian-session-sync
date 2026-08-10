@@ -78,7 +78,7 @@ describe("first run", () => {
     expect(status.phase).toBe("no-sync-dir");
     expect(status.workspaceId).toBeTruthy();
     // Written into the vault, so it travels with it.
-    expect(await exists(path.join(h.vaultRoot, ".ai-session-sync", "workspace.json"))).toBe(true);
+    expect(await exists(path.join(h.vaultRoot, ".claudian-session-sync", "workspace.json"))).toBe(true);
   });
 
   it("refuses to create a second identity over an existing one", async () => {
@@ -129,7 +129,7 @@ describe("machine identity", () => {
   it("is created once and reused", async () => {
     const h = await makeHarness();
     await h.runtime.refresh();
-    const machineFile = path.join(h.homedir, ".ai-session-sync", "machine.json");
+    const machineFile = path.join(h.homedir, ".claudian-session-sync", "machine.json");
     const first = JSON.parse(await fsp.readFile(machineFile, "utf8")) as { machineId: string };
 
     await h.runtime.refresh();
@@ -143,7 +143,7 @@ describe("machine identity", () => {
     // another machine, and a machine id is the definition of what does not.
     const h = await makeHarness();
     await h.configure();
-    const identityFile = path.join(h.vaultRoot, ".ai-session-sync", "workspace.json");
+    const identityFile = path.join(h.vaultRoot, ".claudian-session-sync", "workspace.json");
     const values = await stringValuesIn(identityFile);
 
     expect(values.some((value) => value.includes(h.homedir))).toBe(false);
@@ -184,12 +184,12 @@ describe("settings", () => {
     const workspaceId = h.runtime.currentStatus().workspaceId as string;
 
     const binding = await stringValuesIn(
-      path.join(h.homedir, ".ai-session-sync", "workspaces", `${workspaceId}.json`),
+      path.join(h.homedir, ".claudian-session-sync", "workspaces", `${workspaceId}.json`),
     );
     expect(binding).toContain(h.syncDir);
 
     const identity = await stringValuesIn(
-      path.join(h.vaultRoot, ".ai-session-sync", "workspace.json"),
+      path.join(h.vaultRoot, ".claudian-session-sync", "workspace.json"),
     );
     expect(
       identity.some((value) => value.includes(h.syncDir)),
@@ -247,8 +247,8 @@ async function fiveTrees(h: RuntimeHarness): Promise<string[]> {
   const roots = [
     ["local", h.providerRoot],
     ["replica", h.syncDir],
-    ["state", path.join(h.homedir, ".ai-session-sync")],
-    ["vault", path.join(h.vaultRoot, ".ai-session-sync")],
+    ["state", path.join(h.homedir, ".claudian-session-sync")],
+    ["vault", path.join(h.vaultRoot, ".claudian-session-sync")],
   ] as const;
   const out: string[] = [];
   for (const [name, root] of roots) {
@@ -320,6 +320,27 @@ describe("dry run", () => {
   });
 });
 
+describe("a quiet pass leaves the shared manifest alone (acceptance D-1)", () => {
+  it("does not rewrite .aiss/manifest.json when nothing changed", async () => {
+    // The manifest lives in the sync folder, so a rewrite is not private
+    // churn: two idle machines re-stamping it every timer pass is what the
+    // acceptance run's sync tool turned into a stream of manufactured
+    // "conflicted copy" files. A pass that verified everything and found it
+    // exactly as remembered has nothing to write.
+    const h = await makeHarness();
+    await h.appendSession(SID, 4);
+    await h.configure();
+    await h.settle(); // pushes, and legitimately writes the manifest
+
+    const manifestPath = path.join(h.syncDir, ".aiss", "manifest.json");
+    const before = await read(manifestPath);
+    await h.settle();
+    await h.settle();
+
+    expect(sha256(await read(manifestPath))).toBe(sha256(before));
+  });
+});
+
 describe("what the status bar says", () => {
   it("names the count of changes, then goes quiet", async () => {
     const h = await makeHarness();
@@ -335,10 +356,43 @@ describe("what the status bar says", () => {
 
     // A loose /change/ would also match "0 changes" — which is what this said
     // for a while, with every push silently failing behind it.
-    expect(acted.short).toBe("AI Session Sync: 1 change");
+    expect(acted.short).toBe("Claudian Session Sync: 1 change");
     // And the steady state does not report itself as a count of nothing.
-    expect(settled.short).toBe("AI Session Sync: up to date");
+    expect(settled.short).toBe("Claudian Session Sync: up to date");
   });
+
+  it("says 'conflict' exactly once per conflict, and stops once it is settled", async () => {
+    // Acceptance defect D-4: a CONFLICT action's result is APPLIED, so it was
+    // counted as a change *and* suffixed as a conflict — "1 change, 1
+    // conflict · 1 conflict" for a single conflicted session. And the count
+    // came from quarantine directories, which survive resolution on purpose,
+    // so the bar kept saying "1 conflict" after the user had resolved it.
+    const a = await makeHarness();
+    await a.appendSession(SID, 5);
+    await a.configure();
+    await a.settle();
+    const b = await RuntimeHarness.createPeer(a);
+    try {
+      await b.settle();
+      await a.appendRaw(SID, '{"uuid":"a1","fork":"A"}\n');
+      await a.settle();
+      await b.appendRaw(SID, '{"uuid":"b1","fork":"B"}\n');
+      const conflicted = await b.settle();
+
+      expect(conflicted.short).toBe("Claudian Session Sync: up to date · 1 conflict");
+      expect(conflicted.short.match(/conflict/g)).toHaveLength(1);
+
+      const only = (await b.runtime.conflicts())[0];
+      const outcome = await b.runtime.resolve(only?.conflictId as string, "keep-local");
+      expect(outcome.ok).toBe(true);
+      // Resolution runs a pass itself; the quarantine directory still exists
+      // (both branches stay reachable), but it is no longer a conflict.
+      expect(b.runtime.currentStatus().conflicts).toBe(0);
+      expect(b.runtime.currentStatus().short).not.toContain("conflict");
+    } finally {
+      await b.dispose();
+    }
+  }, 30_000);
 
   it("explains a folder that has gone missing rather than reporting a number", async () => {
     const h = await makeHarness();

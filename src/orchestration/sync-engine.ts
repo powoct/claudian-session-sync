@@ -678,20 +678,30 @@ async function quarantineConflict(
     detectedAtIso: deps.nowIso(),
   });
 
+  const bytesFor = (hash: string): Uint8Array =>
+    hash === input.localHash ? input.localBytes : input.remoteBytes;
   const writes: Array<[string, Uint8Array]> = [
-    [layout.localCopy, input.localBytes],
-    [layout.remoteCopy, input.remoteBytes],
+    ...layout.copies.map((copy): [string, Uint8Array] => [copy.name, bytesFor(copy.hash)]),
     [layout.meta, new TextEncoder().encode(`${JSON.stringify(meta, null, 2)}\n`)],
   ];
 
+  // No-replace, and `target-exists` is success: the copy names are derived
+  // from the content hashes, so an existing file already holds these bytes —
+  // written by an earlier pass here or by the other machine. This is what
+  // keeps the shared directory quiet: a re-detected conflict changes nothing
+  // on disk, and the meta keeps its original `detectedAt` instead of being
+  // stamped afresh every pass.
   for (const [name, bytes] of writes) {
     const minted = await deps.mintWritePath(deps.joinPath(dir, name));
     if (!minted.ok) return undefined;
-    try {
-      await deps.fs.writeFileAtomic(minted.value, bytes);
-    } catch (error) {
-      const code = errnoOf(error);
-      if (!code || !CATCHABLE_IO.has(code)) throw error;
+    const written = await deps.fs
+      .writeFileNoReplace(minted.value, bytes)
+      .catch((error: unknown) => {
+        const code = errnoOf(error);
+        if (!code || !CATCHABLE_IO.has(code)) throw error;
+        return { ok: false as const, reason: "io-error" as const, code };
+      });
+    if (!written.ok && written.reason !== "target-exists") {
       return undefined; // Reported as a conflict either way; the copies failed.
     }
   }

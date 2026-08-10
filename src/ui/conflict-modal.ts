@@ -6,13 +6,16 @@
  * forces a guess — so "show me both" is a first-class answer that writes
  * nothing and opens the folder holding the two copies.
  *
- * The wording avoids "local" and "remote" entirely. Those words swap meaning
- * depending on which machine you are sitting at, which is precisely the
- * confusion that made conflict identity content-derived in the first place.
+ * Which branch is "this machine's" is decided by the command layer at read
+ * time, by hashing the live files — never by labels stored in the quarantine
+ * directory, which is shared between machines. A keep button is only offered
+ * while the corresponding side still holds a quarantined branch; a button
+ * that would be refused is worse than no button, because the refusal reads as
+ * "conflicts cannot be resolved".
  */
 import { Modal, Notice, type App } from "obsidian";
 import type { ConflictResolution } from "../domain/conflict";
-import type { ConflictEntry } from "../orchestration/conflict-commands";
+import type { ConflictBranchView, ConflictEntry } from "../orchestration/conflict-commands";
 import type { PluginRuntime } from "../orchestration/plugin-runtime";
 
 export class ConflictModal extends Modal {
@@ -48,7 +51,8 @@ export class ConflictModal extends Modal {
       text:
         "Both machines added to these sessions separately, so neither version contains the " +
         "other. Both are kept whichever you choose — the one you do not pick stays in the " +
-        "quarantine folder and in your backups.",
+        "quarantine folder and in your backups. A conflict is settled per machine: if the " +
+        "other machine also extended this session, it will ask once there too.",
     });
 
     for (const conflict of conflicts) {
@@ -59,18 +63,33 @@ export class ConflictModal extends Modal {
   private renderOne(container: HTMLElement, conflict: ConflictEntry): void {
     const block = container.createDiv();
     block.createEl("h3", { text: `Session ${conflict.logicalIdPrefix} (${conflict.providerId})` });
-    block.createEl("p", {
-      text:
-        `This machine: ${conflict.meta.localLineCount} lines, ${conflict.meta.localSize} bytes ` +
-        `(${conflict.meta.localHashPrefix}). ` +
-        `Other machine: ${conflict.meta.remoteLineCount} lines, ${conflict.meta.remoteSize} bytes ` +
-        `(${conflict.meta.remoteHashPrefix}). Detected ${conflict.meta.detectedAt}.`,
-    });
+    for (const branch of conflict.branches) {
+      block.createEl("p", { text: describeBranch(branch) });
+    }
+    if (conflict.detectedAt) {
+      block.createEl("p", { text: `Detected ${conflict.detectedAt}.` });
+    }
+    if (conflict.superseded) {
+      block.createEl("p", {
+        text:
+          "Neither of these versions is on either side any more — this disagreement is over " +
+          "(resolved, or replaced by a newer one shown above after a sync). Kept for reference.",
+      });
+    }
 
     const buttons = block.createDiv();
-    this.addChoice(buttons, conflict, "keep-local", "Keep this machine's version");
-    this.addChoice(buttons, conflict, "keep-remote", "Keep the other machine's version");
-    this.addChoice(buttons, conflict, "reveal", "Show me both");
+    const hasLocal = conflict.branches.some((branch) => branch.onThisMachine);
+    const hasRemote = conflict.branches.some((branch) => branch.inSyncFolder);
+    this.addChoice(buttons, conflict, "keep-local", "Keep this machine's version", hasLocal);
+    this.addChoice(buttons, conflict, "keep-remote", "Keep the other machine's version", hasRemote);
+    this.addChoice(buttons, conflict, "reveal", "Show me both", true);
+    if (!conflict.superseded && (!hasLocal || !hasRemote)) {
+      buttons.createEl("p", {
+        text:
+          "A greyed-out choice means that side has changed since this conflict was recorded. " +
+          "Run a sync — the current disagreement will appear as its own entry.",
+      });
+    }
   }
 
   private addChoice(
@@ -78,8 +97,11 @@ export class ConflictModal extends Modal {
     conflict: ConflictEntry,
     resolution: ConflictResolution,
     label: string,
+    enabled: boolean,
   ): void {
     const button = container.createEl("button", { text: label });
+    button.disabled = !enabled;
+    if (!enabled) return;
     button.addEventListener("click", () => {
       void this.apply(conflict, resolution);
     });
@@ -93,6 +115,18 @@ export class ConflictModal extends Modal {
       await this.render();
     }
   }
+}
+
+function describeBranch(branch: ConflictBranchView): string {
+  const where =
+    branch.onThisMachine && branch.inSyncFolder
+      ? "on this machine and in the sync folder"
+      : branch.onThisMachine
+        ? "currently on this machine"
+        : branch.inSyncFolder
+          ? "currently in the sync folder — the other machine's version"
+          : "no longer on either side";
+  return `Version ${branch.hashPrefix}: ${branch.lineCount} lines, ${branch.size} bytes (${where}).`;
 }
 
 /**
@@ -110,11 +144,17 @@ export function describeOutcome(
     return `Both versions are in ${outcome.directory}`;
   }
   if (outcome.ok) {
-    return `Resolved session ${conflict.logicalIdPrefix}. The other version is still in quarantine and in your backups.`;
+    return (
+      `Resolved session ${conflict.logicalIdPrefix}. The other version is still in quarantine ` +
+      "and in your backups. If the other machine also extended this session, it will ask once there too."
+    );
   }
   switch (outcome.reason) {
     case "branch-moved":
-      return "That session changed since this list was drawn, so this is no longer the same disagreement. Run a sync and try again.";
+      return (
+        "That side changed since this list was drawn, so this is no longer the same " +
+        "disagreement. Run a sync and reopen — the current one will appear as its own entry."
+      );
     case "remote-not-ready":
       // Naming the other button matters: from the user's side the two look
       // symmetric, and being told one of them is unavailable without being

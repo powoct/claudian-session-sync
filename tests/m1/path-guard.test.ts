@@ -204,7 +204,7 @@ describe("four-root overlap (§9.7.5)", () => {
   const roots4 = (over: Partial<Record<string, string>> = {}) => [
     { name: "vault", realPath: over.vault ?? "/home/testuser/vault" },
     { name: "syncDir", realPath: over.syncDir ?? "/home/testuser/Dropbox/aiss" },
-    { name: "backupDir", realPath: over.backupDir ?? "/home/testuser/.ai-session-sync/backups" },
+    { name: "backupDir", realPath: over.backupDir ?? "/home/testuser/.claudian-session-sync/backups" },
     { name: "providerRoot", realPath: over.providerRoot ?? "/home/testuser/.claude/projects" },
   ];
 

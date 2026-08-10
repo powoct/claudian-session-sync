@@ -1,7 +1,7 @@
 /**
  * Workspace identity, in the vault (architecture §5.2.3, §5.6 store (a)).
  *
- * `<vault>/.ai-session-sync/workspace.json` answers one question — *which*
+ * `<vault>/.claudian-session-sync/workspace.json` answers one question — *which*
  * workspace is this vault — and it travels with the vault, which is what makes
  * the answer the same on every machine.
  *
@@ -25,7 +25,7 @@ import type { FsGateway } from "../infra/fs-gateway";
 import { type PathGuardDeps, mintStatePath } from "../infra/path-guard";
 import { createJsonExclusive, readJson } from "../infra/json-file";
 
-export const IDENTITY_DIR = ".ai-session-sync";
+export const IDENTITY_DIR = ".claudian-session-sync";
 export const IDENTITY_FILE = "workspace.json";
 
 export interface WorkspaceIdentityDeps {

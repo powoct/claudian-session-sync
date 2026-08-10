@@ -1,4 +1,4 @@
-# AI Session Sync — 架构设计
+# Claudian Session Sync — 架构设计
 
 > **文档状态**：设计稿（pre-implementation）。仓库尚无代码，本文描述的是**目标架构**，用于指导 M1 实现。
 > **规范地位**：本文是本项目的**当前实现规范**（normative）。`CLAUDE.md` 只承载产品目标、边界与协作约定，**不复述技术决策**（它会被 agent 自动注入、优先级最高，两处并存必然漂移）；启动期草稿里已被本文取代的条款，逐条记在[附录 A](#附录-a--claudemd-已废弃条款)。
@@ -228,7 +228,7 @@ docs/zh-CN/  scripts/
 
 #### 5.2.1 身份文件
 
-`<vault>/.ai-session-sync/workspace.json`：
+`<vault>/.claudian-session-sync/workspace.json`：
 
 ```jsonc
 {
@@ -377,7 +377,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 ### 5.5 本机状态目录（绝不同步）
 
 ```
-<homedir>/.ai-session-sync/                      # 0700
+<homedir>/.claudian-session-sync/                      # 0700
   machine.json                                   # 0600，machineId 与环境指纹（§10.3）
   workspaces/<workspaceId>.json                  # 0600，绑定关系、syncDir、本机 provider 配置
   state/<workspaceId>/
@@ -429,8 +429,8 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 
 | 位置 | 物理路径 | 是否跨机同步 | 可信度 | 存什么 |
 |---|---|---|---|---|
-| **(a) vault 内** | `<vault>/.ai-session-sync/workspace.json`<br>`<vault>/.obsidian/plugins/ai-session-sync/data.json` | **是**（随 vault） | 半可信（本插件写，但可能有冲突副本） | workspace 身份；**与机器无关**的可移植设置 |
-| **(b) 本机 home** | `<homedir>/.ai-session-sync/`（§5.5） | **否**（绝不同步） | 可信 | machineId、绝对路径、本机 provider 配置、观察账本、备份、日志、锁 |
+| **(a) vault 内** | `<vault>/.claudian-session-sync/workspace.json`<br>`<vault>/.obsidian/plugins/claudian-session-sync/data.json` | **是**（随 vault） | 半可信（本插件写，但可能有冲突副本） | workspace 身份；**与机器无关**的可移植设置 |
+| **(b) 本机 home** | `<homedir>/.claudian-session-sync/`（§5.5） | **否**（绝不同步） | 可信 | machineId、绝对路径、本机 provider 配置、观察账本、备份、日志、锁 |
 | **(c) sync-dir 内** | `<syncDir>/.aiss/` | **是**（外部工具搬运） | **不可信** | manifest、机器表、workspace 表——全部只用于加速与审计 |
 
 三条硬规则：
@@ -665,7 +665,7 @@ Tier B 的定义特征是**文件落地不等于 session 可见**。这带来 Ti
 | **只增不删** | `desired` 里没有、索引里有的行不删（删除传播不在 M1–M2 范围，且索引里可能有本插件不管的项目） |
 | **不碰用户数据** | 只写索引，绝不改写 rollout / primary 文件 |
 
-**pending journal**（`<homedir>/.ai-session-sync/state/<workspaceId>/pending-index.json`）：在 primary rename 成功之后、调用 reconcile 之前写入（先记后做）；reconcile 成功后清除；崩溃后 preflight 读取并把条目并入本次 `desired`；`attempts >= 5` 后不再自动重试但**条目保留**并在报告与 Notice 中列出（静默丢弃 = 静默丢 session）。journal 本身丢失不影响正确性（reconcile 是全量驱动的），它的价值是"让异常项被人看见"。
+**pending journal**（`<homedir>/.claudian-session-sync/state/<workspaceId>/pending-index.json`）：在 primary rename 成功之后、调用 reconcile 之前写入（先记后做）；reconcile 成功后清除；崩溃后 preflight 读取并把条目并入本次 `desired`；`attempts >= 5` 后不再自动重试但**条目保留**并在报告与 Notice 中列出（静默丢弃 = 静默丢 session）。journal 本身丢失不影响正确性（reconcile 是全量驱动的），它的价值是"让异常项被人看见"。
 
 **索引写入方式优先级**：`official-command`（走 CLI 子进程；命令不存在或非 0 退出 → 记 failure，**不回退到 direct-write**）> `direct-write` > `none`。`direct-write` 的红线（任一不满足则退回 Tier C）：
 
@@ -932,9 +932,9 @@ dry-run 的用途是"我还不信任这套配置/这台机器，先看看它打�
 
 理由：清理 tmp 是**删除操作**，而 dry-run 最常见的场景恰恰是"我刚配好 syncDir，还不确定填对没有"，配错的 syncDir 上执行删除是这个功能能造成的最大伤害；收益极小（tmp 残留只浪费一点磁盘，下次真实 pass 就清掉）；有了这条，"dry-run 前后所有相关目录树的快照完全一致"才是能写进测试的断言——例外一多，测试就形同虚设。
 
-**保证不写入的五棵树**：① 所有启用 provider 的本机 root；② sync-dir 全树（含 `.aiss/`、`.quarantine/`）；③ 备份区；④ vault 内 `.ai-session-sync/**` 与 `data.json`；⑤ 本机状态目录。比较维度：文件全集 + size + mtimeMs + sha256。
+**保证不写入的五棵树**：① 所有启用 provider 的本机 root；② sync-dir 全树（含 `.aiss/`、`.quarantine/`）；③ 备份区；④ vault 内 `.claudian-session-sync/**` 与 `data.json`；⑤ 本机状态目录。比较维度：文件全集 + size + mtimeMs + sha256。
 
-**唯一允许的写入**：`<homedir>/.ai-session-sync/logs/<date>.log`，且仅当 `logLevel = "debug"`（日志树不在快照范围内）。
+**唯一允许的写入**：`<homedir>/.claudian-session-sync/logs/<date>.log`，且仅当 `logLevel = "debug"`（日志树不在快照范围内）。
 
 其他约束：workspace 未初始化时报 `WORKSPACE_NOT_INITIALIZED` 并**列出它将会创建什么**，而不是"顺便创建一下"；machineId 的身份漂移轮换在 dry-run 下只在内存生效并在报告中标注；adapter 的 `reconcileLocalIndex()` 必须读 `ctx.dryRun` 并短路；**首次绑定一个新的 syncDir 时 `dryRun` 默认置 `true`**，强制用户看一眼计划再放行。
 
@@ -951,10 +951,26 @@ dry-run 的用途是"我还不信任这套配置/这台机器，先看看它打�
 ```
 conflictId = sha256(logicalId ‖ min(hashL, hashR) ‖ max(hashL, hashR)).slice(0, 16)
 隔离路径   = <sync-dir>/.quarantine/<workspaceId>/<provider>/<conflictId>/
-               local-<hashL 前 8 位>.jsonl
-               remote-<hashR 前 8 位>.jsonl
-               meta.json     { logicalId, hashL, hashR, sizes, lineCounts, detectedBy, detectedAt }
+               branch-<hash 前 8 位>.jsonl   × 2（按 hash 排序；两台机器写出的文件名相同）
+               meta.json     { schemaVersion: 2, logicalId, conflictId,
+                               branches: [{hashPrefix, size, lineCount}] 按 hash 排序,
+                               detectedBy, detectedAt }
 ```
+
+目录里的**一切都是机器中立的**（ADR-40）。副本按内容哈希命名、meta 不含
+`local`/`remote` 标签：这个目录是两台机器**共享**的（同一分歧在双方算出同一个
+conflictId），"哪个分支是本机的"在每台机器上答案相反，而且本机文件一动答案就变。
+2026-08-10 验收实测：视角相关的 `local-*`/`remote-*` 命名让第二台检出同一冲突的机器
+往同一目录写入了**镜像的第二对副本**（4 副本、meta 视角翻转），读取端任取一对时
+把同一分支同时当 local 和 remote，解决命令从此永远拒绝（缺陷 D-3，阻塞 M1 Exit）。
+写入用 no-replace（内容寻址 ⇒ 已存在即字节相同），重复检出与对端检出都是零写入，
+meta 的 `detectedAt` 保持首次检出值。
+
+**解决命令在点击当下用活文件判定视角**：把本机 session 文件与 sync-dir 副本各自
+哈希、与隔离分支比对——「保这台」要求本机文件当前等于某个隔离分支，「保另一台」
+要求 sync-dir 副本当前等于某个隔离分支；被覆盖的一侧不做要求，无论漂到什么内容都
+先备份再覆盖（第三方写入者对落败分支的追加因此不再锁死解决——见 findings
+2026-08-10 R-1）。旧版视角命名的隔离目录按内容读取后照常可解决。
 
 性质与后果：
 
@@ -1148,7 +1164,7 @@ M1 **移除 `backup.enabled`**。理由：[testing.md §1](./testing.md) 的 I1 
 #### 9.3.2 布局与命名
 
 ```
-<homedir>/.ai-session-sync/backups/<workspaceId>/<providerId>/
+<homedir>/.claudian-session-sync/backups/<workspaceId>/<providerId>/
     <原文件名>.<stamp>.<seq>.bak            # 覆盖本机文件前的本机版本
   remote/
     <原文件名>.<stamp>.<seq>.bak            # PUSH_OVERWRITE 前被覆盖的**远端**版本
@@ -1217,7 +1233,7 @@ seq   = 两位十进制，00 起
 | 场景 | 手段 | 强度 |
 |---|---|---|
 | 同机 pass 重入（定时 + 手动撞上） | 进程内互斥锁，第二个直接返回"已在运行" | **强** |
-| 同机多个 Obsidian 实例 | `<homedir>/.ai-session-sync/locks/<workspaceId>.lock`（pid + 心跳 + **epoch**），5 分钟无心跳视为陈旧可抢占；**抢占后原持有者的写必须被拒**（写前重新校验 epoch） | **中**（本地 fs 有原子 `O_EXCL`） |
+| 同机多个 Obsidian 实例 | `<homedir>/.claudian-session-sync/locks/<workspaceId>.lock`（pid + 心跳 + **epoch**），5 分钟无心跳视为陈旧可抢占；**抢占后原持有者的写必须被拒**（写前重新校验 epoch） | **中**（本地 fs 有原子 `O_EXCL`） |
 | 本机 CLI 与本插件同时动同一文件 | §9.1 稳定性 + §9.2.1 VO + §9.3 备份 | **best-effort**，残余窗口 W1 |
 | 两台机器同时 pass | VO 的 A2/A4/A5/A8 复查 + `backups/remote/` + `abortStreak` 告警。`.aiss/locks/` 只做**咨询性提示**（网盘目录的锁文件不可能有原子性） | **best-effort**，残余窗口 W2/W3 |
 
@@ -1443,7 +1459,7 @@ for (i, seg) of rel.split("/"):
 | `syncDir = ~/.claude/projects/…` | pull 写回自己刚读的地方，无限放大 |
 | `backupDir = <syncDir>/backups` | 备份被同步到所有机器，且"备份"和"被备份对象"在同一棵可能整体失效的树里 |
 
-默认 `backupDir`（`~/.ai-session-sync/backups`）与默认 provider root（`~/.claude/projects`）不重叠 ✅。
+默认 `backupDir`（`~/.claudian-session-sync/backups`）与默认 provider root（`~/.claude/projects`）不重叠 ✅。
 
 #### 9.7.6 硬排除名单
 
@@ -1497,7 +1513,7 @@ for (i, seg) of rel.split("/"):
 ### 10.2 类型定义
 
 ```ts
-// ── (a) vault：<vault>/.ai-session-sync/workspace.json ──────────
+// ── (a) vault：<vault>/.claudian-session-sync/workspace.json ──────────
 interface WorkspaceIdentityFile {
   schemaVersion: 1;
   workspaceId: WorkspaceId;
@@ -1506,11 +1522,11 @@ interface WorkspaceIdentityFile {
   createdBy?: { machineLabel: string };
 }
 
-// ── (a) vault：.obsidian/plugins/ai-session-sync/data.json ──────
+// ── (a) vault：.obsidian/plugins/claudian-session-sync/data.json ──────
 // 不变式：序列化后不得包含任何绝对路径 / 主机名 / 机器 ID
 interface PortableSettings {
   schemaVersion: 1;
-  workspaceIdFile: string;             // 默认 ".ai-session-sync/workspace.json"
+  workspaceIdFile: string;             // 默认 ".claudian-session-sync/workspace.json"
   providers: Partial<Record<ProviderId, { enabled: boolean }>>;
   auto: { onStartup: boolean; intervalMinutes: number };          // true / 5；intervalMinutes = 0 表示关闭定时
   stability: {
@@ -1538,7 +1554,7 @@ interface PortableSettings {
   };
 }
 
-// ── (b) 本机：<homedir>/.ai-session-sync/machine.json  (0600) ───
+// ── (b) 本机：<homedir>/.claudian-session-sync/machine.json  (0600) ───
 interface MachineFile {
   schemaVersion: 1;
   machineId: MachineId;
@@ -1634,7 +1650,7 @@ interface EffectiveConfig {
 | 状态栏 | `⟳ 3↑ 1↓ · 2 分钟前` / 出错时红色 / `NOT_READY` 黄标 | 常驻，不打扰 |
 | Notice | 仅冲突、身份问题、就绪异常、provider 健康异常、pass 失败、`PULL_OVERWRITE` 提示重启会话 | 成功不弹 |
 | 报告视图 | 最近一次 pass 的完整 Action 列表（含被跳过项、`violations[]`、每个 overwrite 的 `backupPath`） | dry-run 的主要出口 |
-| 日志文件 | `<homedir>/.ai-session-sync/logs/<date>.log`，`logLevel=debug` 时开启 | 见下方白名单 |
+| 日志文件 | `<homedir>/.claudian-session-sync/logs/<date>.log`，`logLevel=debug` 时开启 | 见下方白名单 |
 
 排障关键信息：每个 Action 都要能回答"为什么是这个决定"——记录 `(lines(L), lines(R), 前缀关系, 稳定性观察结果)` 四元组。
 
@@ -1720,20 +1736,20 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 
 ### 13.2 vault 是 git 仓库时的 `.gitignore`
 
-**旧建议"把整个 `.ai-session-sync/` 加进 `.gitignore`"是错的**：用 Git 同步 vault 的用户会因此传不过去 `workspace.json`，第二台机器永远停在"等待 workspace 身份"，而这个失败**看起来像插件坏了**。
+**旧建议"把整个 `.claudian-session-sync/` 加进 `.gitignore`"是错的**：用 Git 同步 vault 的用户会因此传不过去 `workspace.json`，第二台机器永远停在"等待 workspace 身份"，而这个失败**看起来像插件坏了**。
 
 ```gitignore
-# 情况 A（M1 的实际情况）：<vault>/.ai-session-sync/ 里只有 workspace.json
+# 情况 A（M1 的实际情况）：<vault>/.claudian-session-sync/ 里只有 workspace.json
 # 什么都不用加。它必须被提交。
 
 # 情况 B（将来目录内出现本机缓存时）：只忽略其他内容，显式保留身份文件
-.ai-session-sync/*
-!.ai-session-sync/workspace.json
+.claudian-session-sync/*
+!.claudian-session-sync/workspace.json
 ```
 
-⚠️ Git 规则陷阱：写成 `.ai-session-sync/`（带尾斜杠、忽略整个目录）时，目录内的文件**无法用 `!` 重新纳入**（Git 不会递归进被忽略的目录）。必须写成 `.ai-session-sync/*` 才能让 negate 生效。README 里也要写这一句。
+⚠️ Git 规则陷阱：写成 `.claudian-session-sync/`（带尾斜杠、忽略整个目录）时，目录内的文件**无法用 `!` 重新纳入**（Git 不会递归进被忽略的目录）。必须写成 `.claudian-session-sync/*` 才能让 negate 生效。README 里也要写这一句。
 
-其余本机状态（machineId、绝对路径、备份、日志、锁）**全部在 `<homedir>/.ai-session-sync/` 下**，根本不在 vault 里——这是把本机状态挪出 vault 的又一收益。
+其余本机状态（machineId、绝对路径、备份、日志、锁）**全部在 `<homedir>/.claudian-session-sync/` 下**，根本不在 vault 里——这是把本机状态挪出 vault 的又一收益。
 
 ### 13.3 其他
 
@@ -1787,6 +1803,10 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 37 | 原子写自己建目标目录 | 每个调用点各自 `mkdirp` | `*_NEW` 的目标目录经常不存在（对端没用过的 workspace 子树、本机 CLI 没开过这个 vault 的 project 目录）。路径此时已被证明落在配置的 root 内，建到它的那串目录不会多给出任何触及范围；而"每个调用点记得建"的结果是有一个没记得——真实发生过，表现为每次 push 都 ENOENT |
 | 38 | 设置分两处：可移植行为参数进 vault 的 `data.json`，路径与 provider 开关进本机 binding | 全部放 `data.json` | 判据仍是 §5.6 规则 1——把 (a) 原样拷到另一台机器必须仍然正确。sync 目录路径是全插件最机器相关的值，放进随 vault 同步的文件里，Mac 的路径下一次同步就会盖掉 Windows 的，而且不报错 |
 | 39 | provider 默认关闭，默认存储路径永远可覆盖 | 探测到就启用 | "找到了某个 CLI 的目录"不等于用户同意把它的对话拷到另一台机器。而 CLI 布局会随版本变，转义规则是对某一个版本实测的——覆盖不是 bug 的逃生口，是"这个版本放在别处"的正式答案 |
+| 40 | 隔离目录机器中立：副本 `branch-<hash8>` 命名、meta v2 无 local/remote 标签、no-replace 写入；解决命令在点击当下用活文件哈希判定视角，只校验**被保留侧**等于某个隔离分支 | 检出时冻结 local/remote 标签，解决时要求双侧都未变 | 目录是双机共享的，视角标签在对端从一开始就是反的、在本机文件一动就过期；实测（D-3）第二台机器写入镜像副本对后解决命令永久拒绝。被覆盖侧无论持有什么都先备份，故不校验它不损失安全性；校验它则第三方追加（R-1）会永久锁死解决 |
+| 41 | 静默 pass 不重写 manifest：entry 内容事实与 E0 签名均未变时不改写（不 bump generation），无 entry 变化且 manifest 状态为 ok 时跳过保存 | 每轮 ready pass 无条件保存 | manifest 在 sync 目录里，是**共享**文件；双机空闲互刷 updatedAt/generation 被同步工具制成无穷的"冲突副本"（实测全程 4 份），也让 I1 取证充满噪声。签名比对是全等五元组，对端写的文件（inode 不同）仍会刷新 entry，不影响对端的 E1 |
+| 42 | 状态栏冲突数 = 最近一次 pass 报告中 CONFLICT 的去重会话数；解决命令落地后自动补跑一轮 pass | 数隔离目录 | 隔离目录在解决后**保留**是特性（双分支可达），对端的目录还会经同步到达——按目录数则解决后仍显示 1、对端副本到达变 2（实测 D-4）。摘要行不再把 CONFLICT 计入 change 数，"conflict" 在整条状态里只出现一次 |
+| 43 | 改名 Claudian Session Sync：插件 id、home 目录（`~/.claudian-session-sync`）、vault 身份目录（`.claudian-session-sync/`）随名；sync-dir 的 `.aiss/` 与 root.json 的 `magic: "ai-session-sync"` **不改** | 全部改齐 | `.aiss/` 与 magic 是 wire format，改名会把每个已初始化的 sync 目录判成 NR-1/NR-2，收益为零；本机与 vault 内目录在发布前改名只需一次 mv（见验收套件 §3 P0 迁移步骤） |
 
 ---
 

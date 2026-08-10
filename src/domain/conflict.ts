@@ -46,10 +46,16 @@ export function conflictId(sides: ConflictSides, hash: (input: string) => string
   return stripPrefix(hash(`${sides.logicalId} ${first} ${second}`)).slice(0, CONFLICT_ID_LENGTH);
 }
 
+export interface QuarantineCopy {
+  readonly name: string;
+  /** The full hash (as `hashBytes` renders it) of the branch this copy holds. */
+  readonly hash: string;
+}
+
 export interface QuarantineLayout {
   readonly dir: readonly string[];
-  readonly localCopy: string;
-  readonly remoteCopy: string;
+  /** One copy per branch, ordered by hash — identical on every machine. */
+  readonly copies: readonly QuarantineCopy[];
   readonly meta: string;
 }
 
@@ -59,6 +65,16 @@ export interface QuarantineLayout {
  * Inside the sync directory rather than the home state directory: the point is
  * that a user on *either* machine can find both branches, and only the sync
  * directory reaches both.
+ *
+ * Everything in the directory is machine-neutral. The copies are named by the
+ * hash of their content (`branch-<hash8>`), never `local-`/`remote-`: those
+ * words swap meaning between the two machines, and the directory is shared —
+ * both machines detect the same disagreement (same conflict id, by
+ * construction) and write into the same place. Viewpoint-relative names made
+ * the second machine's write a second *pair*, and a reader could then pair a
+ * "local" copy with a "remote" copy of the same branch. Hash-derived names
+ * make the second machine's writes byte-identical to the first's, so the
+ * shared directory converges instead of accumulating.
  */
 export function quarantineLayout(input: {
   readonly workspaceId: string;
@@ -68,32 +84,46 @@ export function quarantineLayout(input: {
   readonly remoteHash: string;
   readonly extension: string;
 }): QuarantineLayout {
+  const ordered =
+    stripPrefix(input.localHash) <= stripPrefix(input.remoteHash)
+      ? [input.localHash, input.remoteHash]
+      : [input.remoteHash, input.localHash];
   return {
     dir: [".quarantine", input.workspaceId, input.providerId, input.conflictId],
-    localCopy: `local-${shortHash(input.localHash)}${input.extension}`,
-    remoteCopy: `remote-${shortHash(input.remoteHash)}${input.extension}`,
+    copies: ordered.map((hash) => ({
+      name: `branch-${shortHash(hash)}${input.extension}`,
+      hash,
+    })),
     meta: "meta.json",
   };
 }
 
 /**
- * What is recorded alongside the two copies.
+ * What is recorded alongside the copies.
  *
  * Sizes, line counts, hash prefixes and timestamps — the §11.1 whitelist and
  * nothing else. No field here can carry a line of conversation, and
  * `detectedBy` is a machine id prefix rather than a hostname, which would be a
  * string another machine wrote.
+ *
+ * Schema 2 is machine-neutral: branches are ordered by hash, with no
+ * `local`/`remote` labels. Which branch is "this machine's" is a question
+ * about the present, answered by hashing the live files at read time — a
+ * label frozen at detection is wrong on the other machine from the start and
+ * wrong on this one as soon as the file moves.
  */
+export interface ConflictBranchMeta {
+  readonly hashPrefix: string;
+  readonly size: number;
+  readonly lineCount: number;
+}
+
 export interface ConflictMeta {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly logicalId: string;
   readonly conflictId: string;
-  readonly localHashPrefix: string;
-  readonly remoteHashPrefix: string;
-  readonly localSize: number;
-  readonly remoteSize: number;
-  readonly localLineCount: number;
-  readonly remoteLineCount: number;
+  /** Ordered by hash prefix, mirroring the copy files. */
+  readonly branches: readonly ConflictBranchMeta[];
   readonly detectedBy: string;
   readonly detectedAt: string;
 }
@@ -110,16 +140,23 @@ export function buildConflictMeta(input: {
   readonly machineIdPrefix: string;
   readonly detectedAtIso: string;
 }): ConflictMeta {
+  const local: ConflictBranchMeta = {
+    hashPrefix: shortHash(input.localHash),
+    size: input.localSize,
+    lineCount: input.localLineCount,
+  };
+  const remote: ConflictBranchMeta = {
+    hashPrefix: shortHash(input.remoteHash),
+    size: input.remoteSize,
+    lineCount: input.remoteLineCount,
+  };
+  const branches =
+    stripPrefix(input.localHash) <= stripPrefix(input.remoteHash) ? [local, remote] : [remote, local];
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     logicalId: input.logicalId,
     conflictId: input.conflictId,
-    localHashPrefix: shortHash(input.localHash),
-    remoteHashPrefix: shortHash(input.remoteHash),
-    localSize: input.localSize,
-    remoteSize: input.remoteSize,
-    localLineCount: input.localLineCount,
-    remoteLineCount: input.remoteLineCount,
+    branches,
     detectedBy: input.machineIdPrefix,
     detectedAt: input.detectedAtIso,
   };
@@ -147,6 +184,7 @@ function stripPrefix(hash: string): string {
   return hash.startsWith("sha256:") ? hash.slice(7) : hash;
 }
 
-function shortHash(hash: string): string {
+/** `sha256:<hex>` → first 8 hex chars, the display form used everywhere here. */
+export function shortHash(hash: string): string {
   return stripPrefix(hash).slice(0, 8);
 }

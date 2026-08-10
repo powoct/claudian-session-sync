@@ -114,10 +114,10 @@ export class RuntimeHarness {
     for (const dir of [peer.homedir, peer.vaultRoot, peer.projectDir]) {
       await fsp.mkdir(dir, { recursive: true });
     }
-    await fsp.mkdir(path.join(peer.vaultRoot, ".ai-session-sync"), { recursive: true });
+    await fsp.mkdir(path.join(peer.vaultRoot, ".claudian-session-sync"), { recursive: true });
     await fsp.copyFile(
-      path.join(other.vaultRoot, ".ai-session-sync", "workspace.json"),
-      path.join(peer.vaultRoot, ".ai-session-sync", "workspace.json"),
+      path.join(other.vaultRoot, ".claudian-session-sync", "workspace.json"),
+      path.join(peer.vaultRoot, ".claudian-session-sync", "workspace.json"),
     );
 
     await peer.runtime.refresh();

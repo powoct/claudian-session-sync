@@ -57,7 +57,7 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
   }
 
   private renderStatus(containerEl: HTMLElement, status: RuntimeStatus): void {
-    new Setting(containerEl).setName("AI Session Sync").setHeading();
+    new Setting(containerEl).setName("Claudian Session Sync").setHeading();
     new Setting(containerEl).setName("Status").setDesc(status.detail);
 
     if (status.phase === "await-init") {

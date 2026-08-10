@@ -121,7 +121,7 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         action: request.action,
       });
 
-      const rotation = await rotate(deps, dirPath, originalName, bytes);
+      const rotation = await rotate(deps, dirPath, originalName, bytes, name);
       return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
     },
   };
@@ -141,6 +141,7 @@ async function rotate(
   dirPath: string,
   originalName: string,
   newest: Uint8Array,
+  newestName: string,
 ): Promise<{ deferred: boolean }> {
   const entries = await deps.fs.readDir(dirPath).catch(() => []);
   const mine = entries.filter(
@@ -167,7 +168,30 @@ async function rotate(
     const target = deps.home.mint(deps.joinPath(dirPath, name));
     if (!target.ok) continue;
     // Rotation failure is not fatal: the way back already exists.
-    await deps.fs.removeFile(target.value).catch(() => undefined);
+    const removed = await deps.fs.removeFile(target.value).then(
+      () => true,
+      () => false,
+    );
+    // The index is a journal, and a journal that records writes but not
+    // deletions reads as "four backups" over a directory holding three. The
+    // prune line names the survivor the deleted bytes are a prefix of, which
+    // is the whole justification for deleting them.
+    if (removed) {
+      const dir = deps.home.mint(dirPath);
+      if (dir.ok) {
+        await appendIndexLine(
+          deps,
+          dir.value,
+          dirPath,
+          JSON.stringify({
+            event: "pruned",
+            name,
+            prunedAtMs: deps.nowMs(),
+            reproducibleFrom: newestName,
+          }),
+        );
+      }
+    }
   }
   return { deferred: plan.deferred };
 }
@@ -201,11 +225,20 @@ async function appendIndex(
   dirPath: string,
   record: BackupRecord,
 ): Promise<void> {
+  await appendIndexLine(deps, dir, dirPath, indexLine(record));
+}
+
+async function appendIndexLine(
+  deps: BackupWriterDeps,
+  dir: SafeAbsolutePath,
+  dirPath: string,
+  json: string,
+): Promise<void> {
   const target = deps.home.mint(deps.joinPath(dirPath, "index.jsonl"));
   if (!target.ok) return;
   try {
     const existing = await readOrNull(deps.fs, target.value);
-    const line = new TextEncoder().encode(`${indexLine(record)}\n`);
+    const line = new TextEncoder().encode(`${json}\n`);
     const merged = existing === null ? line : concat(existing, line);
     await deps.fs.mkdirp(dir, DIR_MODE);
     await deps.fs.writeFileAtomic(target.value, merged, { mode: FILE_MODE });

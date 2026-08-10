@@ -109,7 +109,7 @@ export interface RuntimeStatus {
 
 const IDLE: RuntimeStatus = {
   phase: "loading",
-  short: "AI Session Sync: starting",
+  short: "Claudian Session Sync: starting",
   detail: "Reading local state.",
   workspaceId: null,
   syncDirPath: null,
@@ -190,7 +190,7 @@ export class PluginRuntime {
     if (!prepared.ok) return this.publish(prepared.status);
     if (this.passInFlight) return this.status;
 
-    this.publish({ ...this.status, phase: "syncing", short: "AI Session Sync: syncing…" });
+    this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
       const outcome = await runWorkspacePass({
         ...prepared.deps,
@@ -210,7 +210,7 @@ export class PluginRuntime {
       return this.publish({
         ...this.status,
         phase: "error",
-        short: "AI Session Sync: failed",
+        short: "Claudian Session Sync: failed",
         detail: `The last pass ended unexpectedly: ${describe(error)}`,
       });
     }
@@ -311,7 +311,10 @@ export class PluginRuntime {
     const deps = await this.conflictDeps();
     if (!deps) return { ok: false, reason: "unknown-conflict" };
     const outcome = await resolveConflict(deps, conflictId, resolution);
-    if (outcome.ok && outcome.action !== "REVEAL") await this.refresh();
+    // A pass, not just a status refresh: the conflict count comes from the
+    // last pass report, and the pass is also what records the now-agreeing
+    // pair — without it the bar keeps saying "1 conflict" until the timer.
+    if (outcome.ok && outcome.action !== "REVEAL") await this.syncNow();
     return outcome;
   }
 
@@ -328,7 +331,7 @@ export class PluginRuntime {
   }
 
   private get stateRoot(): string {
-    return this.host.joinPath(this.host.homedir, ".ai-session-sync");
+    return this.host.joinPath(this.host.homedir, ".claudian-session-sync");
   }
 
   private async pathGuard(): Promise<PathGuardDeps> {
@@ -576,7 +579,20 @@ export class PluginRuntime {
     const workspaceId = this.identity?.file?.workspaceId ?? null;
     const syncDirPath = this.binding?.syncDirPath ?? null;
     const machineLabel = this.machine?.machineLabel ?? null;
-    const conflicts = (await this.conflicts()).length;
+    // Active conflicts are what the last pass *judged* to be in conflict —
+    // not the number of quarantine directories. Quarantine holds every
+    // disagreement that ever happened (both branches stay reachable after a
+    // resolution, and directories written by the other machine arrive through
+    // the sync folder), so counting it showed "1 conflict" after the user had
+    // already resolved it, and "2 conflicts" when the other machine's copy of
+    // the same disagreement arrived.
+    const conflicts = this.lastReport
+      ? new Set(
+          this.lastReport.actions
+            .filter((action) => action.action === "CONFLICT")
+            .map((action) => action.neutralRel),
+        ).size
+      : this.status.conflicts;
     const base = {
       workspaceId,
       syncDirPath,
@@ -592,7 +608,7 @@ export class PluginRuntime {
         phase: "identity-blocked",
         readiness: "UNCONFIGURED",
         notReadyReason: null,
-        short: "AI Session Sync: workspace identity problem",
+        short: "Claudian Session Sync: workspace identity problem",
         detail: IDENTITY_MESSAGES[this.identity.status],
       };
     }
@@ -602,7 +618,7 @@ export class PluginRuntime {
         phase: "identity-required",
         readiness: "UNCONFIGURED",
         notReadyReason: null,
-        short: "AI Session Sync: not set up",
+        short: "Claudian Session Sync: not set up",
         detail:
           "This vault has no workspace identity yet. Create one here on the first machine, " +
           "then wait for your vault sync to carry it to the others — creating a second one " +
@@ -615,7 +631,7 @@ export class PluginRuntime {
         phase: "no-sync-dir",
         readiness: "UNCONFIGURED",
         notReadyReason: null,
-        short: "AI Session Sync: no sync folder",
+        short: "Claudian Session Sync: no sync folder",
         detail:
           "Choose the folder your sync tool keeps in step across machines — a Dropbox, " +
           "iCloud or Syncthing directory. It must not be inside the vault.",
@@ -632,7 +648,7 @@ export class PluginRuntime {
         phase: "error",
         readiness: readiness.state,
         notReadyReason: readiness.notReadyReason,
-        short: "AI Session Sync: folder configuration problem",
+        short: "Claudian Session Sync: folder configuration problem",
         detail:
           outcome.preflight.kind === "root-overlap"
             ? `Two of the configured folders contain one another (${outcome.preflight.detail}). ` +
@@ -666,10 +682,10 @@ export class PluginRuntime {
 /** What one line of status bar says. */
 function shortFor(phase: RuntimePhase, summary: string | null, conflicts: number): string {
   const suffix = conflicts > 0 ? ` · ${conflicts} conflict${conflicts === 1 ? "" : "s"}` : "";
-  if (phase === "ready") return `AI Session Sync: ${summary ?? "idle"}${suffix}`;
-  if (phase === "await-init") return "AI Session Sync: folder needs initialising";
-  if (phase === "not-ready") return `AI Session Sync: paused${suffix}`;
-  return `AI Session Sync: checking folder${suffix}`;
+  if (phase === "ready") return `Claudian Session Sync: ${summary ?? "idle"}${suffix}`;
+  if (phase === "await-init") return "Claudian Session Sync: folder needs initialising";
+  if (phase === "not-ready") return `Claudian Session Sync: paused${suffix}`;
+  return `Claudian Session Sync: checking folder${suffix}`;
 }
 
 function detailFor(
@@ -728,18 +744,25 @@ const NOT_READY_MESSAGES: Record<NotReadyReason, string> = {
     "folder that moved. Syncing resumes when it comes back.",
 };
 
+/**
+ * Changes and failures only — conflicts are deliberately not here. The status
+ * line appends the conflict count itself, and a CONFLICT action's result is
+ * "APPLIED" (the quarantine copies were applied), so counting it as a change
+ * *and* letting the suffix report it produced "1 change, 1 conflict · 1
+ * conflict" on a single conflicted session during the M1 acceptance run.
+ */
 function summarise(report: PassReport): string {
   if (report.outcome === "aborted") return `did nothing (${report.abortReason ?? "aborted"})`;
-  const applied = report.actions.filter((a) => a.result === "APPLIED" && a.action !== "NOOP").length;
-  const conflicts = report.actions.filter((a) => a.action === "CONFLICT").length;
+  const applied = report.actions.filter(
+    (a) => a.result === "APPLIED" && a.action !== "NOOP" && a.action !== "CONFLICT",
+  ).length;
   const failed = report.actions.filter((a) => a.result.startsWith("FAILED")).length;
 
   // "0 changes" is the steady state, which is to say: the normal one. Saying
   // it as a count reads like a report of failure every five minutes.
-  if (applied === 0 && conflicts === 0 && failed === 0) return "up to date";
+  if (applied === 0 && failed === 0) return "up to date";
 
   const parts = applied > 0 ? [`${applied} change${applied === 1 ? "" : "s"}`] : [];
-  if (conflicts > 0) parts.push(`${conflicts} conflict${conflicts === 1 ? "" : "s"}`);
   if (failed > 0) parts.push(`${failed} failed`);
   return parts.join(", ");
 }

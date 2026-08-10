@@ -7,14 +7,22 @@
  * abandoned version stays in quarantine, and the side being overwritten is
  * backed up first, exactly as any other overwrite is.
  *
- * Resolution deliberately reads the chosen branch **from quarantine**, not from
- * the live file. Quarantine is the frozen record of what the conflict was
- * about; the live file may have moved since the user opened the dialog, and
- * copying a version they never looked at is not what they asked for. If it has
- * moved, the conflict they are resolving no longer exists and the command says
- * so rather than resolving a different one.
+ * Nothing in the quarantine directory is trusted to say which branch is
+ * whose. The directory is shared between machines and its copies are named by
+ * content hash; "this machine's version" is decided here, at read time, by
+ * hashing the live files. The alternative — believing a `local-`/`remote-`
+ * label frozen at detection — is wrong on the other machine from the start
+ * (the labels swap), and wrong on this one as soon as anything appends to the
+ * session, which is exactly what locked resolution on the second machine
+ * during the M1 acceptance run.
+ *
+ * Resolution therefore verifies one thing: the side the user chose to KEEP
+ * must currently hold one of the quarantined branches — the version whose
+ * line counts and sizes they were just shown. The side being overwritten may
+ * hold anything at all; whatever it holds is backed up before it goes.
  */
-import type { ConflictMeta, ConflictResolution } from "../domain/conflict";
+import { shortHash } from "../domain/conflict";
+import type { ConflictResolution } from "../domain/conflict";
 import { resolutionAction } from "../domain/conflict";
 import type { LogicalId } from "../domain/types";
 import type { FsGateway } from "../infra/fs-gateway";
@@ -24,15 +32,36 @@ import type { MintOutcome } from "./sync-engine";
 
 export const QUARANTINE_DIR = ".quarantine";
 
+export interface ConflictBranchView {
+  /** Full hash as `hashBytes` renders it; compared, never displayed. */
+  readonly hash: string;
+  readonly hashPrefix: string;
+  readonly size: number;
+  readonly lineCount: number;
+  readonly copyName: string;
+  /** The session file on this machine currently holds exactly these bytes. */
+  readonly onThisMachine: boolean;
+  /** The sync folder's copy currently holds exactly these bytes. */
+  readonly inSyncFolder: boolean;
+}
+
 export interface ConflictEntry {
   readonly conflictId: string;
   readonly providerId: string;
+  readonly logicalId: string;
   readonly logicalIdPrefix: string;
-  readonly meta: ConflictMeta;
+  readonly detectedAt: string;
   /** Absolute path of the quarantine directory, for `reveal`. */
   readonly directory: string;
-  readonly localCopy: string;
-  readonly remoteCopy: string;
+  /** Ordered by hash, like the copy files. */
+  readonly branches: readonly ConflictBranchView[];
+  /**
+   * Neither live side matches any branch — the disagreement this directory
+   * froze is over (resolved, or superseded by a fresh pair the next pass will
+   * quarantine under its own id). Kept listable for `reveal`; the keep
+   * buttons cannot act on it.
+   */
+  readonly superseded: boolean;
 }
 
 export interface ConflictCommandDeps {
@@ -63,7 +92,7 @@ export type ResolveOutcome =
 
 export type ResolveFailure =
   | "unknown-conflict"
-  /** The chosen branch is no longer what quarantine froze — a different conflict now. */
+  /** The side being kept holds none of the quarantined branches any more. */
   | "branch-moved"
   | "remote-not-ready"
   | "backup-failed"
@@ -86,7 +115,7 @@ export async function listConflicts(deps: ConflictCommandDeps): Promise<Conflict
       if (parsed) found.push(parsed);
     }
   }
-  return found.sort((a, b) => (a.meta.detectedAt < b.meta.detectedAt ? 1 : -1));
+  return found.sort((a, b) => (a.detectedAt < b.detectedAt ? 1 : -1));
 }
 
 /**
@@ -113,23 +142,22 @@ export async function resolveConflict(
   // place a push does real damage (§9.6.3).
   if (keepingLocal && !deps.mayWriteRemote()) return { ok: false, reason: "remote-not-ready" };
 
-  const chosenCopy = deps.joinPath(entry.directory, keepingLocal ? entry.localCopy : entry.remoteCopy);
-  const chosen = await deps.fs.readFile(chosenCopy).catch(() => null);
-  if (chosen === null) return { ok: false, reason: "unknown-conflict" };
-
-  const neutralRel = `${entry.providerId}/${entry.meta.logicalId}${extensionOf(entry.localCopy)}`;
+  const extension = extensionOf(entry.branches[0]?.copyName ?? "");
+  const neutralRel = `${entry.providerId}/${entry.logicalId}${extension}`;
   const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, neutralRel);
   const localPath = await deps.localPathFor(entry.providerId, neutralRel);
   if (localPath === null) return { ok: false, reason: "path-rejected" };
 
-  // The side the user is keeping must still hold what quarantine froze. If it
-  // has changed, the disagreement they were shown is not the one on disk, and
-  // the next pass will compute a different conflict id for the real one.
+  // The kept side must currently hold one of the quarantined branches — the
+  // version the dialog just described. Deliberately nothing is checked about
+  // the side being overwritten: it may have moved on (a third-party writer
+  // appending to the losing branch was observed doing exactly this), and
+  // whatever it holds now is backed up below before it is replaced.
   const keptPath = keepingLocal ? localPath : remotePath;
   const kept = await deps.fs.readFile(keptPath).catch(() => null);
-  if (kept === null || deps.hashBytes(kept) !== deps.hashBytes(chosen)) {
-    return { ok: false, reason: "branch-moved" };
-  }
+  const keptHash = kept === null ? null : deps.hashBytes(kept);
+  const chosen = entry.branches.find((branch) => branch.hash === keptHash);
+  if (kept === null || !chosen) return { ok: false, reason: "branch-moved" };
 
   const targetPath = keepingLocal ? remotePath : localPath;
   const minted = await deps.mintWritePath(targetPath);
@@ -139,7 +167,7 @@ export async function resolveConflict(
     sourcePath: targetPath,
     workspaceId: deps.workspaceId,
     providerId: entry.providerId,
-    logicalId: entry.meta.logicalId as LogicalId,
+    logicalId: entry.logicalId as LogicalId,
     remote: keepingLocal,
     action,
   });
@@ -150,7 +178,7 @@ export async function resolveConflict(
   if (backup.path === null) return { ok: false, reason: "backup-failed" };
 
   try {
-    await deps.fs.writeFileAtomic(minted.value, chosen);
+    await deps.fs.writeFileAtomic(minted.value, kept);
   } catch {
     return { ok: false, reason: "write-failed" };
   }
@@ -158,6 +186,15 @@ export async function resolveConflict(
   return { ok: true, action, backupPath: backup.path };
 }
 
+/**
+ * One quarantine directory → one entry, from its contents alone.
+ *
+ * Copies are identified by hashing what they hold, not by parsing their
+ * names — which also swallows the two legacy shapes a pre-fix directory can
+ * be in: viewpoint-named copies (`local-*`/`remote-*`), and *four* of them
+ * when both machines wrote their own pair. Duplicate contents collapse to one
+ * branch either way.
+ */
 async function readEntry(
   deps: ConflictCommandDeps,
   directory: string,
@@ -166,23 +203,69 @@ async function readEntry(
 ): Promise<ConflictEntry | null> {
   const load = await readJson(deps.fs, deps.joinPath(directory, "meta.json"));
   if (load.status !== "loaded") return null;
-  const meta = load.raw as Partial<ConflictMeta>;
-  if (typeof meta.logicalId !== "string" || typeof meta.conflictId !== "string") return null;
+  const meta = load.raw as Record<string, unknown>;
+  const logicalId = typeof meta.logicalId === "string" ? meta.logicalId : null;
+  if (logicalId === null || typeof meta.conflictId !== "string") return null;
+  const detectedAt = typeof meta.detectedAt === "string" ? meta.detectedAt : "";
 
-  const names = (await deps.fs.readDir(directory).catch(() => [])).map((entry) => entry.name);
-  const localCopy = names.find((name) => name.startsWith("local-"));
-  const remoteCopy = names.find((name) => name.startsWith("remote-"));
-  if (!localCopy || !remoteCopy) return null;
+  const byHash = new Map<string, { size: number; lineCount: number; copyName: string }>();
+  for (const file of await deps.fs.readDir(directory).catch(() => [])) {
+    if (!file.isFile || file.name === "meta.json") continue;
+    const bytes = await deps.fs.readFile(deps.joinPath(directory, file.name)).catch(() => null);
+    if (bytes === null) continue;
+    const hash = deps.hashBytes(bytes);
+    if (!byHash.has(hash)) {
+      byHash.set(hash, { size: bytes.length, lineCount: countLines(bytes), copyName: file.name });
+    }
+  }
+  if (byHash.size < 2) return null; // Half-transported or tampered; not resolvable.
+
+  const extension = extensionOf([...byHash.values()][0]?.copyName ?? "");
+  const neutralRel = `${providerId}/${logicalId}${extension}`;
+  const localPath = await deps.localPathFor(providerId, neutralRel);
+  const localHash = await hashOf(deps, localPath);
+  const remoteHash = await hashOf(
+    deps,
+    deps.joinPath(deps.replicaRoot, deps.workspaceId, neutralRel),
+  );
+
+  const branches = [...byHash.entries()]
+    .map(
+      ([hash, copy]): ConflictBranchView => ({
+        hash,
+        hashPrefix: shortHash(hash),
+        size: copy.size,
+        lineCount: copy.lineCount,
+        copyName: copy.copyName,
+        onThisMachine: hash === localHash,
+        inSyncFolder: hash === remoteHash,
+      }),
+    )
+    .sort((a, b) => (a.hashPrefix < b.hashPrefix ? -1 : 1));
 
   return {
     conflictId,
     providerId,
-    logicalIdPrefix: meta.logicalId.slice(0, 8),
-    meta: meta as ConflictMeta,
+    logicalId,
+    logicalIdPrefix: logicalId.slice(0, 8),
+    detectedAt,
     directory,
-    localCopy,
-    remoteCopy,
+    branches,
+    superseded: !branches.some((branch) => branch.onThisMachine || branch.inSyncFolder),
   };
+}
+
+async function hashOf(deps: ConflictCommandDeps, target: string | null): Promise<string | null> {
+  if (target === null) return null;
+  const bytes = await deps.fs.readFile(target).catch(() => null);
+  return bytes === null ? null : deps.hashBytes(bytes);
+}
+
+/** Newline bytes only — the same rule the engine's counts and meta use. */
+function countLines(bytes: Uint8Array): number {
+  let lines = 0;
+  for (const byte of bytes) if (byte === 0x0a) lines += 1;
+  return lines;
 }
 
 function extensionOf(copyName: string): string {

@@ -20,6 +20,7 @@
  */
 import type { CachedContentFacts, Manifest, ManifestEntry } from "../domain/manifest";
 import { isValidEntryKey, scrubTrigger } from "../domain/manifest";
+import { signaturesEqual } from "../domain/stability";
 import type { LedgerEntryRecord, ObservationsFile } from "../infra/state-store";
 import type { EvidenceCache, LedgerEntryView, LedgerView } from "./sync-engine";
 
@@ -31,6 +32,14 @@ export interface PassState {
   observations(): ObservationsFile;
   /** The manifest to write at P8, or null when it must not be rewritten. */
   manifest(): Manifest | null;
+  /**
+   * Did this pass change any entry? A pass that verified files and found them
+   * exactly as remembered has nothing to say, and saying it anyway — a fresh
+   * `updatedAt`, bumped generations — is what made two idle machines rewrite
+   * the shared manifest every few minutes and hand the sync tool a conflict
+   * to manufacture copies from.
+   */
+  manifestChanged(): boolean;
 }
 
 export interface PassStateInput {
@@ -81,6 +90,7 @@ export function createPassState(input: PassStateInput): PassState {
   const local = new Map(Object.entries(input.observations.local));
   const remote = new Map(Object.entries(input.observations.remote));
   const entries: Record<string, ManifestEntry> = { ...input.manifest.entries };
+  let manifestDirty = false;
   const key = (rel: string) => `${input.workspaceId}/${rel}`;
 
   const sideMap = (side: "local" | "remote") => (side === "local" ? local : remote);
@@ -157,6 +167,22 @@ export function createPassState(input: PassStateInput): PassState {
       recordVerified(sideMap(side), rel, facts, input.nowMs);
       if (side !== "remote" || !input.manifestWritable) return;
       const previous = entries[key(rel)];
+      // Re-verifying an unchanged file is not news. Rewriting the entry
+      // anyway would bump `generation` and stamp `updatedAt` on every scrub
+      // of every quiet file — churn in a *shared* file. The signature check
+      // is exact (all five stat components), so a file another machine wrote
+      // — different inode, different timestamps — still refreshes the entry,
+      // which is what that machine's E1 tier needs.
+      if (
+        previous &&
+        previous.size === facts.e0.size &&
+        previous.lineCount === facts.lineCount &&
+        previous.contentHash === facts.contentHash &&
+        signaturesEqual(previous.e0, facts.e0)
+      ) {
+        return;
+      }
+      manifestDirty = true;
       entries[key(rel)] = {
         provider: providerOf(rel),
         workspaceId: input.workspaceId,
@@ -184,6 +210,7 @@ export function createPassState(input: PassStateInput): PassState {
       remote: Object.fromEntries(remote),
     }),
     manifest: () => (input.manifestWritable ? { ...input.manifest, entries } : null),
+    manifestChanged: () => manifestDirty,
   };
 }
 

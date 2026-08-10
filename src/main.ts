@@ -40,9 +40,9 @@ export default class AiSessionSyncPlugin extends Plugin {
 
   override async onload(): Promise<void> {
     this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.setText("AI Session Sync: starting");
+    this.statusBarEl.setText("Claudian Session Sync: starting");
 
-    this.addRibbonIcon("refresh-cw", "AI Session Sync: sync now", () => {
+    this.addRibbonIcon("refresh-cw", "Claudian Session Sync: sync now", () => {
       void this.sync();
     });
 

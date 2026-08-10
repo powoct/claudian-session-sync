@@ -38,7 +38,14 @@ export const AISS_DIR = ".aiss";
 export const ROOT_FILE = "root.json";
 export const MANIFEST_FILE = "manifest.json";
 
-/** Recognises a file we wrote, so `root.json` is not mistaken for a session. */
+/**
+ * Recognises a file we wrote, so `root.json` is not mistaken for a session.
+ *
+ * Deliberately still the plugin's original name after the rename to
+ * "Claudian Session Sync": this string is wire format, stamped into every
+ * initialised sync directory, and changing it would make each of them read as
+ * "not the folder this vault was set up with" (NR-2) for zero benefit.
+ */
 const MAGIC = "ai-session-sync";
 
 export interface RootFile {

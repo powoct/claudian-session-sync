@@ -229,7 +229,7 @@ const loadedPlugins: StubPlugin[] = [];
 /**
  * A throwaway home and vault for the whole file.
  *
- * Without this the bundle writes `~/.ai-session-sync/machine.json` on whoever
+ * Without this the bundle writes `~/.claudian-session-sync/machine.json` on whoever
  * runs the suite — a build test that leaves state in a developer's home
  * directory is a build test nobody trusts. `os.homedir()` reads these, and the
  * plugin only calls it once the first pass starts, so setting them before the

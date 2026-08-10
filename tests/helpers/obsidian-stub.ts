@@ -514,8 +514,8 @@ export const Platform = {
 
 export function makeStubManifest(overrides: Partial<StubManifest> = {}): StubManifest {
   return {
-    id: "ai-session-sync",
-    name: "AI Session Sync",
+    id: "claudian-session-sync",
+    name: "Claudian Session Sync",
     version: "0.0.0-test",
     minAppVersion: "1.5.0",
     description: "test stub manifest",

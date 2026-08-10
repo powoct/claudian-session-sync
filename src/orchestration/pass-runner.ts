@@ -315,8 +315,18 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     const manifest = state.manifest();
     // Not rewritten when a newer client is demonstrably using this directory
     // (§5.3.4), and not written at all unless the remote is ready — a manifest
-    // describing a half-hydrated directory is worse than none.
-    if (manifest !== null && remoteReadiness === "ready") {
+    // describing a half-hydrated directory is worse than none. Also not
+    // written when nothing changed: the manifest is a *shared* file, and two
+    // idle machines re-stamping it every timer pass is what the sync tool
+    // turns into an endless stream of conflict copies. The exceptions are a
+    // manifest that needs re-establishing (absent, or rebuilt from an
+    // unusable one) or migrating — those are worth a write with no entries
+    // changed.
+    if (
+      manifest !== null &&
+      remoteReadiness === "ready" &&
+      (state.manifestChanged() || manifestLoad.status !== "ok")
+    ) {
       await deps.syncDir.saveManifest(manifest, nowIso);
     }
 

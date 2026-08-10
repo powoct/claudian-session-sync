@@ -165,7 +165,7 @@ export class World {
 export class Machine {
   readonly localRoot: string;
   readonly replicaRoot: string;
-  /** `<homedir>/.ai-session-sync` for this machine (§5.5), a real directory. */
+  /** `<homedir>/.claudian-session-sync` for this machine (§5.5), a real directory. */
   readonly homeRoot: string;
   readonly backupRoot: string;
   readonly quarantineRoot: string;
@@ -200,7 +200,7 @@ export class Machine {
   ) {
     this.localRoot = path.join(root, "local");
     this.replicaRoot = path.join(root, "replica");
-    this.homeRoot = path.join(root, "home", ".ai-session-sync");
+    this.homeRoot = path.join(root, "home", ".claudian-session-sync");
     // Inside the home root, as §5.5 puts it — so the wired path and the
     // in-memory one write to the same place and `snapshot()` sees both.
     this.backupRoot = path.join(this.homeRoot, "backups");

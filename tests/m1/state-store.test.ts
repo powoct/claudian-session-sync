@@ -287,7 +287,7 @@ describe("portable settings must survive being copied (§5.6 rule 1)", () => {
     expect(
       findNonPortableValues({
         schemaVersion: 1,
-        workspaceIdFile: ".ai-session-sync/workspace.json",
+        workspaceIdFile: ".claudian-session-sync/workspace.json",
         auto: { onStartup: true, intervalMinutes: 5 },
         backup: { keep: 3 },
       }),

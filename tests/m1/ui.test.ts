@@ -281,7 +281,11 @@ describe("the conflict view", () => {
       .descendants()
       .find((element) => element.textContent === "Keep this machine's version");
     button?.dispatch("click");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Resolution now runs a full pass before reporting, so give the Notice
+    // until it actually appears rather than a fixed beat.
+    for (let waited = 0; Notice.instances.length === 0 && waited < 5000; waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
 
     const workspaceId = b.runtime.currentStatus().workspaceId as string;
     expect(await fsp.readFile(b.replicaPath(workspaceId, SID), "utf8")).toBe(mine);
@@ -327,23 +331,31 @@ describe("every refusal has a sentence, not a code", () => {
   const conflict = {
     conflictId: "abc123",
     providerId: "claude-code",
+    logicalId: SID,
     logicalIdPrefix: "3f2504e0",
+    detectedAt: "2026-08-08T00:00:00.000Z",
     directory: "/somewhere/.quarantine/ws/claude-code/abc123",
-    localCopy: "local-aaaa.jsonl",
-    remoteCopy: "remote-bbbb.jsonl",
-    meta: {
-      schemaVersion: 1,
-      logicalId: SID,
-      conflictId: "abc123",
-      localHashPrefix: "aaaa",
-      remoteHashPrefix: "bbbb",
-      localSize: 10,
-      remoteSize: 20,
-      localLineCount: 1,
-      remoteLineCount: 2,
-      detectedBy: "aaaaaaaa",
-      detectedAt: "2026-08-08T00:00:00.000Z",
-    },
+    branches: [
+      {
+        hash: "sha256:aaaa",
+        hashPrefix: "aaaaaaaa",
+        size: 10,
+        lineCount: 1,
+        copyName: "branch-aaaaaaaa.jsonl",
+        onThisMachine: true,
+        inSyncFolder: false,
+      },
+      {
+        hash: "sha256:bbbb",
+        hashPrefix: "bbbbbbbb",
+        size: 20,
+        lineCount: 2,
+        copyName: "branch-bbbbbbbb.jsonl",
+        onThisMachine: false,
+        inSyncFolder: true,
+      },
+    ],
+    superseded: false,
   } as const;
 
   it.each([
@@ -425,7 +437,7 @@ describe("a vault with two identity files", () => {
     await h.runtime.createIdentity("v");
     // What Dropbox or Syncthing leaves behind when two machines wrote it.
     await fsp.writeFile(
-      path.join(h.vaultRoot, ".ai-session-sync", "workspace (2).json"),
+      path.join(h.vaultRoot, ".claudian-session-sync", "workspace (2).json"),
       "{}",
     );
     await h.runtime.refresh();
