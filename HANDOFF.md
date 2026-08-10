@@ -129,12 +129,16 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
 ```bash
 npm run verify && npm run build          # 开发机；记下 git rev-parse --short HEAD
 tar czf aiss-acceptance.tgz -C tmp acceptance
-mkdir -p /tmp/aiss-plugin && cp main.js manifest.json /tmp/aiss-plugin/
+mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 # 把这两样拷到 Mac 与 Windows，在目标机器上：
-#   ./scripts/install-plugin.sh "<vault>" "<产物目录>"
-#   node evidence.mjs config --vault "<vault>"
+#   ./scripts/install-plugin.sh "<vault 绝对路径>" "<产物中转目录>"
+#   node evidence.mjs config --vault "<vault 绝对路径>"
 # 然后让 agent 读 AGENTS.md 往下走
 ```
+
+**三个位置别搞混**（README §2.2 有表）：验收套件放 `~/aiss-acceptance/`（别放同步目录里）；
+`main.js` + `manifest.json` 先放任意中转目录；**插件的最终位置是
+`<vault>/.obsidian/plugins/ai-session-sync/`，由 `install-plugin` 脚本搬进去，不用手动拷**。
 
 **三个最容易浪费时间的点**（README 里都写了，这里再点一次）：
 
