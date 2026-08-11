@@ -394,6 +394,48 @@ describe("what the status bar says", () => {
     }
   }, 30_000);
 
+  it("keeps counting a conflict through a pass that only DEFERred it", async () => {
+    // A divergent pair whose side just changed is DEFERred, not judged — and a
+    // report with no CONFLICT action must not read as "up to date". On the
+    // re-run this exact sequence (failed resolution, then a DEFER round)
+    // showed a clean status bar over a live disagreement.
+    const a = await makeHarness();
+    await a.appendSession(SID, 5);
+    await a.configure();
+    await a.settle();
+    const b = await RuntimeHarness.createPeer(a);
+    try {
+      await b.settle();
+      await a.appendRaw(SID, '{"uuid":"a1","fork":"A"}\n');
+      await a.settle();
+      await b.appendRaw(SID, '{"uuid":"b1","fork":"B"}\n');
+      const conflicted = await b.settle();
+      expect(conflicted.conflicts).toBe(1);
+
+      // The local branch moves again (a third-party writer, a resumed view) —
+      // the very next pass can only observe, and observes an unstable side.
+      await b.appendRaw(SID, '{"uuid":"b2","fork":"B-again"}\n');
+      const deferred = await b.runtime.syncNow();
+
+      const report = b.runtime.lastPassReport();
+      const line = report?.actions.find((x) => x.neutralRel.includes(SID));
+      expect(line?.action, JSON.stringify(line)).toBe("DEFER");
+      expect(deferred.conflicts, "a DEFER must not clear the count").toBe(1);
+      expect(deferred.short).toContain("conflict");
+
+      // Settled and resolved, the count reaches zero the honest way.
+      await b.settle();
+      const live = (await b.runtime.conflicts()).find((c) =>
+        c.branches.some((branch) => branch.onThisMachine),
+      );
+      const outcome = await b.runtime.resolve(live?.conflictId as string, "keep-remote");
+      expect(outcome.ok).toBe(true);
+      expect(b.runtime.currentStatus().conflicts).toBe(0);
+    } finally {
+      await b.dispose();
+    }
+  }, 30_000);
+
   it("explains a folder that has gone missing rather than reporting a number", async () => {
     const h = await makeHarness();
     await h.appendSession(SID, 4);

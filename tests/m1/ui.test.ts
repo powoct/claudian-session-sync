@@ -362,7 +362,11 @@ describe("every refusal has a sentence, not a code", () => {
     ["branch-moved", "changed since this list was drawn"],
     ["remote-not-ready", "not ready"],
     ["backup-failed", "nothing was overwritten"],
-    ["unknown-conflict", "no longer there"],
+    // The two transient-looking failures must not claim certainty: "busy"
+    // asks for a retry in seconds, and the unknown case claims neither
+    // "resolved" nor "locked" because it cannot know which.
+    ["kept-unreadable", "try again in a few seconds"],
+    ["unknown-conflict", "reopen this list"],
     ["write-failed", "write-failed"],
   ] as const)("explains %s", (reason, fragment) => {
     // `branch-moved` is the one that is not a malfunction — the session moved
@@ -382,7 +386,7 @@ describe("every refusal has a sentence, not a code", () => {
 
   it("promises the discarded branch is still reachable after a resolution", () => {
     const message = describeOutcome(
-      { ok: true, action: "PUSH_OVERWRITE", backupPath: "/backups/x.bak" },
+      { ok: true, action: "PUSH_OVERWRITE", backupPath: "/backups/x.bak", neutralRel: `claude-code/${SID}.jsonl` },
       conflict,
     );
     expect(message).toContain("still in quarantine");

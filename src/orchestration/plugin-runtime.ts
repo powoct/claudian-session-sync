@@ -129,6 +129,20 @@ export class PluginRuntime {
   private binding: WorkspaceBinding | null = null;
   private identity: IdentityOutcome | null = null;
   private lastReport: PassReport | null = null;
+  /**
+   * Sessions known to be in conflict, surviving passes that cannot judge.
+   *
+   * A single pass report is the wrong source for the conflict count on its
+   * own: a pass that DEFERs a divergent pair — a side still inside its quiet
+   * window — emits no CONFLICT action, and counting only the report made the
+   * status bar say "up to date" over a disagreement it had reported one pass
+   * earlier (observed on the real-machine re-run, right after a resolution
+   * failed). So the count is sticky: a CONFLICT adds the session, and only
+   * first-hand evidence that the disagreement is over removes it — the pair
+   * observed equal, an overwrite applied, or a resolution this runtime
+   * performed itself. A DEFER changes nothing, which is the point.
+   */
+  private readonly conflicted = new Set<string>();
   private guard: PathGuardDeps | null = null;
   private home: HomeStore | null = null;
   private passInFlight = false;
@@ -201,6 +215,15 @@ export class PluginRuntime {
       });
       this.firstPassDone = true;
       this.lastReport = outcome.report;
+      for (const action of outcome.report.actions) {
+        if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
+        else if (
+          action.result === "APPLIED" &&
+          (action.action === "NOOP" || action.action.endsWith("_OVERWRITE"))
+        ) {
+          this.conflicted.delete(action.neutralRel);
+        }
+      }
       return this.publish(await this.computeStatus(outcome));
     } catch (error) {
       // A pass that throws is a bug, not an ordinary outcome — every expected
@@ -311,10 +334,16 @@ export class PluginRuntime {
     const deps = await this.conflictDeps();
     if (!deps) return { ok: false, reason: "unknown-conflict" };
     const outcome = await resolveConflict(deps, conflictId, resolution);
-    // A pass, not just a status refresh: the conflict count comes from the
-    // last pass report, and the pass is also what records the now-agreeing
-    // pair — without it the bar keeps saying "1 conflict" until the timer.
-    if (outcome.ok && outcome.action !== "REVEAL") await this.syncNow();
+    if (outcome.ok && outcome.action !== "REVEAL") {
+      // First-hand knowledge: this runtime just settled that session, so it
+      // leaves the sticky set now — the pass below may only DEFER it (the
+      // file was written milliseconds ago and is inside its quiet window),
+      // and a DEFER deliberately clears nothing.
+      this.conflicted.delete(outcome.neutralRel);
+      // A pass, not just a status refresh: it is what records the
+      // now-agreeing pair and pushes the settled version onward.
+      await this.syncNow();
+    }
     return outcome;
   }
 
@@ -579,20 +608,12 @@ export class PluginRuntime {
     const workspaceId = this.identity?.file?.workspaceId ?? null;
     const syncDirPath = this.binding?.syncDirPath ?? null;
     const machineLabel = this.machine?.machineLabel ?? null;
-    // Active conflicts are what the last pass *judged* to be in conflict —
-    // not the number of quarantine directories. Quarantine holds every
-    // disagreement that ever happened (both branches stay reachable after a
-    // resolution, and directories written by the other machine arrive through
-    // the sync folder), so counting it showed "1 conflict" after the user had
-    // already resolved it, and "2 conflicts" when the other machine's copy of
-    // the same disagreement arrived.
-    const conflicts = this.lastReport
-      ? new Set(
-          this.lastReport.actions
-            .filter((action) => action.action === "CONFLICT")
-            .map((action) => action.neutralRel),
-        ).size
-      : this.status.conflicts;
+    // Active conflicts are what passes have *judged* to be in conflict and
+    // not yet seen settled — not the number of quarantine directories
+    // (which survive resolution on purpose), and not the last report alone
+    // (which says nothing about a divergent pair it DEFERred). The sticky
+    // set above is maintained on exactly those rules.
+    const conflicts = this.lastReport ? this.conflicted.size : this.status.conflicts;
     const base = {
       workspaceId,
       syncDirPath,

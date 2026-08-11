@@ -915,7 +915,7 @@ console.log(JSON.stringify(rows, null, 2));
 | 5 | Win：继续聊 2 轮，等 60 s，手动同步 | replica 行数增加；`manifest.lastWriter` = Win 的 machineId | manifest 片段 + evidence |
 | 6 | Mac：手动同步 | `PULL_OVERWRITE`；备份区有覆盖前副本（sha256 == 步骤 2 的值）；弹出"请重启该会话"Notice；resume 能看到 Win 的 2 轮 | 备份目录 evidence + 截图 |
 | 7 | 双向再跑 2 轮 | 全程无 CONFLICT | PassReport ×4 |
-| 8 | **分叉验证**：断开同步，两边各聊 2 轮，恢复同步；随后**每台续写过的机器各解决一次**（2026-08-10 实测补入） | `CONFLICT` + Notice（恢复后的第一轮 pass 是观察轮，冲突在下一轮检出，属设计）；两侧 primary 字节未变；两分支都在 inventory；隔离目录 = `branch-<hash8>` × 2 + `meta.json`，连续 3 轮**字节级**不变；A 解决后 B 检出自己的冲突、「保另一台」一次成功；解决后双机收敛无 CONFLICT | §9.3 的两张表 |
+| 8 | **分叉验证**：断开同步，两边各聊 2 轮，恢复同步；随后**每台续写过的机器各解决一次**（2026-08-10 实测补入） | `CONFLICT` + Notice（恢复后的第一轮 pass 是观察轮，冲突在下一轮检出，属设计）；两侧 primary 字节未变；两分支都在 inventory；隔离目录 = `branch-<hash8>` × 2 + `meta.json`，连续 3 轮**字节级**不变；A 解决后 B 检出自己的冲突、「保另一台」一次成功（若同步工具正锁着刚搬运的文件，会得到明确的「文件忙/暂时找不到」提示且**零写入**，几秒后重试即可——不算失败；被当成功的无声空操作才是缺陷，见 findings R2-1）；解决后双机收敛无 CONFLICT | §9.3 的两张表 |
 | 9 | **回滚验证**：从备份手动恢复一份，resume | 恢复的文件 CLI 可正常加载；sha256 == 备份 sha256 | evidence + 截图 |
 | 10 | 关掉 Obsidian 期间在 CLI 里聊，再开 Obsidian | 启动后**两轮 pass 之内**（启动观察轮 + 下一轮/一次手动同步）捕获到新内容（首轮只观察，属设计——2026-08-10 裁决） | PassReport + evidence |
 

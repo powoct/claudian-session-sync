@@ -166,8 +166,25 @@ export function describeOutcome(
       );
     case "backup-failed":
       return "The backup could not be written, so nothing was overwritten.";
+    case "kept-unreadable":
+      // Not "the state changed": a user told that re-syncs and waits for
+      // nothing. The honest message is that a file was busy — the sync tool
+      // takes short locks on files it is transferring — and a retry in a few
+      // seconds is the whole remedy.
+      return (
+        "The version to keep could not be read just now — your sync tool may be busy with " +
+        "that file. Nothing was changed; try again in a few seconds."
+      );
     case "unknown-conflict":
-      return "That conflict is no longer there — it may already be resolved.";
+      // This outcome cannot tell "already resolved" from "briefly unreadable",
+      // so the message claims neither. On the acceptance re-run it confidently
+      // said "may already be resolved" over a conflict that was still there,
+      // and the user reasonably took a no-op for a success.
+      return (
+        "That conflict could not be found just now — it may be resolved already, or your " +
+        "sync tool briefly locked one of its files. Nothing was changed; reopen this list " +
+        "to see its current state."
+      );
     default:
       return `Could not resolve it: ${outcome.reason}.`;
   }

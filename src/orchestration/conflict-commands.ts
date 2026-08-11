@@ -86,7 +86,13 @@ export interface ConflictCommandDeps {
 }
 
 export type ResolveOutcome =
-  | { readonly ok: true; readonly action: "PUSH_OVERWRITE" | "PULL_OVERWRITE"; readonly backupPath: string | null }
+  | {
+      readonly ok: true;
+      readonly action: "PUSH_OVERWRITE" | "PULL_OVERWRITE";
+      readonly backupPath: string | null;
+      /** What the pass calls this file — so the caller can settle its books. */
+      readonly neutralRel: string;
+    }
   | { readonly ok: true; readonly action: "REVEAL"; readonly directory: string }
   | { readonly ok: false; readonly reason: ResolveFailure };
 
@@ -94,6 +100,14 @@ export type ResolveFailure =
   | "unknown-conflict"
   /** The side being kept holds none of the quarantined branches any more. */
   | "branch-moved"
+  /**
+   * The side being kept could not be read at all just now. Distinct from
+   * `branch-moved` on purpose: during the acceptance re-run, transient reads
+   * against files the sync tool was busy with made resolutions fail while
+   * every message claimed a *state* problem — and a user told "the state
+   * changed" retries differently from one told "a file was briefly locked".
+   */
+  | "kept-unreadable"
   | "remote-not-ready"
   | "backup-failed"
   | "path-rejected"
@@ -130,7 +144,14 @@ export async function resolveConflict(
   conflictId: string,
   resolution: ConflictResolution,
 ): Promise<ResolveOutcome> {
-  const entry = (await listConflicts(deps)).find((c) => c.conflictId === conflictId);
+  // Listed twice before giving up: the quarantine directory lives in the sync
+  // folder, and the sync tool takes short exclusive locks on files it is
+  // hashing or uploading. A directory that listed fine when the dialog was
+  // drawn can be unreadable for the split second the click lands on — seen on
+  // the real-machine re-run, where that split second turned into "already
+  // resolved" and a resolution that silently did nothing.
+  let entry = (await listConflicts(deps)).find((c) => c.conflictId === conflictId);
+  entry ??= (await listConflicts(deps)).find((c) => c.conflictId === conflictId);
   if (!entry) return { ok: false, reason: "unknown-conflict" };
 
   const action = resolutionAction(resolution);
@@ -155,9 +176,13 @@ export async function resolveConflict(
   // whatever it holds now is backed up below before it is replaced.
   const keptPath = keepingLocal ? localPath : remotePath;
   const kept = await deps.fs.readFile(keptPath).catch(() => null);
-  const keptHash = kept === null ? null : deps.hashBytes(kept);
+  // Unreadable is not "moved". A file the sync tool is mid-transfer on reads
+  // as absent for a moment; calling that a state change sends the user off to
+  // re-sync when what they need is to try again in a few seconds.
+  if (kept === null) return { ok: false, reason: "kept-unreadable" };
+  const keptHash = deps.hashBytes(kept);
   const chosen = entry.branches.find((branch) => branch.hash === keptHash);
-  if (kept === null || !chosen) return { ok: false, reason: "branch-moved" };
+  if (!chosen) return { ok: false, reason: "branch-moved" };
 
   const targetPath = keepingLocal ? remotePath : localPath;
   const minted = await deps.mintWritePath(targetPath);
@@ -183,7 +208,7 @@ export async function resolveConflict(
     return { ok: false, reason: "write-failed" };
   }
 
-  return { ok: true, action, backupPath: backup.path };
+  return { ok: true, action, backupPath: backup.path, neutralRel };
 }
 
 /**

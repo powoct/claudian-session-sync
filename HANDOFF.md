@@ -3,7 +3,7 @@
 > 更新时间：2026-08-11（首轮真机验收已跑完；阻塞缺陷 D-3 已修；插件改名 Claudian Session Sync）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：首轮验收跑完（9/10 步过、D-3 阻塞已修），待复验步骤 8
+## 当前状态：步骤 8 复验通过，M1 Exit 达成；R2-1 已修待真机顺手确认
 
 **2026-08-10 首轮真机验收已执行**（Mac ↔ Windows，记录在验收机器的
 `tmp/acceptance/out/`，脱敏摘要入库为
@@ -17,12 +17,16 @@ ADR-42）、D-5（轮转补 pruned 索引行）；D-6 裁决为 by design 并改
 **改名 Claudian Session Sync**（ADR-43：插件 id / home 目录 / vault 身份目录随名，
 `.aiss/` 与 root.json 的 magic 不动）。
 
-**下一步：在两台真机上做改名迁移（AGENTS.md §3 P0，mv 三个目录）后复验步骤 8
-的完整闭环**（分叉 → 双机各解决一次 → 收敛），顺带核对步骤 1 附加的 D-1 回归检查。
-其余八步无需重跑。复验由用户在真机执行，结果待回传。
+**2026-08-11 晚：步骤 8 复验已执行并通过**（记录在验收机 `tmp/acceptance/out_r2/`，
+脱敏摘要与 R2-1/R2-2 判定已并入 findings/2026-08-10-m1-acceptance.md 文末）。两轮
+分叉均完整闭环收敛，D-1/2/3/4 回归全绿，迁移无损。**M1 Exit（testing.md §9.5）判定：
+通过**。复验暴露的 R2-1（resolve 被同步工具瞬时锁打成无声空操作 + DEFER 轮计数归零）
+已在本批修复（ADR-44，注入验证）；R2-2（备份轮转删最老份）裁决为按设计、I1 无损。
+R2-1 的修复无需专门再跑一轮验收——日常使用中任意一次冲突解决顺手确认"一次点击即
+收敛，或收到明确的『文件忙请重试』提示"即可。
 
 **调查 Claudian 机制的本地资源**：用户已把 Claudian fork 后 clone 到开发机的
-`~/projects/claudian/`（即 `/home/code-server/projects/claudian/`）。R-1（ai-title
+`~/projects/claudian/`。R-1（ai-title
 写 session 文件的行为）与 M2 的 `.claudian/sessions` provider 评估（写入模式：
 `conv-*.meta.json` / `.inputs.json` 是否改写、是否原子写）可以直接读源码求证，
 不必全靠真机黑盒探测。
@@ -44,7 +48,8 @@ ADR-42）、D-5（轮转补 pruned 索引行）；D-6 裁决为 by design 并改
 | **[review/4](review/4_m1-batch4-review.md) 整改** | ✅ **完成** | 2 条中低危讨论点已处理；写验收脚本时另抓到一个 dry-run 违反 ADR-27 的真 bug |
 | **M1 真机十步验收（首轮）** | ✅ 已执行（2026-08-10）：9/10 过，D-3 阻塞 | [findings/2026-08-10-m1-acceptance.md](docs/zh-CN/findings/2026-08-10-m1-acceptance.md)；原始记录在验收机 `tmp/acceptance/out/` |
 | **验收缺陷整改 + 改名（2026-08-11）** | ✅ **完成**：D-1/2/3/4/5 修复、D-6 裁决、ADR-40…43、改名 Claudian Session Sync | 本批 commit；剧本与套件已同步更新 |
-| 步骤 8 复验（迁移后） | ⬜ **待执行** | AGENTS.md §3 P0 迁移 + §4 步骤 8 新流程 |
+| **步骤 8 复验（迁移后）** | ✅ 通过（2026-08-11）：两轮闭环收敛，D-1/2/3/4 回归绿；暴露 R2-1（已修，ADR-44）、R2-2（裁决按设计） | 验收机 `tmp/acceptance/out_r2/`；findings 文末复验章节 |
+| **M1 Exit** | ✅ **达成**（testing.md §9.5：十步全过 + 门禁全绿） | 下一步 M2 或 M4（README + BRAT）由用户定 |
 
 ### M0 交付了什么
 

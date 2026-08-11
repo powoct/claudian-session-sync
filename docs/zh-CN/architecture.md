@@ -1807,6 +1807,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 41 | 静默 pass 不重写 manifest：entry 内容事实与 E0 签名均未变时不改写（不 bump generation），无 entry 变化且 manifest 状态为 ok 时跳过保存 | 每轮 ready pass 无条件保存 | manifest 在 sync 目录里，是**共享**文件；双机空闲互刷 updatedAt/generation 被同步工具制成无穷的"冲突副本"（实测全程 4 份），也让 I1 取证充满噪声。签名比对是全等五元组，对端写的文件（inode 不同）仍会刷新 entry，不影响对端的 E1 |
 | 42 | 状态栏冲突数 = 最近一次 pass 报告中 CONFLICT 的去重会话数；解决命令落地后自动补跑一轮 pass | 数隔离目录 | 隔离目录在解决后**保留**是特性（双分支可达），对端的目录还会经同步到达——按目录数则解决后仍显示 1、对端副本到达变 2（实测 D-4）。摘要行不再把 CONFLICT 计入 change 数，"conflict" 在整条状态里只出现一次 |
 | 43 | 改名 Claudian Session Sync：插件 id、home 目录（`~/.claudian-session-sync`）、vault 身份目录（`.claudian-session-sync/`）随名；sync-dir 的 `.aiss/` 与 root.json 的 `magic: "ai-session-sync"` **不改** | 全部改齐 | `.aiss/` 与 magic 是 wire format，改名会把每个已初始化的 sync 目录判成 NR-1/NR-2，收益为零；本机与 vault 内目录在发布前改名只需一次 mv（见验收套件 §3 P0 迁移步骤） |
+| 44 | 解决命令区分「瞬时读不到」与「状态变了」（条目查找立即重试一次；kept 侧读不到 → `kept-unreadable`，文案指示几秒后重试；`unknown-conflict` 不断言已解决）；冲突计数为**粘性集合**：CONFLICT 加入，等量 NOOP / 覆盖落地 / 本机 resolve 成功移除，DEFER 不动 | 把读失败并入 branch-moved / unknown-conflict；计数只看最近一次 pass 报告 | 步骤 8 复验实测（findings 2026-08-11 R2-1）：同步工具对刚搬运/刚写入的文件持有瞬时锁，resolve 在 backup 前失败早退，而旧文案把它说成「已解决」或「状态变了」——用户把空操作当成功；同时 DEFER 观察轮不产生 CONFLICT 动作，只看单轮报告的计数在分歧仍在时归零，状态栏说谎。粘性集合让「不知道」不清零，只有一手证据才清零 |
 
 ---
 

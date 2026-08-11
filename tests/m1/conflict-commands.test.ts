@@ -174,6 +174,27 @@ describe("a resolution refuses when it is no longer the same disagreement", () =
     expect(outcome).toEqual({ ok: false, reason: "branch-moved" });
   }, SLOW);
 
+  it("says unreadable, not moved, when the kept side cannot be read", async () => {
+    // The sync tool takes short locks on files it is transferring; during the
+    // acceptance re-run that moment was reported as a *state* change, and the
+    // user re-synced and waited for a fix that was never coming. "Busy" and
+    // "moved" need different words because they need different reactions.
+    const { b, workspaceId } = await forked();
+    const only = (await b.runtime.conflicts())[0];
+    const canonical = b.replicaPath(workspaceId, SID);
+
+    await fsp.rename(canonical, `${canonical}.held`);
+    const outcome = await b.runtime.resolve(only?.conflictId as string, "keep-remote");
+    await fsp.rename(`${canonical}.held`, canonical);
+
+    expect(outcome).toEqual({ ok: false, reason: "kept-unreadable" });
+    // And with the file back, the same click goes through.
+    expect(await b.runtime.resolve(only?.conflictId as string, "keep-remote")).toMatchObject({
+      ok: true,
+      action: "PULL_OVERWRITE",
+    });
+  }, SLOW);
+
   it("declines an id that is not there", async () => {
     const { b } = await forked();
     expect(await b.runtime.resolve("deadbeefdeadbeef", "keep-local")).toEqual({
