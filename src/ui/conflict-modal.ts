@@ -110,10 +110,12 @@ export class ConflictModal extends Modal {
   private async apply(conflict: ConflictEntry, resolution: ConflictResolution): Promise<void> {
     const outcome = await this.runtime.resolve(conflict.conflictId, resolution);
     new Notice(describeOutcome(outcome, conflict));
-    if (outcome.ok && outcome.action !== "REVEAL") {
-      this.onResolved();
-      await this.render();
-    }
+    if (outcome.ok && outcome.action === "REVEAL") return;
+    if (outcome.ok) this.onResolved();
+    // Re-render on failure too: a refusal usually means the world moved (or a
+    // file was briefly locked), and a list drawn a minute ago is exactly what
+    // the user should not keep clicking on.
+    await this.render();
   }
 }
 

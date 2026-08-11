@@ -221,9 +221,17 @@ export class PluginRuntime {
           action.result === "APPLIED" &&
           (action.action === "NOOP" || action.action.endsWith("_OVERWRITE"))
         ) {
+          // A NOOP here always means "observed equal" — the engine wires
+          // `conflictKnown: false` into every plan, so the planner's
+          // conflict-already-known NOOP is unreachable. If that wiring ever
+          // changes, this delete must learn to check `action.conflictKnown`,
+          // or a still-divergent pair would clear itself off the count.
           this.conflicted.delete(action.neutralRel);
         }
       }
+      // The set is in-memory on purpose: after a restart the very next pass
+      // re-judges every divergent pair (conflict identity is content-derived),
+      // so nothing is lost but one observation round's worth of count.
       return this.publish(await this.computeStatus(outcome));
     } catch (error) {
       // A pass that throws is a bug, not an ordinary outcome — every expected
