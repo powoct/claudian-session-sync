@@ -26,15 +26,23 @@ import { type E0Signature, judgeStability, signaturesEqual } from "../domain/sta
 import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
 import { type CachedContentFacts, type ScrubTrigger, evidenceFor } from "../domain/manifest";
 import type { LogicalId, PathViolation, SafeAbsolutePath } from "../domain/types";
+import { MAX_DEPTH } from "../domain/path-safety";
+import { classifyExternalArtifact } from "../domain/external-artifacts";
 import type { FsGateway } from "../infra/fs-gateway";
+import { isDenylisted, isTransferArtifact } from "../infra/path-guard";
 import type { Clock, IdGen } from "../infra/clock";
-import type { ProviderAdapter, SessionGroup } from "../providers/provider-adapter";
+import type {
+  NeutralClassification,
+  ProviderAdapter,
+  SessionGroup,
+} from "../providers/provider-adapter";
 import {
   type ActionEntry,
   type ActionResult,
   type Barrier,
   type DecisionEvidence,
   type PassReport,
+  type UnknownFileEntry,
   type ViolationEntry,
   hashPrefix,
   idPrefix,
@@ -178,6 +186,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const startedAtMs = deps.clock.nowMs();
   const actions: ActionEntry[] = [];
   const violations: ViolationEntry[] = [];
+  const unknownFiles: UnknownFileEntry[] = [];
   const notices: string[] = [];
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
@@ -216,9 +225,26 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   await barrier("P1:discover-done", {});
 
   // Remote-only sessions: present in the replica, absent locally.
+  //
+  // This is the one place a file the local CLI never wrote can become something
+  // this plugin writes into the CLI's own directory, so it is where §8.2 layer
+  // 1 has to hold: the adapter that owns the subtree decides whether the name
+  // is a session at all, and anything it refuses is reported and left exactly
+  // where it lies.
   const seen = new Set(groups.flatMap(({ group }) => group.files.map((f) => f.neutralRel)));
-  for (const rel of await listReplicaFiles(deps)) {
-    if (!seen.has(rel)) groups.push({ adapter: deps.adapters[0] as ProviderAdapter, group: remoteOnlyGroup(rel) });
+  for (const { adapter, rel, siblings } of await listReplicaFiles(deps)) {
+    if (seen.has(rel)) continue;
+    const classified = adapter.classifyNeutral(rel);
+    if (classified === null) {
+      const name = rel.slice(rel.lastIndexOf("/") + 1);
+      unknownFiles.push({
+        providerId: adapter.id,
+        neutralRel: rel,
+        ...classifyExternalArtifact(name, siblings),
+      });
+      continue;
+    }
+    groups.push({ adapter, group: remoteOnlyGroup(rel, classified) });
   }
 
   let budget = deps.settings.maxFilesPerPass;
@@ -471,6 +497,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       actions,
       violations,
       notices,
+      unknownFiles,
     };
   }
 
@@ -903,24 +930,58 @@ function recordLedger(
   });
 }
 
-async function listReplicaFiles(deps: EngineDeps): Promise<string[]> {
+/**
+ * Every file in the replica, with the adapter whose subtree it was found in.
+ *
+ * Two things this deliberately does not do. It does not flatten: a provider
+ * whose layout is nested (Codex shards by date) has files the previous
+ * one-level listing could not see at all, and "invisible" for a pull means a
+ * session that simply never arrives. And it does not decide what a file *is* —
+ * that is `classifyNeutral`'s job, one caller up, where a rejection can be
+ * reported instead of silently dropped.
+ *
+ * Transfer leftovers are skipped rather than reported: `.part`/`.tmp` files
+ * appear and vanish between passes by design, and a report that lists them
+ * every pass trains the user to stop reading it (§8.2's ignore list).
+ */
+async function listReplicaFiles(
+  deps: EngineDeps,
+): Promise<Array<{ adapter: ProviderAdapter; rel: string; siblings: readonly string[] }>> {
   const base = deps.joinPath(deps.replicaRoot, deps.workspaceId);
-  const found: string[] = [];
+  const found: Array<{ adapter: ProviderAdapter; rel: string; siblings: readonly string[] }> = [];
+
   for (const adapter of deps.adapters) {
-    const dir = deps.joinPath(base, adapter.id);
-    const entries = await deps.fs.readDir(dir).catch(() => []);
-    for (const item of entries) {
-      if (item.isFile) found.push(`${adapter.id}/${item.name}`);
-    }
+    await walk(adapter, deps.joinPath(base, adapter.id), adapter.id, 1);
   }
   return found;
+
+  async function walk(
+    adapter: ProviderAdapter,
+    dir: string,
+    rel: string,
+    depth: number,
+  ): Promise<void> {
+    const entries = await deps.fs.readDir(dir).catch(() => []);
+    const siblings = entries.filter((item) => item.isFile).map((item) => item.name);
+    for (const item of entries) {
+      if (isTransferArtifact(item.name) || isDenylisted(item.name)) continue;
+      const childRel = `${rel}/${item.name}`;
+      if (item.isFile) {
+        found.push({ adapter, rel: childRel, siblings });
+        continue;
+      }
+      // One below MAX_DEPTH, because the workspace id is a segment too and a
+      // path this walk cannot hand to `parseNeutralRel` is a path we should not
+      // have collected in the first place.
+      if (depth + 1 < MAX_DEPTH) await walk(adapter, deps.joinPath(dir, item.name), childRel, depth + 1);
+    }
+  }
 }
 
-function remoteOnlyGroup(neutralRel: string): SessionGroup {
-  const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
+function remoteOnlyGroup(neutralRel: string, classified: NeutralClassification): SessionGroup {
   return {
-    logicalId: name.replace(/\.jsonl$/, "") as LogicalId,
-    files: [{ role: "primary", absPath: "", neutralRel, mode: "append-jsonl" }],
+    logicalId: classified.logicalId,
+    files: [{ role: classified.role, absPath: "", neutralRel, mode: classified.mode }],
     lastModifiedMs: 0,
   };
 }

@@ -7,7 +7,11 @@
  * conversation (§11.2), so this cannot leak one however it renders.
  */
 import { Modal, type App } from "obsidian";
+import { describeExternalArtifact } from "../domain/external-artifacts";
 import type { ActionEntry, PassReport } from "../orchestration/pass-report";
+
+/** Enough to show the shape of the problem; the rest is a count (§11). */
+const MAX_UNKNOWN_SHOWN = 20;
 
 export class ReportModal extends Modal {
   constructor(
@@ -44,6 +48,24 @@ export class ReportModal extends Modal {
           text: `${violation.rootSymbol}/${violation.relativePath} — ${violation.violation}${
             violation.detail ? ` (${violation.detail})` : ""
           }`,
+        });
+      }
+    }
+
+    if (report.unknownFiles.length > 0) {
+      // Named for what actually happened to them. "Ignored" would be accurate
+      // and still wrong: a user who has just noticed a file missing from the
+      // other machine reads "ignored" as "the plugin did something to it".
+      contentEl.createEl("h3", { text: "Files left alone" });
+      const list = contentEl.createEl("ul");
+      for (const unknown of report.unknownFiles.slice(0, MAX_UNKNOWN_SHOWN)) {
+        list.createEl("li", {
+          text: `${unknown.neutralRel} — ${describeExternalArtifact(unknown)}`,
+        });
+      }
+      if (report.unknownFiles.length > MAX_UNKNOWN_SHOWN) {
+        list.createEl("li", {
+          text: `…and ${report.unknownFiles.length - MAX_UNKNOWN_SHOWN} more.`,
         });
       }
     }

@@ -14,6 +14,7 @@ import type {
   ActionEntry,
   DecisionEvidence,
   PassReport,
+  UnknownFileEntry,
   ViolationEntry,
 } from "../../src/orchestration/pass-report";
 import { World, WORKSPACE_ID } from "../helpers/world";
@@ -42,6 +43,7 @@ const ALLOWED_KEYS = new Set([
   "actions",
   "violations",
   "notices",
+  "unknownFiles",
   // ActionEntry
   "providerId",
   "logicalIdPrefix",
@@ -69,6 +71,12 @@ const ALLOWED_KEYS = new Set([
   "relativePath",
   "violation",
   "detail",
+  // UnknownFileEntry — a name and a classification of that name. `copyOf` is
+  // a bare filename taken from the same directory listing, so it is the same
+  // class of value as `neutralRel`: an identifier, never a byte of content.
+  "kind",
+  "confidence",
+  "copyOf",
 ]);
 
 describe("§11.2: no field can hold file content", () => {
@@ -126,6 +134,20 @@ describe("§11.2: no field can hold file content", () => {
     expectTypeOf<DecisionEvidence>().not.toHaveProperty("snippet");
     expectTypeOf<DecisionEvidence>().not.toHaveProperty("raw");
     expectTypeOf<DecisionEvidence>().not.toHaveProperty("data");
+    // UnknownFileEntry
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("content");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("bytes");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("lines");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("sample");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("head");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("tail");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("text");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("body");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("preview");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("excerpt");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("snippet");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("raw");
+    expectTypeOf<UnknownFileEntry>().not.toHaveProperty("data");
     // ViolationEntry
     expectTypeOf<ViolationEntry>().not.toHaveProperty("content");
     expectTypeOf<ViolationEntry>().not.toHaveProperty("bytes");

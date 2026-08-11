@@ -8,7 +8,7 @@
  * applicable at all.
  */
 import type { LogicalId } from "../../domain/types";
-import type { ProviderAdapter, SessionGroup } from "../provider-adapter";
+import { type ProviderAdapter, type SessionGroup, classifyFileName } from "../provider-adapter";
 import { escapeProjectPath } from "./path-escape";
 
 /** Lowercase UUID, matched as the leading segment (§6.3). */
@@ -30,15 +30,28 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
   const projectDirName = deps.customDirName ?? escapeProjectPath(deps.vaultRealPath);
   const projectDir = deps.joinPath(deps.providerRoot, projectDirName);
 
-  return {
-    id: "claude-code",
-    tier: "A",
+  /**
+   * The §8.2 whitelist, declared once and used on both sides.
+   *
+   * Both sides matters: `listSessions` applies it to names the CLI wrote, and
+   * `classifyNeutral` applies the same rule to names another machine's sync
+   * tool put in the replica. Two copies of this rule would eventually disagree,
+   * and the side that drifted looser is the side that writes into the CLI's
+   * directory.
+   */
+  const whitelist = {
     logicalIdPattern: CLAUDE_LOGICAL_ID_PATTERN,
     primaryExtensions: [".jsonl"],
     // Only ever written in the sync directory, never pulled into the provider
     // directory — OQ-5 showed the CLI tolerates unknown extensions, but there
     // is no reason to test that tolerance with our own files.
     auxSuffixPattern: /^\.origin\.json$/,
+  } as const;
+
+  return {
+    id: "claude-code",
+    tier: "A",
+    ...whitelist,
 
     async healthCheck() {
       const dir = await deps.statFile(projectDir);
@@ -76,6 +89,25 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
         });
       }
       return groups;
+    },
+
+    classifyNeutral(neutralRel) {
+      // Claude Code's layout is flat: exactly `claude-code/<name>`. Anything
+      // deeper is not this provider's shape, and guessing that a nested file
+      // "probably belongs to us" is how a foreign tree gets flattened into the
+      // CLI's directory — `targetPathFor` keeps only the basename.
+      const parts = neutralRel.split("/");
+      const name = parts.length === 2 && parts[0] === "claude-code" ? parts[1] : undefined;
+      if (name === undefined) return null;
+      const classified = classifyFileName(whitelist, name);
+      if (classified.kind === "unknown") return null;
+      return {
+        logicalId: classified.logicalId as LogicalId,
+        role: classified.kind,
+        // Both shapes are jsonl the CLI appends to; the aux file is ours and is
+        // never pulled anyway (the engine acts on primaries only).
+        mode: "append-jsonl" as const,
+      };
     },
 
     async targetPathFor(neutralRel) {

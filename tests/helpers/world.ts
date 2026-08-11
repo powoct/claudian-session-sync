@@ -35,6 +35,7 @@ import { type PassOutcome, runWorkspacePass } from "../../src/orchestration/pass
 import { createFileLock } from "../../src/orchestration/lock-file";
 import { STATE_SCHEMA_VERSION } from "../../src/infra/state-store";
 import { createClaudeCodeAdapter } from "../../src/providers/claude-code/adapter";
+import type { ProviderAdapter } from "../../src/providers/provider-adapter";
 import {
   type EngineDeps,
   type EvidenceCache,
@@ -260,7 +261,15 @@ export class Machine {
   private passInFlight = false;
   private lockEpoch = 0;
 
-  async pass(options: { dryRun?: boolean; barrier?: Barrier; withLock?: boolean } = {}): Promise<PassReport> {
+  async pass(
+    options: {
+      dryRun?: boolean;
+      barrier?: Barrier;
+      withLock?: boolean;
+      /** Registered alongside the Claude Code adapter, for multi-provider tests. */
+      extraAdapters?: readonly ProviderAdapter[];
+    } = {},
+  ): Promise<PassReport> {
     // Load, run, write back — the real shape of a pass, and the reason this is
     // here rather than in a mock: S-07 deletes the file between passes, so the
     // manifest has to be genuinely read from and written to disk for that test
@@ -556,7 +565,11 @@ export class Machine {
     throw new Error(`expected a crash at ${at}, but the pass completed`);
   }
 
-  private engineDeps(options: { dryRun?: boolean; barrier?: Barrier }): EngineDeps {
+  private engineDeps(options: {
+    dryRun?: boolean;
+    barrier?: Barrier;
+    extraAdapters?: readonly ProviderAdapter[];
+  }): EngineDeps {
     const fs = countingGateway(this.nodeGateway(), this.io);
     const adapter = this.adapter();
 
@@ -564,7 +577,7 @@ export class Machine {
       fs,
       clock: this.clock,
       ids: sequentialIdGen(),
-      adapters: [adapter],
+      adapters: [adapter, ...(options.extraAdapters ?? [])],
       ...(options.barrier ? { barrier: options.barrier } : {}),
       replicaRoot: this.replicaRoot,
       workspaceId: WORKSPACE_ID,

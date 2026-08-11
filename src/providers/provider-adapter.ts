@@ -39,6 +39,22 @@ export interface SessionGroup {
   readonly lastModifiedMs: number;
 }
 
+/**
+ * What a neutral path found in the replica means locally (architecture §6.2).
+ *
+ * `null` is the §8.2 whitelist applied to the *remote* side, and it is the
+ * whole reason this method exists as a first-class part of the contract: the
+ * local side gets its whitelist for free, because discovery is the adapter
+ * listing names it recognises, while the remote side is a directory another
+ * machine's sync tool writes into. Reconstructing a session from "a file was
+ * there" is how a Syncthing conflict copy ends up in the CLI's own directory.
+ */
+export interface NeutralClassification {
+  readonly logicalId: LogicalId;
+  readonly role: "primary" | "aux";
+  readonly mode: FileMode;
+}
+
 export interface ProviderAdapter {
   readonly id: string;
   readonly tier: ProviderTier;
@@ -54,6 +70,15 @@ export interface ProviderAdapter {
   /** Is this provider usable on this machine right now? */
   healthCheck(): Promise<{ readonly ok: boolean; readonly reason?: string }>;
   listSessions(): Promise<SessionGroup[]>;
+  /**
+   * The inverse of `listSessions`, for a file only the replica has.
+   *
+   * Must be as strict as listing is: a name this returns non-null for is a name
+   * the engine will write into the CLI's directory. Returning something for a
+   * path shape the provider does not use is the same mistake as listing a file
+   * the CLI never wrote.
+   */
+  classifyNeutral(neutralRel: string): NeutralClassification | null;
   /** Where a neutral-relative file lands locally. Must realpath before escaping. */
   targetPathFor(neutralRel: string): Promise<string>;
   /** Tier B only; a no-op elsewhere. */

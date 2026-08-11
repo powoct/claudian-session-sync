@@ -406,6 +406,15 @@ describe("the report view shows what went wrong, not just what worked", () => {
         { rootSymbol: "syncDir", relativePath: "a/b.jsonl", violation: "SYMLINK", detail: "b" },
       ],
       notices: ["claude-code/x.jsonl: the last record has been incomplete"],
+      unknownFiles: [
+        {
+          providerId: "claude-code",
+          neutralRel: "claude-code/3f2504e0.sync-conflict-20260807-120000-ABCDEF.jsonl",
+          kind: "syncthing-conflict-copy",
+          confidence: "high",
+          copyOf: "3f2504e0.jsonl",
+        },
+      ],
     });
     modal.open();
 
@@ -415,6 +424,11 @@ describe("the report view shows what went wrong, not just what worked", () => {
     expect(text).toContain("Rejected paths");
     expect(text).toContain("SYMLINK");
     expect(text).toContain("No files were considered");
+    // §8.2: a file the plugin refuses to touch is still a file the user should
+    // be told about, with the reason it was refused.
+    expect(text).toContain("Files left alone");
+    expect(text).toContain("Syncthing conflict copy");
+    expect(text).toContain("never synced");
   });
 
   it("says a pass that never started did nothing, and why", () => {
@@ -427,6 +441,7 @@ describe("the report view shows what went wrong, not just what worked", () => {
       actions: [],
       violations: [],
       notices: [],
+      unknownFiles: [],
     });
     modal.open();
 

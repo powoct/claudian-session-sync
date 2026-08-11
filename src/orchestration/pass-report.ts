@@ -14,6 +14,7 @@
  */
 import type { Action, PlanFlag } from "../domain/planner";
 import type { PathViolation } from "../domain/types";
+import type { ExternalArtifactKind } from "../domain/external-artifacts";
 
 export type ActionResult =
   | "APPLIED"
@@ -95,6 +96,28 @@ export interface ViolationEntry {
   readonly detail?: string;
 }
 
+/**
+ * A file in the replica that no adapter recognises (architecture §8.2).
+ *
+ * Reported, never touched. The plugin does not move or delete what it does not
+ * understand, because a move is a deletion at the old path and an external sync
+ * tool propagates that deletion to every machine — which turns a misjudgement
+ * about one file on one machine into a missing file everywhere.
+ *
+ * `kind` and `copyOf` are layer 2/3 output: an explanation, with no authority
+ * over any decision. Both may be absent-shaped ("unknown", null) and the entry
+ * is still worth showing — "there is a file here I will not touch" is the part
+ * the user needs.
+ */
+export interface UnknownFileEntry {
+  readonly providerId: string;
+  readonly neutralRel: string;
+  readonly kind: ExternalArtifactKind;
+  readonly confidence: "high" | "medium" | "low";
+  /** A bare filename, never a path. */
+  readonly copyOf: string | null;
+}
+
 export type PassOutcome = "ok" | "partial" | "failed" | "aborted";
 
 export interface PassReport {
@@ -107,6 +130,8 @@ export interface PassReport {
   readonly actions: readonly ActionEntry[];
   readonly violations: readonly ViolationEntry[];
   readonly notices: readonly string[];
+  /** Replica files no adapter claimed; §8.2 says list them and leave them. */
+  readonly unknownFiles: readonly UnknownFileEntry[];
 }
 
 /**
