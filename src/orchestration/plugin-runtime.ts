@@ -567,6 +567,10 @@ export class PluginRuntime {
             const st = await this.host.fs.lstat(target);
             return st ? { mtimeMs: st.mtimeMs } : null;
           },
+          readTextFile: async (target) => {
+            const bytes = await this.host.fs.readFile(target).catch(() => null);
+            return bytes === null ? null : new TextDecoder().decode(bytes);
+          },
         }),
         root: real,
       });

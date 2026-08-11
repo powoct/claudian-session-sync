@@ -17,7 +17,7 @@ import { type App, Notice, type Plugin, PluginSettingTab, Setting } from "obsidi
 import type { PortableSettings } from "../domain/settings";
 import { boundsFor } from "../domain/settings";
 import type { PluginRuntime, RuntimeStatus } from "../orchestration/plugin-runtime";
-import { PROVIDERS } from "../providers/registry";
+import { PROVIDERS, type ProviderDescriptor } from "../providers/registry";
 
 export class AiSessionSyncSettingTab extends PluginSettingTab {
   /**
@@ -173,13 +173,7 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
     for (const provider of PROVIDERS) {
       new Setting(containerEl)
         .setName(provider.label)
-        .setDesc(
-          `Tier ${provider.tier}. ${
-            provider.tier === "A"
-              ? "Measured append-only, so its sessions can be merged safely."
-              : "Unverified lifecycle — read-only until measured."
-          }`,
-        )
+        .setDesc(describeProvider(provider))
         .addToggle((toggle) =>
           toggle.setValue(this.isEnabled(provider.id)).onChange(async (value) => {
             await this.runtime.setProvider(provider.id, { enabled: value });
@@ -263,4 +257,24 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
   private rootOverride(providerId: string): string {
     return this.runtime.providerRootOverride(providerId) ?? "";
   }
+}
+
+/**
+ * What the user is agreeing to when they turn a provider on.
+ *
+ * The experimental line is not a disclaimer for its own sake: §6.1 puts the
+ * evidence gate at release, so a provider can ship with its shape implemented
+ * and its lifecycle measured on one platform only. Saying which is which is
+ * the difference between an informed choice and a surprise.
+ */
+function describeProvider(provider: ProviderDescriptor): string {
+  const tier =
+    provider.tier === "A"
+      ? "Measured append-only, so its sessions can be merged safely."
+      : "Unverified lifecycle — read-only until measured.";
+  const experimental = provider.experimental
+    ? " Experimental: its lifecycle has not been measured on every platform yet."
+    : "";
+  const scope = provider.scopeNote ? ` ${provider.scopeNote}` : "";
+  return `Tier ${provider.tier}. ${tier}${experimental}${scope}`;
 }
