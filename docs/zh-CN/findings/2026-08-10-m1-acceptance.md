@@ -49,7 +49,7 @@
 | **D-5（中）** | 备份轮转删除第 4 旧份后 index.jsonl 条目残留（磁盘 3 份、索引 4 条） | **轮转本身属设计**（仅删除可由幸存版本前缀重建的份，I1 保持）；**索引已补**：删除时追加 `{"event":"pruned", reproducibleFrom}` 日志行，索引语义明确为 journal 而非 inventory |
 | **D-6（低；Win 记录称 D-4）** | 重启/恢复传输后的第一轮 pass 只观察不动作，剧本「启动即捕获」「恢复即冲突」两处期望顺延一轮 | **裁决：by design**（fail-safe 稳定窗口）；剧本措辞已放宽（AGENTS.md 步骤 8/10） |
 | Win D-3（待裁决项） | evidence.mjs 把 `.aiss/manifest.json` 与隔离 meta.json 纳入 I1 判定，每次 check 必报 | **裁决：工具修正**——派生元数据不在 I1 保护范围（I1 保护会话字节）；工具已排除并计数提示。插件侧 D-1/D-2 修复后该噪声本身也基本消失 |
-| **R-1（第三方风险）** | Claudian 的 ai-title 功能（默认开启，Haiku）向 session 文件追加 `{"type":"ai-title",…}` 记录，**包括冲突中的非活动会话**，实测两次 +236B 并直接催生第二个 conflictId | 与「local 只被 CLI 与本插件写」的隐含假设相抵触。前缀合并天然容忍单侧追加（步骤 7 已实证吸收一次）；对冲突会话的追加在 ADR-40 后不再锁死解决。**遗留**：README 须写明共存行为；是否对已知单行元数据类型做识别，留 M2 评估 |
+| **R-1（~~第三方风险~~ → 归因已更正）** | session 文件被追加 `{"type":"ai-title",…}` 记录，**包括冲突中的非活动会话**，实测两次 +236B 并直接催生第二个 conflictId | **2026-08-12 更正：写入方不是 Claudian，是 Claude Code CLI 自身**（Claudian 源码与全部 git 历史中 `ai-title` 零命中；未装 Claudian 的 Linux 开发机上 17 个 session 文件里 6 个含该记录 —— 见 [findings 2026-08-12](./2026-08-12-claudian-source-survey.md) §1）。故这不是「第三方写入者」风险，追加发生在 OQ-8 已实测的 append-only 模型**之内**。ADR-40 的动机不受影响（冲突中的非活动会话确实会被追加，冻结快照仍会过期）。**遗留**：README 要写的是「CLI 自己在你只是打开会话时也会追加元数据」，不是「Claudian 会改你的文件」 |
 
 ## 回填的实测事实
 

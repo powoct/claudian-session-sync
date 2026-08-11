@@ -1,6 +1,6 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-11（首轮真机验收已跑完；阻塞缺陷 D-3 已修；插件改名 Claudian Session Sync）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：2026-08-12（M1 Exit 已达成；M2 已开工：Claudian 源码调查完成，远端白名单缺陷已修）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
 ## 当前状态：步骤 8 复验通过，M1 Exit 达成；R2-1 已修待真机顺手确认
@@ -163,6 +163,41 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
   真机迁移步骤在验收套件 AGENTS.md §3 P0（三个 mv + 重装，保 machineId 与备份）。
 - 注意：**测试里对未提交修复做 `git checkout <file>` 会连修复一起洗掉**——本批注入
   验证时发生过一次，靠"注入后测试红得不对劲"发现。注入验证请用可逆的 sed/patch。
+
+### M2 开工（2026-08-12）
+
+**做了什么**
+
+1. **Claudian 源码调查完成**（本机 clone `~/projects/claudian`，HEAD `033eed12` = 2.1.3），
+   结论入库为 [findings/2026-08-12-claudian-source-survey.md](docs/zh-CN/findings/2026-08-12-claudian-source-survey.md)。
+   四条对路线有直接影响：
+   - **R-1 归因错了并已更正**：`ai-title` 记录**不是 Claudian 写的**，是 Claude Code CLI 自己写的
+     （Claudian 源码 + 全部 git 历史零命中；未装 Claudian 的本开发机上 17 个 session 有 6 个含该记录）。
+     于是它落在 OQ-8 已实测的 append-only 模型**之内**，不再是第三方写入者风险。
+   - **OpenCode 不可同步**：会话全在单个 SQLite `opencode.db`，无 per-session 文件、无官方
+     export/import。**Tier C 且无升级路径**——已从 M2 范围删除（§15）。
+   - **Codex 可做，但 OQ-11 是前提**：`~/.codex/sessions/` 是全局目录，没有按项目分区，
+     不加限定会把本机**所有** Codex 对话推进本 vault 的 workspace。
+   - **OQ-12 有结论**：只同步 rollout ⇒ `codex` CLI 可 resume，但 **Claudian UI 里没有入口**
+     （Claudian 按 vault 内 `.claudian/sessions/<id>.json` 的 threadId 找文件，从不扫盘枚举）。
+2. **修掉一个 M1 现网缺陷（commit `78e4c79`，ADR-45）**：§8.2 白名单**在远端侧从未被调用**。
+   实测三种成品冲突副本（Syncthing / 英文区 Dropbox / OneDrive `-<hostname>`）会被当作
+   session 拉进 CLI 目录。2026-08-10 验收没暴露它，只因为 Dropbox 当时写的是中文名、
+   被 `SEGMENT_CHARSET` 挡了——**是运气不是边界**。同一处另有两个只在多 adapter 下发作的
+   错误：远端文件一律归给 `adapters[0]`（跨 provider 误写）、远端只列一层目录（日期分层
+   provider 完全不可见）。修法是把 §6.2 早就写了却没实现的 `classifyNeutral` 补上。
+   新增 `tests/helpers/fake-providers.ts`（嵌套形状的第二个 adapter）与 World 的
+   `extraAdapters` 选项——这是 M2 多 provider 测试的地基。
+
+**下一步该干什么**（按依赖排序）
+
+| # | 事项 | 前提 |
+|---|---|---|
+| 1 | **OQ-11 拍板**：Codex 的 workspace 归属规则（读首行 `cwd`？用户手选？全同步 + 显式告知？） | 产品判断，需用户定 |
+| 2 | Codex adapter 实现 + 真机复测（Windows / 跨版本 append-only） | 1 |
+| 3 | `ConflictMeta` v3 存 `neutralRel`（现在按 `${providerId}/${logicalId}${ext}` 重建，对 Codex 形状会误报 superseded 且解决失败） | 无（可独立做） |
+| 4 | mode 守卫：拒绝激活 primary mode ≠ `append-jsonl` 的 adapter（`FileMode` 目前声明了但引擎从不读） | 无 |
+| 5 | 真机探测套件 `tmp/probe-m2/`（Codex 复测 / Grok / Pi / OQ-7 规模 / OQ-10 漫游） | 无 |
 
 ## 真机验收怎么跑
 
