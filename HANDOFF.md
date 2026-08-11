@@ -189,15 +189,31 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
    新增 `tests/helpers/fake-providers.ts`（嵌套形状的第二个 adapter）与 World 的
    `extraAdapters` 选项——这是 M2 多 provider 测试的地基。
 
-**下一步该干什么**（按依赖排序）
+**M2 已交付的部分**（同日晚批）
+
+| # | 事项 | 状态 |
+|---|---|---|
+| 1 | **OQ-11 已决（ADR-46）**：Codex 的 workspace 归属源 = vault 内 Claudian 的会话记录 `<vault>/.claudian/sessions/*.meta.json`。它在 vault 里，所以「属于这个 vault」是构造性质——不读 rollout 内容、不猜 `cwd`。**只取 `sessionId`，绝不使用记录里的绝对路径**（那是写入方机器的）。归属只作用于 push 侧；pull 侧只校形状 | ✅ `e831596` |
+| 2 | Codex adapter + 注册表 + 设置项（experimental 标签 + 归属说明） | ✅ `e831596`，29 条用例，注入验证过 |
+| 3 | `ConflictMeta` v3 存 `neutralRel`（v2 目录仍按旧法重建，对唯一写过它的 provider 正确） | ✅ `03ad03e` |
+| 4 | mode 守卫：primary mode ≠ `append-jsonl` ⇒ `SKIPPED_POLICY` + notice，不进 append-jsonl 决策表 | ✅ `03ad03e` |
+| 5 | 真机探测套件 `tmp/probe-m2/`（P1 Codex 布局 / P2 生命周期 / P3 vault 记录 / P4 Grok+Pi / P5 规模） | ✅ 已建，本机烟测通过 |
+
+**下一步**
 
 | # | 事项 | 前提 |
 |---|---|---|
-| 1 | **OQ-11 拍板**：Codex 的 workspace 归属规则（读首行 `cwd`？用户手选？全同步 + 显式告知？） | 产品判断，需用户定 |
-| 2 | Codex adapter 实现 + 真机复测（Windows / 跨版本 append-only） | 1 |
-| 3 | `ConflictMeta` v3 存 `neutralRel`（现在按 `${providerId}/${logicalId}${ext}` 重建，对 Codex 形状会误报 superseded 且解决失败） | 无（可独立做） |
-| 4 | mode 守卫：拒绝激活 primary mode ≠ `append-jsonl` 的 adapter（`FileMode` 目前声明了但引擎从不读） | 无 |
-| 5 | 真机探测套件 `tmp/probe-m2/`（Codex 复测 / Grok / Pi / OQ-7 规模 / OQ-10 漫游） | 无 |
+| 1 | **跑 `tmp/probe-m2/`**（两台机器）。P2 是 Codex 的**发布门禁**：不通过则 Codex 保持只读 | 拷套件到两台机器 |
+| 2 | 按探测结果回填 §6.1.1 的 Codex Tier、§16 的 OQ-7/OQ-11 | 1 |
+| 3 | M4：README（含 Claudian 共存说明：`.claudian/` / `.codex/agents` / `.pi` 别排除在 vault 同步之外；CLI 自己会追加 ai-title 元数据）、BRAT 发布 | 无（可并行） |
+
+**本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
+
+- `~/.codex/sessions` 下 15 个 rollout **全部**是 `rollout-<prefix>-<uuid>.jsonl` 形态，
+  **文件名里没有冒号、没有非 ASCII**——即 `SEGMENT_CHARSET` / `WINDOWS_ILLEGAL` 不会拒收它们
+  （这条原本是「Windows 上可能整片会话无法同步」的疑虑）。
+- 目录深度就是 `YYYY/MM/DD` 三层，与 adapter 的假设一致；首行 `session_meta.payload` 含
+  `cwd` 与 `cli_version`。
 
 ## 真机验收怎么跑
 

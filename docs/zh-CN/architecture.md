@@ -668,7 +668,33 @@ interface ProviderAdapter {
 | Claudian 对 `~/.codex` **全程只读**（唯二写入在 `os.tmpdir()`） | Codex 的并发模型与 Claude Code 同形：本机唯一写者是 CLI 进程 |
 | resume 只传 `threadId`，路径由服务端返回 | 落位必须落进 CLI 自己能找到的相对位置；「字节对、目录错」= 静默 resume 失败 |
 
-**未决：OQ-11（workspace 归属）是 M2 的实现前提**——`~/.codex/sessions/` 全局无分区，不加限定就会把本机所有 Codex 对话推进本 workspace。
+**OQ-11（workspace 归属）已决，见 ADR-46**：归属源是 vault 内 Claudian 的会话记录
+`<vault>/.claudian/sessions/*.meta.json`（旧版 `.claude/sessions/`）。实测样本（2026-08-12，
+用户提供）字段形态：
+
+```jsonc
+{
+  "id": "conv-<epochMs>-<random>",     // Claudian 本机生成的会话 id，不是 CLI 的
+  "providerId": "codex",
+  "sessionId": "019fef16-fac1-7fa3-8cf0-835a76c65ac0",   // ← 这个才是 CLI 的 id
+  "providerState": {
+    "threadId": "019fef16-…",          // 与 sessionId 相同
+    "sessionFilePath": "<写入方机器的绝对路径>",  // ← 绝不使用
+    "transcriptRootPath": "<写入方机器的绝对路径>"
+  }
+}
+```
+
+adapter 只取 `sessionId`（回退 `providerState.threadId`），且要求它是小写 UUID 形态；
+再用尾部匹配 `-<id>.jsonl` 在本机 `<CODEX_HOME>/sessions/YYYY/MM/DD/` 下定位文件。
+**绝对路径字段一律忽略**——它属于写入那台机器。
+
+归属只作用在 **push 侧**。`classifyNeutral`（pull 侧）只校形状不校归属：replica 的
+`codex/` 子树只由本插件写入，内容来自对端**已经过归属**的 push；在这里再过一遍会让
+一个合法的 pull 在 vault 元数据追上来之前被当成异物。
+
+**覆盖范围的取舍**：只覆盖经 Claudian 建立的会话。纯终端里 `codex` 起的会话在 vault
+里没有记录，因而不同步。对「Claudian Session Sync」这个定位这是正确的边界，README 要写明。
 
 ### 6.5 Tier B 索引对齐
 
@@ -1838,6 +1864,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 43 | 改名 Claudian Session Sync：插件 id、home 目录（`~/.claudian-session-sync`）、vault 身份目录（`.claudian-session-sync/`）随名；sync-dir 的 `.aiss/` 与 root.json 的 `magic: "ai-session-sync"` **不改** | 全部改齐 | `.aiss/` 与 magic 是 wire format，改名会把每个已初始化的 sync 目录判成 NR-1/NR-2，收益为零；本机与 vault 内目录在发布前改名只需一次 mv（见验收套件 §3 P0 迁移步骤） |
 | 44 | 解决命令区分「瞬时读不到」与「状态变了」（条目查找立即重试一次；kept 侧读不到 → `kept-unreadable`，文案指示几秒后重试；`unknown-conflict` 不断言已解决）；冲突计数为**粘性集合**：CONFLICT 加入，等量 NOOP / 覆盖落地 / 本机 resolve 成功移除，DEFER 不动 | 把读失败并入 branch-moved / unknown-conflict；计数只看最近一次 pass 报告 | 步骤 8 复验实测（findings 2026-08-11 R2-1）：同步工具对刚搬运/刚写入的文件持有瞬时锁，resolve 在 backup 前失败早退，而旧文案把它说成「已解决」或「状态变了」——用户把空操作当成功；同时 DEFER 观察轮不产生 CONFLICT 动作，只看单轮报告的计数在分歧仍在时归零，状态栏说谎。粘性集合让「不知道」不清零，只有一手证据才清零 |
 | 45 | §8.2 第 1 层白名单在**远端侧**由 `ProviderAdapter.classifyNeutral(neutralRel)` 执行，返回 `null` 即"不是 session"；被拒文件进 `PassReport.unknownFiles`（含第 2/3 层分类）并**原地不动**；远端列举改为按 adapter 归属的递归遍历 | 沿用"replica 里有文件就当 session"（隐式） | 本地侧的白名单是**结构性**的（adapter 只列它认识的名字），远端侧没有任何东西替代它——实测 Syncthing 的 `.sync-conflict-…`、英文区 Dropbox 的 `(conflicted copy …)`、OneDrive 的 `-<hostname>` 三种成品副本全部被拉进 CLI 目录（2026-08-12 复现）。2026-08-10 验收没暴露它，只因为 Dropbox 当时写的是中文名、被 `SEGMENT_CHARSET` 挡下——那是运气不是边界。同一处的另两个错误只有第二个 adapter 存在时才发作：远端文件一律归给 `adapters[0]`（跨 provider 误写），以及远端只列一层目录（日期分层的 provider 完全不可见） |
+| 46 | **Codex 的 workspace 归属由 vault 内 Claudian 的会话记录决定**：只读 `<vault>/.claudian/sessions/*.meta.json`（旧版 `.claude/sessions/`），取 `providerId === "codex"` 的 `sessionId`，再用尾部匹配 `-<id>.jsonl` 在本机 `<CODEX_HOME>/sessions` 定位；**只取 id,绝不使用文件里的绝对路径**。归属只作用于 push 侧,`classifyNeutral`（pull 侧）只校形状 | (a) 读 rollout 首行 `session_meta.payload.cwd` 过滤 ／ (b) 设置里让用户勾选项目白名单 ／ (c) 全同步 + 告知 | `~/.codex/sessions/` 是全局目录,(c) 会把本机**所有**项目的 Codex 对话推进这个 vault 的子树——隐私问题,不是整洁问题。(a) 要求 adapter 在**发现阶段读文件内容**（现有 `listSessions` 没有这个形状）,且 cwd 稳定性未实测。(b) 要 UI 与本机状态,新项目还得手动加。而 `.claudian/sessions/` **就在 vault 里**,"哪些会话属于这个 vault"这个问题它本身就是答案——零猜测、零内容读取。代价是只覆盖经 Claudian 建的会话（纯终端起的 codex 会话不同步）,这对本插件的定位是正确取舍,写进 README。失败一律 fail closed（无 store／无记录／读不动／id 形状不对 ⇒ 什么都不同步）。副作用:OQ-12 一并解开——vault 侧那半份元数据随 vault 同步过去,rollout 由本插件送到,两半齐了 Claudian UI 就有入口 |
 
 ---
 
@@ -1847,7 +1874,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 |---|---|---|
 | **M0** | 脚手架：package/lockfile、TS、Vitest、esbuild、ESLint、Obsidian manifest、三平台 CI、覆盖率与 no-skip 门禁 | [testing.md §12](./testing.md) |
 | **M1** | Claude Code 单 provider 双向同步；路径映射；前缀安全合并；稳定性 + VO + 备份；身份与路径安全；就绪状态机；冲突三命令；Mac ↔ Win 实测 resume | §5–§9 |
-| **M2** | provider 抽象落地；Codex 接入（前提：OQ-11 workspace 归属先有 ADR）；跨版本兼容测试。~~OpenCode 接入~~ **删除**——2026-08-12 源码调查确证其为单文件 SQLite，结构上不可同步（§6.1.1）。~~Tier B 索引对齐~~ / ~~多文件 group staging~~ **顺延**：现有全部候选 provider（Codex/Grok/Pi）都不是 Tier B，也都只有单 primary，为不存在的形状付复杂度不合算（§6.6 原则） | §6.1 §6.2 §6.6 §5.4 |
+| **M2** | provider 抽象落地 ✅；Codex 接入 ✅（归属规则见 ADR-46；发布前需真机复测）；跨版本兼容测试。~~OpenCode 接入~~ **删除**——2026-08-12 源码调查确证其为单文件 SQLite，结构上不可同步（§6.1.1）。~~Tier B 索引对齐~~ / ~~多文件 group staging~~ **顺延**：现有全部候选 provider（Codex/Grok/Pi）都不是 Tier B，也都只有单 primary，为不存在的形状付复杂度不合算（§6.6 原则） | §6.1 §6.2 §6.6 §5.4 |
 | **M3** | Grok / Pi 调研；冲突解决 UI；备份恢复 UI；孤立 aux 清理；删除传播评估；`.aiss/prev/` 跨机可恢复方案评估 | §8 §9.3 §9.4.1 |
 | **M4** | README、BRAT 发布、跨平台验收归档 | [testing.md §9](./testing.md) |
 
@@ -1871,8 +1898,8 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **OQ-8** | **生命周期是否严格 append-only** | ✅ **PASS** | 双平台 36 快照零违规；compact/fork/retry 全是**追加**；文件名恒等于 sessionId；末尾恒 LF；空会话不落盘 → **Tier A 成立，无需任何降级** |
 | **OQ-9** | junction / 8.3 短名 | ✅ 通过 | `lstat` 识别 junction 为 symlink（拦截有效）；`realpath` 不展开 8.3 短名（字符串层拒绝必须保留）（§9.7.4） |
 | **OQ-10** | 漫游 profile | ⏳ 未做 | M2 |
-| **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ⏳ **M2 阻塞** | 唯一候选判据是 rollout 首行 `session_meta.payload.cwd`，但那要求 adapter **读内容才能完成发现**——现有 `listSessions` 没有这个形状。需要一条 ADR + 真机验证（[findings 2026-08-12](./findings/2026-08-12-claudian-source-survey.md) §2.3） |
-| **OQ-12** | 只同步 rollout，Claudian UI 里会不会出现该会话 | ✅ **有结论（源码）** | **不会**。Claudian 从不扫盘枚举 Codex 会话，只按 vault 内 `.claudian/sessions/<id>.json` 存的 `threadId` 去找文件。所以 rollout 同步 ⇒ `codex` CLI 可 resume，Claudian UI 无入口——vault 内那半份元数据随 vault 自身同步走 |
+| **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ✅ **已决（ADR-46）** | 用 vault 内 Claudian 的会话记录做归属源——它在 vault 里，所以"属于这个 vault"是它的构造性质，不需要读 rollout 内容也不需要猜 `cwd`。已实现并有回归（`tests/m1/codex-adapter.test.ts`）。**遗留**：真机确认 `.claudian/sessions/` 的实际文件名与字段在你的版本上与样本一致（探测套件 P3） |
+| **OQ-12** | 只同步 rollout，Claudian UI 里会不会出现该会话 | ✅ **有结论（源码）** | Claudian 从不扫盘枚举 Codex 会话，只按 vault 内 `.claudian/sessions/<id>.meta.json` 存的 `sessionId`/`threadId` 去找文件。**所以两半必须都在**：vault 侧那半随 vault 自身的同步走，rollout 这半由本插件送。两半齐了 UI 就有入口（2026-08-10 验收的人工拷贝附加验证已实证过这条路径）。README 必须写明：**别把 `.claudian/` 排除在 vault 同步之外** |
 
 **计划外发现**（F-1…F-9，详见 findings）中对实现有直接影响的三条：picker 不显示 headless 来源的会话（同步验证一律按 ID resume）；resume 打开不发消息也可能追加约 236 B（稳定性判定天然覆盖）；Windows 目录 fsync 返回 `EPERM`（`FsGateway` 在 win32 上跳过目录 fsync）。
 
