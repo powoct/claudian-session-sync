@@ -119,8 +119,21 @@ export interface ConflictBranchMeta {
 }
 
 export interface ConflictMeta {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly logicalId: string;
+  /**
+   * The path the two branches disagree about, relative to the workspace
+   * subtree — recorded rather than rebuilt (schema 3).
+   *
+   * Schema 2 stored only `logicalId`, and the resolution command rebuilt the
+   * path as `<provider>/<logicalId><ext>`. That is correct for exactly one
+   * provider shape: flat, with the file name equal to the id. For Codex —
+   * `codex/2026/08/06/rollout-<ts>-<uuid>.jsonl` — the rebuilt path points at
+   * nothing, and the failure is worse than an error: both live branches read
+   * as absent, so the entry is reported `superseded` and the user is shown a
+   * false all-clear over a conflict that is still there.
+   */
+  readonly neutralRel: string;
   readonly conflictId: string;
   /** Ordered by hash prefix, mirroring the copy files. */
   readonly branches: readonly ConflictBranchMeta[];
@@ -130,6 +143,7 @@ export interface ConflictMeta {
 
 export function buildConflictMeta(input: {
   readonly logicalId: LogicalId;
+  readonly neutralRel: string;
   readonly conflictId: string;
   readonly localHash: string;
   readonly remoteHash: string;
@@ -153,8 +167,9 @@ export function buildConflictMeta(input: {
   const branches =
     stripPrefix(input.localHash) <= stripPrefix(input.remoteHash) ? [local, remote] : [remote, local];
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     logicalId: input.logicalId,
+    neutralRel: input.neutralRel,
     conflictId: input.conflictId,
     branches,
     detectedBy: input.machineIdPrefix,

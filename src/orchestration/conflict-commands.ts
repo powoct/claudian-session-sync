@@ -53,6 +53,12 @@ export interface ConflictEntry {
   readonly detectedAt: string;
   /** Absolute path of the quarantine directory, for `reveal`. */
   readonly directory: string;
+  /**
+   * The path in dispute. From the meta file when it recorded one (schema 3),
+   * otherwise rebuilt from the id — which is only correct for a flat provider,
+   * and is exactly why schema 3 records it.
+   */
+  readonly neutralRel: string;
   /** Ordered by hash, like the copy files. */
   readonly branches: readonly ConflictBranchView[];
   /**
@@ -163,8 +169,7 @@ export async function resolveConflict(
   // place a push does real damage (§9.6.3).
   if (keepingLocal && !deps.mayWriteRemote()) return { ok: false, reason: "remote-not-ready" };
 
-  const extension = extensionOf(entry.branches[0]?.copyName ?? "");
-  const neutralRel = `${entry.providerId}/${entry.logicalId}${extension}`;
+  const neutralRel = entry.neutralRel;
   const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, neutralRel);
   const localPath = await deps.localPathFor(entry.providerId, neutralRel);
   if (localPath === null) return { ok: false, reason: "path-rejected" };
@@ -232,6 +237,11 @@ async function readEntry(
   const logicalId = typeof meta.logicalId === "string" ? meta.logicalId : null;
   if (logicalId === null || typeof meta.conflictId !== "string") return null;
   const detectedAt = typeof meta.detectedAt === "string" ? meta.detectedAt : "";
+  // Schema 3 records the path; schema 2 did not, and rebuilding it is only
+  // right for a flat provider whose file name is its id. Reading the recorded
+  // one first means a directory written by a newer version stays resolvable
+  // whatever shape its provider has (§8.1).
+  const recordedRel = typeof meta.neutralRel === "string" ? meta.neutralRel : null;
 
   const byHash = new Map<string, { size: number; lineCount: number; copyName: string }>();
   for (const file of await deps.fs.readDir(directory).catch(() => [])) {
@@ -246,7 +256,7 @@ async function readEntry(
   if (byHash.size < 2) return null; // Half-transported or tampered; not resolvable.
 
   const extension = extensionOf([...byHash.values()][0]?.copyName ?? "");
-  const neutralRel = `${providerId}/${logicalId}${extension}`;
+  const neutralRel = recordedRel ?? `${providerId}/${logicalId}${extension}`;
   const localPath = await deps.localPathFor(providerId, neutralRel);
   const localHash = await hashOf(deps, localPath);
   const remoteHash = await hashOf(
@@ -275,6 +285,7 @@ async function readEntry(
     logicalIdPrefix: logicalId.slice(0, 8),
     detectedAt,
     directory,
+    neutralRel,
     branches,
     superseded: !branches.some((branch) => branch.onThisMachine || branch.inSyncFolder),
   };

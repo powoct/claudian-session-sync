@@ -252,6 +252,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   for (const { adapter, group } of groups) {
     for (const file of group.files) {
       if (file.role !== "primary") continue;
+      // §7.2b is written but not implemented: everything below this line is the
+      // append-jsonl decision table. Running it over an `opaque-file` primary
+      // would compare a binary as if it were lines — `tailState` calls any
+      // non-UTF8 tail "truncated", so the file would DEFER forever and then
+      // tell the user its "last record has been incomplete", which is not even
+      // a sentence about that file. A `derived` primary would be copied
+      // between machines instead of rebuilt locally. Neither is a thing to do
+      // quietly, and neither is a thing to do at all until §7.2b exists.
+      if (file.mode !== "append-jsonl") {
+        notices.push(
+          `${file.neutralRel}: this provider stores sessions in a form this version does not sync (${file.mode})`,
+        );
+        actions.push(
+          entry(group, file.neutralRel, adapter.id, "DEFER", `unsupported-mode:${file.mode}`, "SKIPPED_POLICY"),
+        );
+        continue;
+      }
       if (budget <= 0) {
         actions.push(entry(group, file.neutralRel, adapter.id, "DEFER", "budget-exhausted", "SKIPPED_BUDGET"));
         continue;
@@ -401,6 +418,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       ) {
         quarantinedId = await quarantineConflict(deps, {
           logicalId: group.logicalId,
+          neutralRel: file.neutralRel,
           providerId: adapter.id,
           localBytes,
           remoteBytes,
@@ -670,6 +688,7 @@ async function quarantineConflict(
   deps: EngineDeps,
   input: {
     logicalId: LogicalId;
+    neutralRel: string;
     providerId: string;
     localBytes: Uint8Array;
     remoteBytes: Uint8Array;
@@ -694,6 +713,7 @@ async function quarantineConflict(
   const dir = deps.joinPath(deps.replicaRoot, ...layout.dir);
   const meta = buildConflictMeta({
     logicalId: input.logicalId,
+    neutralRel: input.neutralRel,
     conflictId: id,
     localHash: input.localHash,
     remoteHash: input.remoteHash,

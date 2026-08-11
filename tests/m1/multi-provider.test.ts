@@ -123,3 +123,31 @@ describe("a second provider with a nested layout", () => {
     ).toBe('{"type":"session_meta"}\n');
   });
 });
+
+describe("a provider whose primary is not append-only jsonl", () => {
+  it("is skipped with a reason, not run through the jsonl decision table", async () => {
+    // §7.2b exists on paper only. Until it is implemented, an opaque primary
+    // must be refused out loud: the append-jsonl table would call any binary
+    // tail "truncated" and DEFER forever, then tell the user its last *record*
+    // is incomplete — about a file that has no records.
+    const { machine, root, adapter } = setup();
+    await machine.initialiseSyncDir();
+    const opaque = {
+      ...adapter,
+      classifyNeutral: (rel: string) => {
+        const classified = adapter.classifyNeutral(rel);
+        return classified === null ? null : { ...classified, mode: "opaque-file" as const };
+      },
+    };
+    await plantRemote(machine, NESTED_REL);
+
+    await machine.pass({ extraAdapters: [opaque] });
+    const report = await machine.pass({ extraAdapters: [opaque] });
+
+    const skipped = report.actions.find((a) => a.neutralRel === NESTED_REL);
+    expect(skipped?.result).toBe("SKIPPED_POLICY");
+    expect(skipped?.reason).toContain("unsupported-mode");
+    expect(report.notices.join(" ")).toContain("does not sync");
+    expect(await fsp.readdir(root).catch(() => [])).toEqual([]);
+  });
+});

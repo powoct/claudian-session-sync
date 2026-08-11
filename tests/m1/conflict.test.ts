@@ -127,6 +127,7 @@ describe("quarantine layout", () => {
 describe("conflict metadata carries no content", () => {
   const meta = buildConflictMeta({
     logicalId: SID,
+    neutralRel: `claude-code/${SID}.jsonl`,
     conflictId: "abcdef0123456789",
     localHash: HASH_A,
     remoteHash: HASH_B,
@@ -161,6 +162,7 @@ describe("conflict metadata carries no content", () => {
     expect(JSON.stringify(meta)).not.toMatch(/local|remote/i);
     const swapped = buildConflictMeta({
       logicalId: SID,
+      neutralRel: `claude-code/${SID}.jsonl`,
       conflictId: "abcdef0123456789",
       localHash: HASH_B,
       remoteHash: HASH_A,

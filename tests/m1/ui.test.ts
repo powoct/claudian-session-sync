@@ -335,6 +335,7 @@ describe("every refusal has a sentence, not a code", () => {
     logicalIdPrefix: "3f2504e0",
     detectedAt: "2026-08-08T00:00:00.000Z",
     directory: "/somewhere/.quarantine/ws/claude-code/abc123",
+    neutralRel: `claude-code/${"3f2504e0-4f89-41d3-9a0c-0305e82c3301"}.jsonl`,
     branches: [
       {
         hash: "sha256:aaaa",
