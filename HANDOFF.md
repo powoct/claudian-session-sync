@@ -19,7 +19,13 @@ ADR-42）、D-5（轮转补 pruned 索引行）；D-6 裁决为 by design 并改
 
 **下一步：在两台真机上做改名迁移（AGENTS.md §3 P0，mv 三个目录）后复验步骤 8
 的完整闭环**（分叉 → 双机各解决一次 → 收敛），顺带核对步骤 1 附加的 D-1 回归检查。
-其余八步无需重跑。
+其余八步无需重跑。复验由用户在真机执行，结果待回传。
+
+**调查 Claudian 机制的本地资源**：用户已把 Claudian fork 后 clone 到开发机的
+`~/projects/claudian/`（即 `/home/code-server/projects/claudian/`）。R-1（ai-title
+写 session 文件的行为）与 M2 的 `.claudian/sessions` provider 评估（写入模式：
+`conv-*.meta.json` / `.inputs.json` 是否改写、是否原子写）可以直接读源码求证，
+不必全靠真机黑盒探测。
 
 | 阶段 | 状态 | 产物 |
 |---|---|---|
