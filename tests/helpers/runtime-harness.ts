@@ -139,6 +139,15 @@ export class RuntimeHarness {
 
   /** Appends records the way the CLI does — always append, never rewrite. */
   async appendSession(sessionId: string, lines: number): Promise<void> {
+    // Admission is by the vault's Claudian records (ADR-47), so creating a
+    // session the way a Claudian conversation would means leaving one.
+    const store = path.join(this.vaultRoot, ".claudian", "sessions");
+    await fsp.mkdir(store, { recursive: true });
+    await fsp.writeFile(
+      path.join(store, `conv-fake-${sessionId}.meta.json`),
+      `${JSON.stringify({ id: `conv-fake-${sessionId}`, providerId: "claude", sessionId }, null, 2)}
+`,
+    );
     const target = path.join(this.projectDir, `${sessionId}.jsonl`);
     let text = "";
     const existing = await fsp.readFile(target, "utf8").catch(() => "");

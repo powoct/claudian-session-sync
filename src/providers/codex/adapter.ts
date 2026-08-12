@@ -33,7 +33,7 @@ import {
   isCodexSessionId,
   rolloutLogicalId,
 } from "./rollout-name";
-import { readVaultScope } from "./vault-scope";
+import { readVaultScope } from "../vault-scope";
 
 export const CODEX_PROVIDER_ID = "codex";
 

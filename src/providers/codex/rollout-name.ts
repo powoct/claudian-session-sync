@@ -45,14 +45,5 @@ export function rolloutLogicalId(name: string): LogicalId | null {
   return match ? (match[1] as LogicalId) : null;
 }
 
-/**
- * Is this a plausible Codex session id?
- *
- * Only ever used to filter ids read out of Claudian's vault store, which is a
- * file another program writes. The ids are matched against file *names*, never
- * joined into a path, but a store that has been edited by hand should not be
- * able to turn a listing into a wildcard either.
- */
-export function isCodexSessionId(value: unknown): value is string {
-  return typeof value === "string" && new RegExp(`^${UUID}$`).test(value);
-}
+/** Codex ids are the shared session-uuid shape; the check lives with the store reader. */
+export { isSessionUuid as isCodexSessionId } from "../vault-scope";

@@ -60,6 +60,9 @@ export const CLAUDE_CODE: ProviderDescriptor = {
   rootDescription:
     "Where the CLI keeps its per-project session directories. Override this if your " +
     "installation puts them elsewhere.",
+  scopeNote:
+    "Only conversations this vault has a Claudian record for are synced — a session started " +
+    "with a bare `claude` in a terminal is not, even inside this vault.",
   defaultRoot: (homedir, joinPath) => joinPath(homedir, ".claude", "projects"),
   create: (env) => createClaudeCodeAdapter(env),
 };

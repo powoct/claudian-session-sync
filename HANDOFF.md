@@ -199,13 +199,36 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
 | 4 | mode 守卫：primary mode ≠ `append-jsonl` ⇒ `SKIPPED_POLICY` + notice，不进 append-jsonl 决策表 | ✅ `03ad03e` |
 | 5 | 真机探测套件 `tmp/probe-m2/`（P1 Codex 布局 / P2 生命周期 / P3 vault 记录 / P4 Grok+Pi / P5 规模） | ✅ 已建，本机烟测通过 |
 
+**2026-08-12 追加批：记录准入推广为统一规则（ADR-47，用户拍板「M2 现在切」）**
+
+- **Claude Code 从「目录准入」切到「记录准入」**：`listSessions` 只列 vault 内
+  `.claudian/sessions/*.meta.json`（Claudian 拼法 `providerId:"claude"`）里出现的
+  sessionId。纯终端起的会话不再被准入；已同步的旧会话靠成员资格继续收敛（零迁移）。
+- **成员资格与准入分离已被测试钉住**（`043774c` + `multi-provider.test.ts`）：replica
+  里的文件无论 adapter 列不列都双向收敛——对端没有记录也能推回续写。这是整个模型的
+  承重墙，别拆。
+- **墓碑排除**：Claudian 的 markDeleted 只写 `<convId>.deleted.json`、meta 原地保留，
+  准入读取端按墓碑排除（两个 adapter 共用 `src/providers/vault-scope.ts`）。**只终止
+  准入，不删 sync-dir 副本**——删除传播仍是 ADR-10 排除项，M3 再议（复活竞态）。
+- 样本实证（用户提供，形状记录在 §6.4/ADR-46）：`sessionId` 可为 null（此时连
+  providerState 都没有，reader 天然跳过）；Claude 记录的 providerState 字段名是
+  `providerSessionId`（Codex 是 `threadId`），reader 三选一读取。
+- **两个测试 harness 现在自动种记录**：`FakeCli.session()` / `RuntimeHarness.appendSession`
+  = 「经 Claudian 发起的会话」；要造纯终端会话用 `FakeCli.terminalSession()`，删除用
+  `FakeCli.tombstone()`。**下次真机验收前剧本要改**：造会话一律改为在 Claudian 里发起
+  （两台机器都装了 Claudian，保真度反而更高）。
+- `.claudian/sessions` 本身的同步（对端 UI 入口那半）**M3 再做**：Obsidian Sync 官方
+  文档证实点目录一律不同步（除 `.obsidian`）；技术形状 = §7.2b opaque 模式，正好同批。
+
 **下一步**
 
 | # | 事项 | 前提 |
 |---|---|---|
 | 1 | **跑 `tmp/probe-m2/`**（两台机器）。P2 是 Codex 的**发布门禁**：不通过则 Codex 保持只读 | 拷套件到两台机器 |
 | 2 | 按探测结果回填 §6.1.1 的 Codex Tier、§16 的 OQ-7/OQ-11 | 1 |
-| 3 | M4：README（含 Claudian 共存说明：`.claudian/` / `.codex/agents` / `.pi` 别排除在 vault 同步之外；CLI 自己会追加 ai-title 元数据）、BRAT 发布 | 无（可并行） |
+| 3 | **验收剧本更新**：造会话步骤改为「经 Claudian 发起」（ADR-47 后 `claude -p` 造的会话不会被准入） | 下次真机验收前 |
+| 4 | M4：README（含 Claudian 共存说明：`.claudian/` / `.codex/agents` / `.pi` 别排除在 vault 同步之外；CLI 自己会追加 ai-title 元数据；准入 = Claudian 记录）、BRAT 发布 | 无（可并行） |
+| 5 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 

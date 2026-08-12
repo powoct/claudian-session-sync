@@ -6,10 +6,24 @@
  * and SIGKILL. Compact and fork both turned out to be physical appends that
  * keep the same file and sessionId, which is what makes prefix-safe merge
  * applicable at all.
+ *
+ * Since ADR-47, admission is by the vault's Claudian conversation records —
+ * the same rule as every provider — even though this provider's project
+ * directory already scopes storage to the vault. The directory answers "which
+ * machine directory belongs to this vault"; the records answer "which
+ * conversations does this vault's Claudian know about", and only the latter is
+ * this plugin's charter. A session someone starts with a bare `claude` in the
+ * vault directory is no longer admitted; anything already in the sync folder
+ * keeps converging regardless, because membership is the engine's replica
+ * walk, not this listing.
  */
 import type { LogicalId } from "../../domain/types";
 import { type ProviderAdapter, type SessionGroup, classifyFileName } from "../provider-adapter";
+import { isSessionUuid, readVaultScope } from "../vault-scope";
 import { escapeProjectPath } from "./path-escape";
+
+/** Claudian's name for this provider — not this plugin's (`claude-code`). */
+const CLAUDIAN_PROVIDER_ID = "claude";
 
 /** Lowercase UUID, matched as the leading segment (§6.3). */
 export const CLAUDE_LOGICAL_ID_PATTERN =
@@ -22,6 +36,8 @@ export interface ClaudeCodeAdapterDeps {
   readonly joinPath: (...parts: string[]) => string;
   readonly listDir: (path: string) => Promise<Array<{ name: string; isFile: boolean }>>;
   readonly statFile: (path: string) => Promise<{ mtimeMs: number } | null>;
+  /** For the vault's conversation records only — never for session bytes. */
+  readonly readTextFile: (path: string) => Promise<string | null>;
   /** Overrides the derived directory name; the `custom` escape strategy (§6.3). */
   readonly customDirName?: string;
 }
@@ -55,12 +71,20 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
 
     async healthCheck() {
       const dir = await deps.statFile(projectDir);
-      return dir === null
-        ? { ok: false, reason: "project directory not found" }
-        : { ok: true };
+      if (dir === null) return { ok: false, reason: "project directory not found" };
+      const scope = await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid);
+      if (!scope.storeFound) {
+        // What an unused provider looks like, said out loud — otherwise
+        // "syncs nothing" is indistinguishable from a broken install.
+        return { ok: false, reason: "no Claudian conversation records in this vault" };
+      }
+      return { ok: true };
     },
 
     async listSessions() {
+      const scope = await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid);
+      if (scope.sessionIds.size === 0) return [];
+
       const entries = await deps.listDir(projectDir).catch(() => []);
       const groups: SessionGroup[] = [];
 
@@ -68,6 +92,7 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
         if (!entry.isFile) continue; // `memory/` is a directory; F-7, not synced in M1
         const match = CLAUDE_LOGICAL_ID_PATTERN.exec(entry.name);
         if (!match || match.index !== 0 || entry.name !== `${match[0]}.jsonl`) continue;
+        if (!scope.sessionIds.has(match[0])) continue; // ADR-47: not this vault's conversation
 
         const absPath = deps.joinPath(projectDir, entry.name);
         const stat = await deps.statFile(absPath);

@@ -1,11 +1,14 @@
 /**
- * Which Codex sessions belong to *this* vault (architecture §6.4, OQ-11).
+ * Which sessions belong to *this* vault — every provider's admission list
+ * (architecture §6.2, ADR-46/47).
  *
- * Claude Code partitions its storage by project, so "sessions of this vault"
- * is a directory. Codex does not: `~/.codex/sessions` is one global tree for
- * every project on the machine. Enabling the provider without an answer to
- * this would push every Codex conversation the user has ever had into this
- * vault's workspace subtree — a privacy problem, not a tidiness one.
+ * This began as Codex's problem: `~/.codex/sessions` is one global tree for
+ * every project on the machine, so without a scoping rule, enabling the
+ * provider would push every Codex conversation the user ever had into this
+ * vault's workspace — a privacy problem, not a tidiness one. ADR-47 then made
+ * the same rule the admission model for *all* providers, because a plugin
+ * named Claudian Session Sync should sync Claudian's conversations, and
+ * because one scoping story is one README section instead of two.
  *
  * The answer is already in the vault. Claudian keeps one metadata file per
  * conversation under `<vault>/.claudian/sessions/`, each recording the
@@ -13,6 +16,14 @@
  * the vault, every conversation listed there belongs to this vault by
  * construction. No heuristic, no reading of session content, no guessing from
  * a `cwd` field.
+ *
+ * Admission is all this decides. What may *enter* the sync folder is scoped
+ * here; what keeps converging once there is the engine's replica walk, which
+ * compares both sides of every replica file whether or not any adapter lists
+ * it. The split is load-bearing: the machine that pulled a session may never
+ * hold its conversation record (Obsidian Sync does not carry dotfolders), and
+ * if membership depended on this lookup, that machine's extensions would
+ * silently never push back.
  *
  * Three deliberate limits:
  *
@@ -23,11 +34,26 @@
  * - **Fail closed.** A missing, unreadable or unrecognised store yields an
  *   empty set, which syncs nothing. The failure mode of this lookup must be
  *   "too few sessions", never "everything on this machine".
- * - **Coverage is what Claudian knows about.** A Codex session started in a
- *   terminal has no conversation file here and will not sync. That is the
+ * - **Coverage is what Claudian knows about.** A session started in a plain
+ *   terminal has no conversation file here and is not admitted. That is the
  *   right scope for this plugin, and it belongs in the README rather than in
  *   a workaround.
  */
+
+/** Lowercase UUID — the shape every measured provider uses for session ids. */
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Is this a plausible session id?
+ *
+ * Only ever used to filter ids read out of Claudian's vault store, which is a
+ * file another program writes. The ids are matched against file *names*, never
+ * joined into a path, but a store that has been edited by hand should not be
+ * able to turn a listing into a wildcard either.
+ */
+export function isSessionUuid(value: unknown): value is string {
+  return typeof value === "string" && SESSION_UUID.test(value);
+}
 
 /** Current location, and the one Claudian migrated from. */
 const STORE_DIRS = [
@@ -36,6 +62,16 @@ const STORE_DIRS = [
 ] as const;
 
 const META_SUFFIX = ".meta.json";
+/**
+ * Claudian's deletion is a tombstone, not a removal: `markDeleted` writes
+ * `<convId>.deleted.json` and leaves the meta file where it was, and
+ * Claudian's own scan filters by the tombstones. Admission does the same —
+ * a deleted conversation stops being admitted. Nothing is removed from the
+ * sync folder here: that would be deletion propagation, which stays out of
+ * scope until it has a design of its own (ADR-10; the resurrection race is
+ * real — the other machine may still be extending its copy).
+ */
+const TOMBSTONE_SUFFIX = ".deleted.json";
 
 export interface VaultScopeDeps {
   readonly vaultRealPath: string;
@@ -72,8 +108,15 @@ export async function readVaultScope(
     if (entries.length === 0) continue;
     storeFound = true;
 
+    const tombstoned = new Set(
+      entries
+        .filter((entry) => entry.isFile && entry.name.endsWith(TOMBSTONE_SUFFIX))
+        .map((entry) => entry.name.slice(0, -TOMBSTONE_SUFFIX.length)),
+    );
+
     for (const entry of entries) {
       if (!entry.isFile || !entry.name.endsWith(META_SUFFIX)) continue;
+      if (tombstoned.has(entry.name.slice(0, -META_SUFFIX.length))) continue;
       const text = await deps.readTextFile(deps.joinPath(dir, entry.name));
       if (text === null) continue;
       const id = sessionIdOf(text, providerId, accept);
@@ -87,10 +130,17 @@ export async function readVaultScope(
 /**
  * One conversation file → its provider session id, if it is this provider's.
  *
- * Two places carry the id — the top-level `sessionId` and
- * `providerState.threadId` — and the sample from a real vault has them equal.
- * Both are read because a file mid-write may have one and not the other, and
- * neither is worth failing over.
+ * `providerId` here is **Claudian's** id for the provider, which is not always
+ * this plugin's: Claudian says `"claude"` where this plugin says
+ * `"claude-code"` (`codex`/`grok`/`pi` agree). Each adapter passes the
+ * Claudian spelling.
+ *
+ * Three places can carry the id — top-level `sessionId`,
+ * `providerState.threadId` (Codex) and `providerState.providerSessionId`
+ * (Claude) — and real samples have them equal where present. All are read
+ * because a conversation that has not had its first turn yet carries
+ * `sessionId: null` and no providerState at all (measured 2026-08-12), and a
+ * file mid-rewrite may have one field and not another.
  */
 function sessionIdOf(
   text: string,
@@ -114,7 +164,7 @@ function sessionIdOf(
   const state = typeof record.providerState === "object" && record.providerState !== null
     ? (record.providerState as Record<string, unknown>)
     : {};
-  for (const candidate of [record.sessionId, state.threadId]) {
+  for (const candidate of [record.sessionId, state.threadId, state.providerSessionId]) {
     if (accept(candidate)) return candidate;
   }
   return null;

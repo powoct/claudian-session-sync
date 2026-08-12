@@ -135,6 +135,34 @@ describe("which sessions belong to this vault (OQ-11)", () => {
     expect((await adapter.listSessions()).map((g) => g.logicalId)).toEqual([SID]);
   });
 
+  it("skips a conversation that has not had its first turn yet", async () => {
+    // Measured 2026-08-12: before the first turn, `sessionId` is null and
+    // there is no providerState at all. Nothing to find, nothing to sync —
+    // and nothing to fail over either.
+    const { adapter, storeDir, plant } = await world({ recorded: [SID] });
+    await fsp.writeFile(
+      path.join(storeDir, "conv-unstarted.meta.json"),
+      JSON.stringify({ id: "conv-unstarted", providerId: "codex", sessionId: null }),
+    );
+    await plant(SID);
+
+    expect((await adapter.listSessions()).map((g) => g.logicalId)).toEqual([SID]);
+  });
+
+  it("stops admitting a tombstoned conversation", async () => {
+    // Claudian's markDeleted writes `<convId>.deleted.json` and leaves the
+    // meta file in place, so admission has to check the marker, exactly as
+    // Claudian's own scan does.
+    const { adapter, storeDir, plant } = await world({ recorded: [SID] });
+    await fsp.writeFile(
+      path.join(storeDir, "conv-178642268780-abc.deleted.json"),
+      JSON.stringify({ schemaVersion: 1, conversationId: "conv-178642268780-abc", deletedAt: 1 }),
+    );
+    await plant(SID);
+
+    expect(await adapter.listSessions()).toEqual([]);
+  });
+
   it("refuses an id that is not a session id shape", async () => {
     const { adapter, storeDir, plant } = await world({ recorded: [] });
     await fsp.writeFile(

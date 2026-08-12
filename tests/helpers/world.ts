@@ -13,7 +13,7 @@
  * and case sensitivity stay honest.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, promises as fsp } from "node:fs";
+import { existsSync, mkdirSync, promises as fsp, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { LogicalId, SafeAbsolutePath } from "../../src/domain/types";
 import {
@@ -223,7 +223,7 @@ export class Machine {
       mkdirSync(dir, { recursive: true });
     }
     mkdirSync(path.join(this.replicaRoot, WORKSPACE_ID, "claude-code"), { recursive: true });
-    this.cli = new FakeCli(this.projectDir);
+    this.cli = new FakeCli(this.projectDir, path.join(this.vaultPath, ".claudian", "sessions"));
   }
 
   setClock(ms: number): void {
@@ -539,6 +539,7 @@ export class Machine {
         const st = await fsp.stat(target).catch(() => null);
         return st ? { mtimeMs: st.mtimeMs } : null;
       },
+      readTextFile: async (target) => fsp.readFile(target, "utf8").catch(() => null),
     });
   }
 
@@ -641,12 +642,49 @@ export class Machine {
   }
 }
 
-/** Stands in for the real CLI writing session files. */
+/**
+ * Stands in for the CLI writing session files — as driven by Claudian.
+ *
+ * "As driven by Claudian" is load-bearing since ADR-47: admission is by the
+ * vault's conversation records, so `session()` plants one, the way starting a
+ * conversation in Claudian does. A session with no record — a bare terminal
+ * one — is a different thing with different sync behaviour, and gets its own
+ * method so a test says which one it means.
+ */
 export class FakeCli {
-  constructor(private readonly projectDir: string) {}
+  constructor(
+    private readonly projectDir: string,
+    private readonly claudianStore: string,
+  ) {}
 
   session(id: string): FakeSession {
+    mkdirSync(this.claudianStore, { recursive: true });
+    const record = path.join(this.claudianStore, `conv-fake-${id}.meta.json`);
+    if (!existsSync(record)) {
+      // Claudian's shape, measured 2026-08-12: its provider id is "claude",
+      // not this plugin's "claude-code".
+      writeFileSync(
+        record,
+        `${JSON.stringify({ id: `conv-fake-${id}`, providerId: "claude", sessionId: id }, null, 2)}
+`,
+      );
+    }
     return new FakeSession(path.join(this.projectDir, `${id}.jsonl`));
+  }
+
+  /** The same file with no Claudian record — what a bare `claude` run leaves. */
+  terminalSession(id: string): FakeSession {
+    return new FakeSession(path.join(this.projectDir, `${id}.jsonl`));
+  }
+
+  /** Marks the conversation deleted, the way Claudian's markDeleted does. */
+  tombstone(id: string): void {
+    mkdirSync(this.claudianStore, { recursive: true });
+    writeFileSync(
+      path.join(this.claudianStore, `conv-fake-${id}.deleted.json`),
+      `${JSON.stringify({ schemaVersion: 1, conversationId: `conv-fake-${id}`, deletedAt: 0 }, null, 2)}
+`,
+    );
   }
 
   async list(): Promise<string[]> {

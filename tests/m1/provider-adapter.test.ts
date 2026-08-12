@@ -65,7 +65,22 @@ describe("claude-code adapter", () => {
     providerRoot: "/home/testuser/.claude/projects",
     vaultRealPath: "/home/testuser/vault",
     joinPath: (...parts: string[]) => parts.join("/"),
+    readTextFile: async () => null,
   };
+
+  const STORE = "/home/testuser/vault/.claudian/sessions";
+  /** A vault whose Claudian knows exactly the given session ids. */
+  const vaultWith = (ids: readonly string[]) => ({
+    listDir: async (dir: string) =>
+      dir === STORE
+        ? ids.map((_id, i) => ({ name: `conv-${i}.meta.json`, isFile: true }))
+        : [],
+    readTextFile: async (target: string) => {
+      const index = /conv-(\d+)\.meta\.json$/.exec(target);
+      const id = index ? ids[Number(index[1])] : undefined;
+      return id === undefined ? null : JSON.stringify({ providerId: "claude", sessionId: id });
+    },
+  });
 
   it("derives the project directory from the escape rule", () => {
     expect(claudeCodeProjectDir(deps)).toBe(
@@ -89,20 +104,57 @@ describe("claude-code adapter", () => {
   });
 
   it("lists only files whose name is exactly <uuid>.jsonl", async () => {
+    const vault = vaultWith([SID]);
     const adapter = createClaudeCodeAdapter({
       ...deps,
-      listDir: async () => [
-        { name: `${SID}.jsonl`, isFile: true },
-        { name: `${SID}.jsonl.bak`, isFile: true },
-        { name: "memory", isFile: false }, // F-7: a real subdirectory, not synced in M1
-        { name: "notes.jsonl", isFile: true },
-      ],
+      ...vault,
+      listDir: async (dir: string) =>
+        dir === STORE
+          ? vault.listDir(dir)
+          : [
+              { name: `${SID}.jsonl`, isFile: true },
+              { name: `${SID}.jsonl.bak`, isFile: true },
+              { name: "memory", isFile: false }, // F-7: a real subdirectory, not synced in M1
+              { name: "notes.jsonl", isFile: true },
+            ],
       statFile: async () => ({ mtimeMs: 1 }),
     });
 
     const sessions = await adapter.listSessions();
     expect(sessions.map((s) => s.logicalId)).toEqual([SID]);
     expect(sessions[0]?.files[0]?.neutralRel).toBe(`claude-code/${SID}.jsonl`);
+  });
+
+  it("admits only sessions this vault has a Claudian record for (ADR-47)", async () => {
+    const other = "9a1b2c3d-4e5f-4a1b-8c2d-3e4f5a6b7c8d"; // a bare-terminal session
+    const vault = vaultWith([SID]);
+    const adapter = createClaudeCodeAdapter({
+      ...deps,
+      ...vault,
+      listDir: async (dir: string) =>
+        dir === STORE
+          ? vault.listDir(dir)
+          : [
+              { name: `${SID}.jsonl`, isFile: true },
+              { name: `${other}.jsonl`, isFile: true },
+            ],
+      statFile: async () => ({ mtimeMs: 1 }),
+    });
+
+    expect((await adapter.listSessions()).map((s) => s.logicalId)).toEqual([SID]);
+  });
+
+  it("says out loud when the vault has no Claudian records at all", async () => {
+    // Same message as Codex: "syncs nothing" must be tellable from "broken".
+    const adapter = createClaudeCodeAdapter({
+      ...deps,
+      listDir: async () => [],
+      statFile: async () => ({ mtimeMs: 1 }),
+    });
+    expect(await adapter.healthCheck()).toMatchObject({
+      ok: false,
+      reason: "no Claudian conversation records in this vault",
+    });
   });
 
   it("is Tier A, which OQ-8 measured rather than assumed", async () => {

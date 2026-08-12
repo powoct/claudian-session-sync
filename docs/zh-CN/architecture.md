@@ -457,7 +457,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 
 | Provider | 当前状态 | 目标 Tier | 阻塞 Spike |
 |---|---|---|---|
-| **Claude Code** | **Tier A ✅**（OQ-8 双平台 PASS：compact / fork / retry / 强杀 / 跨版本全部为严格追加，见 [findings](./findings/2026-08-06-spike-conclusions.md)；实测版本 2.1.211–2.1.223） | A | 无（发布阻塞已解除） |
+| **Claude Code** | **Tier A ✅**（OQ-8 双平台 PASS；**准入自 ADR-47 起按 vault 记录**：compact / fork / retry / 强杀 / 跨版本全部为严格追加，见 [findings](./findings/2026-08-06-spike-conclusions.md)；实测版本 2.1.211–2.1.223） | A | 无（发布阻塞已解除） |
 | **Codex** | **Tier C，只读**；**Tier A 候选**（OQ-2 已有结论 ✅：0.146.0 靠扫目录发现 session，只拷 rollout 即可见；rollout 严格 append-only 已实证一轮。待 M2 实现 adapter 后晋级） | A（原目标 B，实测后上调） | **OQ-11（workspace 归属，M2 阻塞）**；跨版本与 Windows 侧 append-only 复测 |
 | **OpenCode** | **Tier C，且无升级路径** ❌ —— 2026-08-12 源码调查确证：会话全部存在**单个 SQLite `opencode.db`** 里，provider 目录内不存在任何 per-session 文件，也没有官方 export/import 子命令（[findings](./findings/2026-08-12-claudian-source-survey.md) §3） | 无（结构上不适用，非"未验证"） | 无——再多探测也不会改变结论 |
 | **Grok / Pi** | Tier C，只读（存储结构已由源码摸清，**生命周期仍未实测**，见 OQ-6 与 [findings 2026-08-12](./findings/2026-08-12-claudian-source-survey.md) §5） | 均为 Tier A 候选：Grok 每 session 一个目录（父目录名是本机 cwd 的 urlencode，跨机需重算）；Pi 每 session 一个 jsonl（头部内嵌绝对路径，fork 指向源文件绝对路径） | OQ-6（M3） |
@@ -583,6 +583,11 @@ interface ProviderAdapter {
 `healthCheck` 是版本容错的抓手：CLI 升级导致结构变化时，它应**明确报"结构不认识，本 provider 本次跳过"**，而不是让主流程用旧假设去写文件。
 
 ### 6.3 Claude Code adapter（Tier A ✅，M1 主线）
+
+> **准入自 ADR-47 起按 vault 记录**：`listSessions` 只列出 vault 内 Claudian 会话记录
+> （`providerId: "claude"`，注意是 Claudian 的拼法）中出现的 sessionId，纯终端在 vault
+> 目录下起的会话不再被准入。项目目录仍负责「本机落位在哪」；记录负责「哪些对话属于
+> 这个 vault 的 Claudian」。已在 sync-dir 里的会话不受影响（成员资格由引擎维持）。
 
 实测结构 ✅（开发机 Claude Code 2.1.222）：
 
@@ -1865,6 +1870,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 44 | 解决命令区分「瞬时读不到」与「状态变了」（条目查找立即重试一次；kept 侧读不到 → `kept-unreadable`，文案指示几秒后重试；`unknown-conflict` 不断言已解决）；冲突计数为**粘性集合**：CONFLICT 加入，等量 NOOP / 覆盖落地 / 本机 resolve 成功移除，DEFER 不动 | 把读失败并入 branch-moved / unknown-conflict；计数只看最近一次 pass 报告 | 步骤 8 复验实测（findings 2026-08-11 R2-1）：同步工具对刚搬运/刚写入的文件持有瞬时锁，resolve 在 backup 前失败早退，而旧文案把它说成「已解决」或「状态变了」——用户把空操作当成功；同时 DEFER 观察轮不产生 CONFLICT 动作，只看单轮报告的计数在分歧仍在时归零，状态栏说谎。粘性集合让「不知道」不清零，只有一手证据才清零 |
 | 45 | §8.2 第 1 层白名单在**远端侧**由 `ProviderAdapter.classifyNeutral(neutralRel)` 执行，返回 `null` 即"不是 session"；被拒文件进 `PassReport.unknownFiles`（含第 2/3 层分类）并**原地不动**；远端列举改为按 adapter 归属的递归遍历 | 沿用"replica 里有文件就当 session"（隐式） | 本地侧的白名单是**结构性**的（adapter 只列它认识的名字），远端侧没有任何东西替代它——实测 Syncthing 的 `.sync-conflict-…`、英文区 Dropbox 的 `(conflicted copy …)`、OneDrive 的 `-<hostname>` 三种成品副本全部被拉进 CLI 目录（2026-08-12 复现）。2026-08-10 验收没暴露它，只因为 Dropbox 当时写的是中文名、被 `SEGMENT_CHARSET` 挡下——那是运气不是边界。同一处的另两个错误只有第二个 adapter 存在时才发作：远端文件一律归给 `adapters[0]`（跨 provider 误写），以及远端只列一层目录（日期分层的 provider 完全不可见） |
 | 46 | **Codex 的 workspace 归属由 vault 内 Claudian 的会话记录决定**：只读 `<vault>/.claudian/sessions/*.meta.json`（旧版 `.claude/sessions/`），取 `providerId === "codex"` 的 `sessionId`，再用尾部匹配 `-<id>.jsonl` 在本机 `<CODEX_HOME>/sessions` 定位；**只取 id,绝不使用文件里的绝对路径**。归属只作用于 push 侧,`classifyNeutral`（pull 侧）只校形状 | (a) 读 rollout 首行 `session_meta.payload.cwd` 过滤 ／ (b) 设置里让用户勾选项目白名单 ／ (c) 全同步 + 告知 | `~/.codex/sessions/` 是全局目录,(c) 会把本机**所有**项目的 Codex 对话推进这个 vault 的子树——隐私问题,不是整洁问题。(a) 要求 adapter 在**发现阶段读文件内容**（现有 `listSessions` 没有这个形状）,且 cwd 稳定性未实测。(b) 要 UI 与本机状态,新项目还得手动加。而 `.claudian/sessions/` **就在 vault 里**,"哪些会话属于这个 vault"这个问题它本身就是答案——零猜测、零内容读取。代价是只覆盖经 Claudian 建的会话（纯终端起的 codex 会话不同步）,这对本插件的定位是正确取舍,写进 README。失败一律 fail closed（无 store／无记录／读不动／id 形状不对 ⇒ 什么都不同步）。副作用:OQ-12 一并解开——vault 侧那半份元数据随 vault 同步过去,rollout 由本插件送到,两半齐了 Claudian UI 就有入口 |
+| 47 | **记录准入推广为全 provider 的统一规则（control list）**：所有 provider 的「准入」（什么能进入 sync-dir）都由 vault 内 Claudian 会话记录决定——Claude Code 也从「目录准入」切到「记录准入」。三条配套语义：① **准入 ≠ 成员资格**——已在 sync-dir 里的会话由引擎的 replica 遍历维持双向收敛，与 adapter 列不列它无关（对端 vault 可能永远没有那份记录：Obsidian Sync 不带点目录）；② Claudian 的删除是墓碑（`<convId>.deleted.json`，meta 原地保留），准入读取端必须同样按墓碑排除，否则已删除会话永远被准入；③ **墓碑只终止准入，不删 sync-dir 副本**——删除传播维持 ADR-10 的排除（复活竞态：对端仍在续写时，删掉的副本会被 PUSH_NEW 复活；需要 replica 侧墓碑设计，M3） | (a) Claude Code 维持目录准入（两种模型并存） ／ (b) manifest 加 `claudianConvId` 作控制清单 | (a) 两套准入模型 = 两套 README 说明 + provider 间同步范围不一致，与「共用逻辑、未来并入 Claudian」的方向相悖；且目录准入会把纯终端会话也同步——超出本插件「Claudian 的会话」的定位。(b) manifest 是 hint-only（EV-1/ADR-12），结构上不允许承担控制职责；而成员资格是结构性的——「文件在 replica 里」本身就是成员清单。迁移平滑：已同步的旧会话（含终端起的）靠成员资格继续收敛，只有**新的**终端会话不再被准入。代价：验收剧本造会话的方式要改为「经 Claudian 发起」（或种记录）；每轮 pass 多一次记录目录扫描（小 JSON，OQ-7 一并评估） |
 
 ---
 
