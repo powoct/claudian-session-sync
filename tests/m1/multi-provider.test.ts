@@ -151,3 +151,35 @@ describe("a provider whose primary is not append-only jsonl", () => {
     expect(await fsp.readdir(root).catch(() => [])).toEqual([]);
   });
 });
+
+describe("admission versus membership", () => {
+  it("keeps syncing a session the adapter no longer lists, via its replica presence", async () => {
+    // The distinction the record-scoped model rests on. *Admission* — what may
+    // enter the sync folder — is the adapter's listing, scoped to this vault's
+    // records. *Membership* — what keeps converging once admitted — must not
+    // be: the machine that pulled a session has no record for it (its vault
+    // may never carry one), and if membership depended on the listing, that
+    // machine's extensions would silently never push back.
+    const { machine, root, adapter } = setup();
+    await machine.initialiseSyncDir();
+
+    // In the replica: the session as the other machine pushed it.
+    const target = await plantRemote(machine, NESTED_REL);
+    // Locally: the same bytes plus one appended turn — and an adapter that
+    // does not list it, as a record-less machine's would not.
+    const local = path.join(root, "2026", "08", "06", ROLLOUT);
+    await fsp.mkdir(path.dirname(local), { recursive: true });
+    await fsp.writeFile(local, '{"type":"session_meta"}\n{"type":"user"}\n{"type":"turn"}\n');
+    const silent = { ...adapter, listSessions: async () => [] };
+
+    await machine.pass({ extraAdapters: [silent] });
+    const report = await machine.pass({ extraAdapters: [silent] });
+
+    const action = report.actions.find((a) => a.neutralRel === NESTED_REL);
+    expect(action?.action).toBe("PUSH_OVERWRITE");
+    expect(action?.result).toBe("APPLIED");
+    expect(await fsp.readFile(target, "utf8")).toBe(
+      '{"type":"session_meta"}\n{"type":"user"}\n{"type":"turn"}\n',
+    );
+  });
+});
