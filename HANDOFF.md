@@ -250,7 +250,7 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 |---|---|---|
 | 1 | **M4**:README(Claudian 共存说明;准入 = Claudian 记录;**无 sessionId 的旧记录不同步**;`maxFileSizeMB` 默认 64,旧 vault 存的 20 要手动调)、BRAT 发布 | 无(已解除阻塞) |
 | 2 | **验收剧本更新 + M4 验收**:造会话改为「经 Claudian 发起」;**新增 Codex 跨机 resume 一轮**(通过后摘掉 experimental);观察项:resume 用过 subagent 的 Codex 会话 | M4 |
-| 3 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性 | M3 |
+| 3 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性（含 review/5 M2-5：mode 守卫从逐 primary 提为逐 group——aux 与 primary 的 mode 可能不同,整组 DEFER 而非逐文件跳过） | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 

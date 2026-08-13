@@ -15,6 +15,7 @@ import { createCodexAdapter } from "../../src/providers/codex/adapter";
 import { rolloutLogicalId, isCodexSessionId } from "../../src/providers/codex/rollout-name";
 import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 import { World, WORKSPACE_ID } from "../helpers/world";
+import { parseNeutralRel } from "../../src/domain/path-safety";
 
 const SID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const OTHER = "9a1b2c3d-4e5f-4a1b-8c2d-3e4f5a6b7c8d";
@@ -195,9 +196,23 @@ describe("the shape of a Codex session", () => {
 
   it("takes the id from the tail of the name, whatever the prefix is", () => {
     expect(rolloutLogicalId(`rollout-2026-08-06T12-43-59-${SID}.jsonl`)).toBe(SID);
+    // Prefix tolerance is deliberate and includes shapes that could never
+    // sync anyway: a colon-bearing name passes HERE because this regex is not
+    // the path-safety layer — parseNeutralRel rejects it downstream (the
+    // domain test next to it pins that), and being lenient about the prefix
+    // is what survives an upstream timestamp-format change.
     expect(rolloutLogicalId(`rollout-2026-08-06T12:43:59.123Z-${SID}.jsonl`)).toBe(SID);
     expect(rolloutLogicalId(`somethingelse-${SID}.jsonl`)).toBe(SID);
     expect(rolloutLogicalId(`${SID}.jsonl`)).toBe(SID);
+  });
+
+  it("a colon-bearing name is stopped by path safety, not by this regex", () => {
+    // The layering the tolerance above relies on. If parseNeutralRel ever
+    // stopped rejecting colons, the lenient prefix would become load-bearing
+    // — this is the assertion that turns red first.
+    const rel = `codex/2026/08/06/rollout-2026-08-06T12:43:59.123Z-${SID}.jsonl`;
+    const parsed = parseNeutralRel(rel);
+    expect(parsed.ok).toBe(false);
   });
 
   it.each([

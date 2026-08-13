@@ -89,3 +89,26 @@ describe("admission by Claudian record (claude-code)", () => {
     expect(pulled?.result).toBe("APPLIED");
   });
 });
+
+describe("tombstones are matched by name, never parsed", () => {
+  it("a torn half-written tombstone still ends admission", async () => {
+    // Claudian rewrites these files wholesale, so catching one mid-write is a
+    // real state, not a hypothesis. Termination must not depend on the
+    // marker's *content* being readable — the marker existing is the fact.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    await fsp.writeFile(
+      path.join(machine.vaultPath, ".claudian", "sessions", `conv-fake-${SID}.deleted.json`),
+      "{", // torn: not valid JSON
+    );
+
+    await machine.pass();
+    const report = await machine.pass();
+
+    expect(report.actions.filter((a) => a.result === "APPLIED")).toEqual([]);
+    const replica = path.join(machine.replicaRoot, WORKSPACE_ID, "claude-code");
+    expect(await fsp.readdir(replica).catch(() => [])).toEqual([]);
+  });
+});

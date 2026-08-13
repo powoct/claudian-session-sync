@@ -12,6 +12,12 @@
  *
  * Bare `<uuid>.jsonl` is accepted too: it is the first thing Claudian looks
  * for, so it is a shape the CLI is known to produce.
+ *
+ * These patterns are NOT the path-safety layer. A name they accept still goes
+ * through `parseNeutralRel` and the write-path mint before any byte moves —
+ * a colon-bearing timestamp, for instance, passes here and is refused there.
+ * Keeping the prefix lenient is what survives an upstream format change;
+ * keeping path safety elsewhere is what makes that leniency free.
  */
 import type { LogicalId } from "../../domain/types";
 

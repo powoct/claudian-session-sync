@@ -183,3 +183,27 @@ describe("admission versus membership", () => {
     );
   });
 });
+
+describe("a provider this build does not ship", () => {
+  it("has its replica subtree left entirely alone", async () => {
+    // OpenCode is structurally excluded (§6.1.1) and Grok/Pi wait for M3, but
+    // a replica written by some future build may hold their subtrees today.
+    // The listing walks registered adapters' subtrees only, so these files
+    // must produce no actions and no writes — this test is green now and
+    // turns red the day someone registers a third adapter whose
+    // classifyNeutral is loose enough to claim a foreign subtree.
+    const { machine, root, adapter } = setup();
+    await machine.initialiseSyncDir();
+    await plantRemote(machine, "opencode/ses_0199.json");
+    await plantRemote(machine, `grok/2026/08/06/${ROLLOUT}`);
+    await plantRemote(machine, `pi/2026-08-06T12-43-59_${SID}.jsonl`);
+
+    await machine.pass({ extraAdapters: [adapter] });
+    const report = await machine.pass({ extraAdapters: [adapter] });
+
+    expect(report.actions).toEqual([]);
+    expect(report.unknownFiles).toEqual([]);
+    expect(await machine.cli.list()).toEqual([]);
+    expect(await fsp.readdir(root).catch(() => [])).toEqual([]);
+  });
+});
