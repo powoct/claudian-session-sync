@@ -45,7 +45,11 @@ export interface PortableSettings {
 const BOUNDS = {
   autoIntervalMinutes: { min: 0, max: 24 * 60, fallback: 5 },
   backupKeep: { min: 1, max: 20, fallback: 3 },
-  maxFileSizeMB: { min: 1, max: 512, fallback: 20 },
+  // 64, not 20: the 2026-08-13 probe measured a routine Codex rollout at
+  // 23 MiB, which the old default silently benched with SKIP_TOO_LARGE. The
+  // cap exists to keep a pass from choking on a pathological file, so it
+  // wants headroom over the largest *ordinary* one, not a tight fit.
+  maxFileSizeMB: { min: 1, max: 512, fallback: 64 },
   maxFilesPerPass: { min: 1, max: 5000, fallback: 200 },
   probeDelayMs: { min: 0, max: 60_000, fallback: 400 },
   localQuietMs: { min: 0, max: 600_000, fallback: 3_000 },

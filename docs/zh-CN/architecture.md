@@ -458,9 +458,9 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 | Provider | 当前状态 | 目标 Tier | 阻塞 Spike |
 |---|---|---|---|
 | **Claude Code** | **Tier A ✅**（OQ-8 双平台 PASS；**准入自 ADR-47 起按 vault 记录**：compact / fork / retry / 强杀 / 跨版本全部为严格追加，见 [findings](./findings/2026-08-06-spike-conclusions.md)；实测版本 2.1.211–2.1.223） | A | 无（发布阻塞已解除） |
-| **Codex** | **Tier C，只读**；**Tier A 候选**（OQ-2 已有结论 ✅：0.146.0 靠扫目录发现 session，只拷 rollout 即可见；rollout 严格 append-only 已实证一轮。待 M2 实现 adapter 后晋级） | A（原目标 B，实测后上调） | **OQ-11（workspace 归属，M2 阻塞）**；跨版本与 Windows 侧 append-only 复测 |
+| **Codex** | **Tier A ✅（附一条尾巴）**：2026-08-13 双平台探测(0.146.0/0.146.1)PREFIX_VIOLATION 0——exec 新建/resume/强杀/杀后恢复/静置全部严格追加,fork 开新文件不动源,只读 resume 零写入,文件名全程不变([findings](./findings/2026-08-13-m2-probe.md))。**唯 compact 双平台都没有非交互入口,未测(OQ-13,发布阻塞)**;adapter 保持 experimental + 默认关闭直到补测 | A | **OQ-13**:人工 TUI `/compact` 补测(约 5 分钟) |
 | **OpenCode** | **Tier C，且无升级路径** ❌ —— 2026-08-12 源码调查确证：会话全部存在**单个 SQLite `opencode.db`** 里，provider 目录内不存在任何 per-session 文件，也没有官方 export/import 子命令（[findings](./findings/2026-08-12-claudian-source-survey.md) §3） | 无（结构上不适用，非"未验证"） | 无——再多探测也不会改变结论 |
-| **Grok / Pi** | Tier C，只读（存储结构已由源码摸清，**生命周期仍未实测**，见 OQ-6 与 [findings 2026-08-12](./findings/2026-08-12-claudian-source-survey.md) §5） | 均为 Tier A 候选：Grok 每 session 一个目录（父目录名是本机 cwd 的 urlencode，跨机需重算）；Pi 每 session 一个 jsonl（头部内嵌绝对路径，fork 指向源文件绝对路径） | OQ-6（M3） |
+| **Grok / Pi** | Tier C，只读。Grok 结构已双平台实测(2026-08-13):每 session 一个目录、**10+ 个文件 + 4 对 `.lock`**,父目录名 = urlencode(cwd)——**多文件 group + 锁文件**,比源码调查显示的更复杂,需 §6.6 group 原子性;Pi 两台机器均「装了但无数据」,结构未确认 | Grok 需先做 group 原子性(M3);Pi 待有数据再测 | OQ-6（M3） |
 
 **"Tier A 候选"档位的历史记录**（Claude Code 已于 2026-08-06 通过 OQ-8 晋级，此机制保留给未来的 provider）：候选档位 = 按 Tier A 语义开发，但 UI 标「实验性 · 生命周期未验证」、首次启用强制 dry-run 确认、**对应生命周期 Spike 未通过不发布**。门禁设在**发布时点**而非开发时点——用户拿不到未验证的写入行为，风险控制等价，但不阻塞工程推进（对审核 4.9 的修改采纳，理由见 [testing.md 附录 A](./testing.md)）。
 
@@ -672,6 +672,8 @@ interface ProviderAdapter {
 | `<codexHome>/memories` 被 Claudian 列为 CLI 的可写沙箱根 | 语义未知，**一律排除**：不同步、不读、不备份 |
 | Claudian 对 `~/.codex` **全程只读**（唯二写入在 `os.tmpdir()`） | Codex 的并发模型与 Claude Code 同形：本机唯一写者是 CLI 进程 |
 | resume 只传 `threadId`，路径由服务端返回 | 落位必须落进 CLI 自己能找到的相对位置；「字节对、目录错」= 静默 resume 失败 |
+
+**2026-08-13 双平台探测的增补**（[findings](./findings/2026-08-13-m2-probe.md)）：文件名形态实测**只有一种**且冒号/非 ASCII 为零（字符集规则不会拒收）;目录严格 `YYYY/MM/DD`;只读 resume **零写入**（与 Claude Code 的 F-2 相反,剧本不要互相套用）;**subagent 线程的 rollout 落在同一 sessions/ 树**（首行带 `source.subagent.thread_spawn`）——记录准入下不同步,跨机 resume 用过 subagent 的会话时子线程历史在对端缺失,列为验收观察项。
 
 **OQ-11（workspace 归属）已决，见 ADR-46**：归属源是 vault 内 Claudian 的会话记录
 `<vault>/.claudian/sessions/*.meta.json`（旧版 `.claude/sessions/`）。实测样本（2026-08-12，
@@ -1607,7 +1609,7 @@ interface PortableSettings {
   };
   backup: { keep: number };            // 3，范围 1..20，**无 enabled**
   limits: {
-    maxFileSizeMB: number;             // 20
+    maxFileSizeMB: number;             // 64（2026-08-13 实测 Codex 常规 rollout 达 23 MiB，旧默认 20 会把它跳过）
     maxFilesPerPass: number;           // 200
     retryBudget: number;               // 20
     starvationPasses: number;          // 5
@@ -1900,11 +1902,12 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **OQ-4** | 网盘按需占位符 | ✅ 有结论 | 判据 = `OFFLINE` + `RECALL_ON_DATA_ACCESS`，`REPARSE_POINT` 不可用（§9.5）；实现留 M2 |
 | **OQ-5** | 未知扩展名容忍度 | ✅ 通过 | 6 类异物全部不进列表、不报错、不被改动；隔离与 staging 可与原文件同目录（§8） |
 | **OQ-6** | OpenCode / Grok / Pi 存储结构 | 🟡 部分 | 结构已摸清（OpenCode=sqlite+官方 export/import；Grok=目录多文件；Pi=单 jsonl 另一套转义）；生命周期未验证 | 
-| **OQ-7** | 大规模 pass 耗时与备份膨胀 | ⏳ 未做 | M2 |
+| **OQ-7** | 大规模 pass 耗时与备份膨胀 | ✅ **当前规模下关闭**(2026-08-13) | 百文件/百 MiB 级实测:全量 hash 亚秒(mac codex 183 MiB ≈ 155ms),遍历/stat ≤10ms;`maxFileSizeMB` 默认因实测 23 MiB 常规 rollout 从 20 调到 64。GB 级再重开 |
 | **OQ-8** | **生命周期是否严格 append-only** | ✅ **PASS** | 双平台 36 快照零违规；compact/fork/retry 全是**追加**；文件名恒等于 sessionId；末尾恒 LF；空会话不落盘 → **Tier A 成立，无需任何降级** |
 | **OQ-9** | junction / 8.3 短名 | ✅ 通过 | `lstat` 识别 junction 为 symlink（拦截有效）；`realpath` 不展开 8.3 短名（字符串层拒绝必须保留）（§9.7.4） |
 | **OQ-10** | 漫游 profile | ⏳ 未做 | M2 |
 | **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ✅ **已决（ADR-46）** | 用 vault 内 Claudian 的会话记录做归属源——它在 vault 里，所以"属于这个 vault"是它的构造性质，不需要读 rollout 内容也不需要猜 `cwd`。已实现并有回归（`tests/m1/codex-adapter.test.ts`）。**遗留**：真机确认 `.claudian/sessions/` 的实际文件名与字段在你的版本上与样本一致（探测套件 P3） |
+| **OQ-13** | **Codex compact 是否 append-only**（0.146.x 无非交互入口,pty 驱动 TUI 失败,双平台未测） | ⏳ **发布阻塞（M4 前）** | 人工 TUI 补测:resume 测试会话 → `/compact` → `lifecycle-snapshot.mjs snap` → `report`。若为就地改写,引擎兜底不丢数据(非前缀→CONFLICT;缩为前缀→带备份的 PULL 撤销 compact),但体验不可接受,须按结果决定 Codex 的 compact 提示文案或降级 |
 | **OQ-12** | 只同步 rollout，Claudian UI 里会不会出现该会话 | ✅ **有结论（源码）** | Claudian 从不扫盘枚举 Codex 会话，只按 vault 内 `.claudian/sessions/<id>.meta.json` 存的 `sessionId`/`threadId` 去找文件。**所以两半必须都在**：vault 侧那半随 vault 自身的同步走，rollout 这半由本插件送。两半齐了 UI 就有入口（2026-08-10 验收的人工拷贝附加验证已实证过这条路径）。README 必须写明：**别把 `.claudian/` 排除在 vault 同步之外** |
 
 **计划外发现**（F-1…F-9，详见 findings）中对实现有直接影响的三条：picker 不显示 headless 来源的会话（同步验证一律按 ID resume）；resume 打开不发消息也可能追加约 236 B（稳定性判定天然覆盖）；Windows 目录 fsync 返回 `EPERM`（`FsGateway` 在 win32 上跳过目录 fsync）。

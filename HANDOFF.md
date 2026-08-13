@@ -220,15 +220,32 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
 - `.claudian/sessions` 本身的同步（对端 UI 入口那半）**M3 再做**：Obsidian Sync 官方
   文档证实点目录一律不同步（除 `.obsidian`）；技术形状 = §7.2b opaque 模式，正好同批。
 
+**2026-08-13:probe-m2 已跑完并回填**（[findings/2026-08-13-m2-probe.md](docs/zh-CN/findings/2026-08-13-m2-probe.md)）：
+
+- **Codex Tier A 成立**:双平台(0.146.0/0.146.1)PREFIX_VIOLATION 0——exec/resume/
+  强杀/杀后恢复/静置/fork 全部符合预期,文件名不变,只读 resume 零写入。
+  **唯 compact 未测(OQ-13,发布阻塞)**:0.146.x 无非交互入口,需人工 TUI 补测一次
+  (Mac 上套件还在:resume 测试会话 → `/compact` → `snap` → `report`,约 5 分钟)。
+- **OQ-7 关闭**(当前规模):全量 hash 亚秒级。顺手修了一个实测暴露的问题:
+  最大常规 rollout 23 MiB > 旧默认 `maxFileSizeMB=20` 会被 SKIP_TOO_LARGE,
+  **默认已调 64**。注意:已保存过设置的 vault 里存的还是 20,**要么在设置里手动调,
+  要么删掉 data.json 里的 maxFileSizeMB 让它吃新默认**。
+- **P3 核对通过但有一个用户可见的坑**:vault 记录 78 条里 **25 条(32%)sessionId 为
+  null**(codex 19/claude 6)——这些会话找不到 CLI 文件,不参与同步(fail-closed)。
+  README 须写明;在 Claudian 里续聊一轮通常会补上 id。
+- Grok 实测比源码调查更复杂(10+ 文件 + 4 对 .lock/会话),维持 Tier C,M3 需 group 原子性。
+  Pi 两台机器都无数据,继续挂起。
+- 计划外发现:**Codex subagent 线程的 rollout 在同一 sessions/ 树**,记录准入下不同步
+  ——跨机 resume 用过 subagent 的会话,子线程历史对端缺失。下次验收列观察项。
+
 **下一步**
 
 | # | 事项 | 前提 |
 |---|---|---|
-| 1 | **跑 `tmp/probe-m2/`**（两台机器）。P2 是 Codex 的**发布门禁**：不通过则 Codex 保持只读 | 拷套件到两台机器 |
-| 2 | 按探测结果回填 §6.1.1 的 Codex Tier、§16 的 OQ-7/OQ-11 | 1 |
-| 3 | **验收剧本更新**：造会话步骤改为「经 Claudian 发起」（ADR-47 后 `claude -p` 造的会话不会被准入） | 下次真机验收前 |
-| 4 | M4：README（含 Claudian 共存说明：`.claudian/` / `.codex/agents` / `.pi` 别排除在 vault 同步之外；CLI 自己会追加 ai-title 元数据；准入 = Claudian 记录）、BRAT 发布 | 无（可并行） |
-| 5 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 | M3 |
+| 1 | **OQ-13 compact 补测**(人工 TUI,约 5 分钟,Mac 上套件还在)——Codex 发布门禁的最后一条 | 无 |
+| 2 | **验收剧本更新**：造会话步骤改为「经 Claudian 发起」（ADR-47 后 `claude -p` 造的会话不会被准入）;新增观察项:跨机 resume 用过 subagent 的 Codex 会话 | 下次真机验收前 |
+| 3 | M4：README（Claudian 共存说明;准入 = Claudian 记录;**无 sessionId 的旧记录不同步**;`maxFileSizeMB` 默认 64）、BRAT 发布 | OQ-13 |
+| 4 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性 | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 
