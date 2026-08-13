@@ -244,13 +244,25 @@ compact 同构)。**Codex 生命周期无缺口,Tier A 完整成立,发布阻塞
 experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤 4 的同构断言,
 生命周期探测不能替代)。
 
-**下一步**
+**2026-08-13 深夜批:review/5 整改 + M4 交付物**
 
-| # | 事项 | 前提 |
+- review/5 三条测试缺口已补(M2-2 未注册 provider 子树不落地 / M2-3 adapter 白名单
+  自洽表驱动 / M2-4 撕裂墓碑仍终止准入),全部注入验证过会红;M2-1/M2-6 注释已加,
+  M2-5 记入下方 M3 项。
+- **M4 交付物已入库**:`README.md`(英文主体 + 中文摘要,含全部 CLAUDE.md 要求的
+  界限声明)、`.github/workflows/release.yml`(tag 触发,校验 tag == manifest 版本,
+  verify 全绿才发布,产物 = main.js + manifest.json)、版本三处同步 bump 到 **0.1.0**、
+  验收套件 M4 附录(Codex 跨机 resume 剧本 + subagent 观察项 + maxFileSizeMB 检查)。
+
+**下一步(全部是用户动作,代码侧无阻塞)**
+
+| # | 事项 | 说明 |
 |---|---|---|
-| 1 | **M4**:README(Claudian 共存说明;准入 = Claudian 记录;**无 sessionId 的旧记录不同步**;`maxFileSizeMB` 默认 64,旧 vault 存的 20 要手动调)、BRAT 发布 | 无(已解除阻塞) |
-| 2 | **验收剧本更新 + M4 验收**:造会话改为「经 Claudian 发起」;**新增 Codex 跨机 resume 一轮**(通过后摘掉 experimental);观察项:resume 用过 subagent 的 Codex 会话 | M4 |
-| 3 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性（含 review/5 M2-5：mode 守卫从逐 primary 提为逐 group——aux 与 primary 的 mode 可能不同,整组 DEFER 而非逐文件跳过） | M3 |
+| 1 | **仓库转 public** | BRAT 要求;转之前确认 tmp/ 不入库(已 gitignore)、无隐私残留(check:secrets 全绿) |
+| 2 | **LICENSE** | 仓库还没有 LICENSE 文件;Obsidian 社区惯例 MIT,由用户定 |
+| 3 | **打 tag 发布**:`git tag 0.1.0 && git push origin 0.1.0` | release workflow 自动 verify + 构建 + 挂产物;tag 名必须恰好等于 manifest 版本(无 v 前缀) |
+| 4 | **M4 验收**(重拷 `tmp/acceptance/` 后按附录跑):Codex 跨机 resume 一轮,通过后摘 experimental;归档记录 | 剧本在套件 M4 附录 |
+| 5 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性（含 review/5 M2-5：mode 守卫从逐 primary 提为逐 group——aux 与 primary 的 mode 可能不同,整组 DEFER 而非逐文件跳过） | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 

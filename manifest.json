@@ -1,7 +1,7 @@
 {
   "id": "claudian-session-sync",
   "name": "Claudian Session Sync",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "minAppVersion": "1.5.0",
   "description": "Sync the session files of Claudian-supported agent CLIs (Claude Code and friends) between machines so a conversation can be resumed elsewhere.",
   "author": "powoct",

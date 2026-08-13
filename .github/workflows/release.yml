@@ -1,0 +1,48 @@
+# testing.md §12 / architecture §15 M4. A release is the verify gate plus a tag:
+# the artifacts BRAT installs (manifest.json + main.js) are built here, never
+# committed, and never uploaded by hand — a hand-rolled release is how a stale
+# main.js ships under a fresh version number.
+#
+# To release: bump the version in manifest.json + package.json + versions.json
+# (check-manifest enforces they agree), commit, then push a tag named exactly
+# like the manifest version (no `v` prefix — Obsidian's convention):
+#
+#   git tag 0.1.0 && git push origin 0.1.0
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # The tag IS the version claim; refuse to ship if the manifest disagrees.
+      # BRAT resolves a version to a tag, so a mismatch installs the wrong build.
+      - name: tag matches manifest
+        run: |
+          MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$MANIFEST_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME != manifest version $MANIFEST_VERSION" >&2
+            exit 1
+          fi
+      - run: npm run verify
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Install via BRAT: \`powoct/claudian-session-sync\`. See the README for setup." \
+            main.js manifest.json
