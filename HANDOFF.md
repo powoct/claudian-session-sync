@@ -238,14 +238,19 @@ ADR-27 说"dry-run 绝对只读"的价值就在于这句话**没有需要记住�
 - 计划外发现:**Codex subagent 线程的 rollout 在同一 sessions/ 树**,记录准入下不同步
   ——跨机 resume 用过 subagent 的会话,子线程历史对端缺失。下次验收列观察项。
 
+**2026-08-13 晚:OQ-13 已闭**——用户人工在 TUI 对 fork 会话执行 `/compact`,快照 10
+显示 **+4654B 严格前缀追加、0 违规**(compacted 历史以新条目落盘,与 Claude Code 的
+compact 同构)。**Codex 生命周期无缺口,Tier A 完整成立,发布阻塞解除。**
+experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤 4 的同构断言,
+生命周期探测不能替代)。
+
 **下一步**
 
 | # | 事项 | 前提 |
 |---|---|---|
-| 1 | **OQ-13 compact 补测**(人工 TUI,约 5 分钟,Mac 上套件还在)——Codex 发布门禁的最后一条 | 无 |
-| 2 | **验收剧本更新**：造会话步骤改为「经 Claudian 发起」（ADR-47 后 `claude -p` 造的会话不会被准入）;新增观察项:跨机 resume 用过 subagent 的 Codex 会话 | 下次真机验收前 |
-| 3 | M4：README（Claudian 共存说明;准入 = Claudian 记录;**无 sessionId 的旧记录不同步**;`maxFileSizeMB` 默认 64）、BRAT 发布 | OQ-13 |
-| 4 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性 | M3 |
+| 1 | **M4**:README(Claudian 共存说明;准入 = Claudian 记录;**无 sessionId 的旧记录不同步**;`maxFileSizeMB` 默认 64,旧 vault 存的 20 要手动调)、BRAT 发布 | 无(已解除阻塞) |
+| 2 | **验收剧本更新 + M4 验收**:造会话改为「经 Claudian 发起」;**新增 Codex 跨机 resume 一轮**(通过后摘掉 experimental);观察项:resume 用过 subagent 的 Codex 会话 | M4 |
+| 3 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性 | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 
