@@ -19,7 +19,7 @@ import {
   serialiseSettings,
 } from "../domain/settings";
 import type { ConflictResolution } from "../domain/conflict";
-import type { NotReadyReason, ReadinessState } from "../domain/readiness";
+import type { NotReadyReason, ReadinessObservation, ReadinessState } from "../domain/readiness";
 import type { MachineId, WorkspaceId } from "../domain/types";
 import type { Clock, IdGen } from "../infra/clock";
 import type { FsGateway } from "../infra/fs-gateway";
@@ -361,11 +361,15 @@ export class PluginRuntime {
   ): Promise<RestoreOutcome> {
     const deps = await this.conflictDeps();
     if (!deps) return { ok: false, reason: "unknown-backup" };
-    const outcome = await restoreBackup(
-      deps,
-      backupPath,
-      expectedHashPrefix,
-      expectedLiveHashPrefix,
+    const outcome = await this.withWriteGate<RestoreOutcome>(
+      { ok: false, reason: "sync-in-progress" },
+      (mayWriteRemote) =>
+        restoreBackup(
+          { ...deps, mayWriteRemote },
+          backupPath,
+          expectedHashPrefix,
+          expectedLiveHashPrefix,
+        ),
     );
     // A pass afterwards, exactly as resolution does: a restore changes what
     // one side holds, and the report — including the CONFLICT a divergent
@@ -377,7 +381,10 @@ export class PluginRuntime {
   async resolve(conflictId: string, resolution: ConflictResolution): Promise<ResolveOutcome> {
     const deps = await this.conflictDeps();
     if (!deps) return { ok: false, reason: "unknown-conflict" };
-    const outcome = await resolveConflict(deps, conflictId, resolution);
+    const outcome = await this.withWriteGate<ResolveOutcome>(
+      { ok: false, reason: "sync-in-progress" },
+      (mayWriteRemote) => resolveConflict({ ...deps, mayWriteRemote }, conflictId, resolution),
+    );
     if (outcome.ok && outcome.action !== "REVEAL") {
       // First-hand knowledge: this runtime just settled that session, so it
       // leaves the sticky set now — the pass below may only DEFER it (the
@@ -616,6 +623,76 @@ export class PluginRuntime {
       });
     }
     return runtimes;
+  }
+
+  /**
+   * The two gates a pass passes and a click, until now, did not.
+   *
+   * A resolution and a restore are writes into the same files a pass writes,
+   * so they need the same two answers a pass gets — and both were being taken
+   * on trust:
+   *
+   * **The lock.** `runWorkspacePass` acquires one (§9.4), which is what keeps
+   * a second Obsidian window, or a second machine sharing the sync folder,
+   * from applying to the same file at the same time. A click held nothing, so
+   * the one operation a user watches happen was the one operation running
+   * unprotected.
+   *
+   * **Readiness.** `status.readiness` is only recomputed *by a pass* — so a
+   * sync folder unmounted since the last one still reads READY, and a write
+   * into it would build a tree in a mount point that is not there (NR-9), or
+   * into a directory that was recreated with a different rootId (NR-2). The
+   * two facts those rules turn on are cheap to re-observe, so they are, at
+   * the moment of the click rather than whenever the last pass happened.
+   */
+  private async withWriteGate<T>(
+    busy: T,
+    body: (mayWriteRemote: () => boolean) => Promise<T>,
+  ): Promise<T> {
+    const prepared = await this.prepare();
+    if (!prepared.ok) return busy;
+    const lock = prepared.deps.lock;
+    const acquired = await lock?.acquire();
+    if (acquired && !acquired.ok) return busy;
+
+    try {
+      const fresh = await this.probeRemoteWritable(prepared.deps);
+      // `mayWrite()` as well as the fresh probe: the lock can be taken over by
+      // another instance mid-operation, and the command re-asks immediately
+      // before it writes for the same reason the engine does.
+      return await body(() => fresh);
+    } finally {
+      await lock?.release();
+    }
+  }
+
+  /**
+   * Is the sync folder writable *right now* — the NR-1/NR-2/NR-9 subset.
+   *
+   * Deliberately not the whole readiness evaluation: that one counts every
+   * file in the workspace subtree to judge hydration, which is a per-pass
+   * cost and answers a question about trends. What a click needs is narrower
+   * and strictly more conservative — the directory is there, and it is still
+   * the same one we recorded — so a false "not ready" costs a refusal with a
+   * reason, never a write into the wrong place.
+   */
+  private async probeRemoteWritable(deps: {
+    syncDir: { reachable(): Promise<boolean>; readRoot(): Promise<ReadinessObservation["root"]> };
+  }): Promise<boolean> {
+    if (this.status.readiness !== "READY") return false;
+    if (!(await deps.syncDir.reachable().catch(() => false))) return false;
+    const root = await deps.syncDir.readRoot().catch(() => ({ status: "missing" }) as const);
+    if (root.status !== "ok") return false;
+    // The rootId this machine recorded for this folder. A folder that was
+    // deleted and recreated by the sync tool comes back with a different one,
+    // which is NR-2 — the case the marker file exists to make detectable.
+    const binding = this.binding;
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!binding || !workspaceId) return false;
+    const recorded = await (await this.homeStore())
+      .loadRemote(workspaceId, binding.syncDirPath)
+      .catch(() => null);
+    return recorded?.rootId == null || recorded.rootId === root.rootId;
   }
 
   private async conflictDeps() {

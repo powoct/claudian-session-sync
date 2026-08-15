@@ -287,8 +287,8 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
   轮转会删掉用户刚点的那份(keep=3 实测 ENOENT)、备份与写入之间缺 verify-then-swap
   (CLI 追加的行会进不了任何备份)、「什么都不在了」那一行**永远失败**。三条均已修 +
   注入验证会红。评审里「跨 provider 定位」一条经核实**不成立**(locator 按 provider 构建)。
-- **未采纳但已记档的后续项**(评审提出,均非阻塞):恢复点击时重新探测 readiness
-  (与现有 resolve 同款缺口,应一起修)、恢复与定时 pass 抢锁(同上)、列表惰性化
+- ~~恢复点击时重新探测 readiness / 与定时 pass 抢锁~~ ✅ **已修(ADR-50,一并覆盖 resolve)**。
+- **未采纳但已记档的后续项**(评审提出,均非阻塞):列表惰性化
   (当前每次全量读取,P5 实测规模下可接受)、"Show me the folder" 真正打开目录 +
   §9.3.4 要求的「打开备份目录」命令、以及 export/"另存一份" 原语(评审认为对多数
   场景比 restore 更合适)。
@@ -299,7 +299,7 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 |---|---|---|
 | 1 | **发 0.2.0**(含 claudian provider + M4 验收后摘 experimental 的 Codex):bump 三处版本 → tag | 用户动作;或攒一批再发 |
 | 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 3 | ~~备份恢复 UI~~ ✅ 已交付(ADR-49)。M3 剩余:Grok group 原子性(§6.6 staging + mode 守卫逐 group,**需先跑 Grok 生命周期探测**)/ 孤立 aux 清理 / `.aiss/prev` 评估 | 依次 |
+| 3 | ~~备份恢复 UI~~ ✅(ADR-49)、~~点击路径的锁与就绪闸门~~ ✅(ADR-50)。M3 剩余:Grok group 原子性(§6.6 staging + mode 守卫逐 group,**需先跑 Grok 生命周期探测**)/ 孤立 aux 清理 / `.aiss/prev` 评估 | 依次 |
 
 **旧的发布动作清单(已全部完成)**
 

@@ -108,6 +108,7 @@ export type RestoreOutcome =
         | "target-changed"
         | "target-exists"
         | "remote-not-ready"
+        | "sync-in-progress"
         | "path-rejected"
         | "backup-failed"
         | "write-failed";
