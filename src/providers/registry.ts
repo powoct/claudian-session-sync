@@ -16,6 +16,7 @@
 import type { ProviderAdapter, ProviderTier } from "./provider-adapter";
 import { createClaudeCodeAdapter } from "./claude-code/adapter";
 import { createCodexAdapter } from "./codex/adapter";
+import { createClaudianAdapter } from "./claudian/adapter";
 
 export interface AdapterEnvironment {
   readonly providerRoot: string;
@@ -35,6 +36,12 @@ export interface AdapterEnvironment {
   readonly readTextFile: (path: string) => Promise<string | null>;
 }
 
+/** What a default root may be derived from — some live in home, one in the vault. */
+export interface DefaultRootContext {
+  readonly homedir: string;
+  readonly vaultRealPath: string;
+}
+
 export interface ProviderDescriptor {
   readonly id: string;
   readonly label: string;
@@ -49,7 +56,7 @@ export interface ProviderDescriptor {
   readonly scopeNote?: string;
   /** Shown next to the path field, so an override is an informed choice. */
   readonly rootDescription: string;
-  defaultRoot(homedir: string, joinPath: (...parts: string[]) => string): string;
+  defaultRoot(paths: DefaultRootContext, joinPath: (...parts: string[]) => string): string;
   create(env: AdapterEnvironment): ProviderAdapter;
 }
 
@@ -63,7 +70,7 @@ export const CLAUDE_CODE: ProviderDescriptor = {
   scopeNote:
     "Only conversations this vault has a Claudian record for are synced — a session started " +
     "with a bare `claude` in a terminal is not, even inside this vault.",
-  defaultRoot: (homedir, joinPath) => joinPath(homedir, ".claude", "projects"),
+  defaultRoot: ({ homedir }, joinPath) => joinPath(homedir, ".claude", "projects"),
   create: (env) => createClaudeCodeAdapter(env),
 };
 
@@ -87,8 +94,27 @@ export const CODEX: ProviderDescriptor = {
   // var, else HOME/USERPROFILE + `.codex`, on Windows too. Matching that
   // exactly matters — a machine where they disagree is a machine where this
   // plugin watches a directory the CLI does not use.
-  defaultRoot: (homedir, joinPath) => joinPath(homedir, ".codex", "sessions"),
+  defaultRoot: ({ homedir }, joinPath) => joinPath(homedir, ".codex", "sessions"),
   create: (env) => createCodexAdapter(env),
+};
+
+export const CLAUDIAN: ProviderDescriptor = {
+  id: "claudian",
+  label: "Claudian conversation records",
+  tier: "R",
+  rootDescription:
+    "Claudian's own records inside this vault, normally <vault>/.claudian/sessions. " +
+    "There is rarely a reason to override this.",
+  scopeNote:
+    "Carries the conversation *records* (titles, which CLI session belongs to which " +
+    "conversation) so the other machine's Claudian shows them. Enable ONLY if your vault " +
+    "sync does not already carry .claudian/ — git and Syncthing usually do, Obsidian Sync " +
+    "does not. Two transports over one folder hand your sync tool conflicts to manufacture " +
+    "copies from.",
+  // The one root that lives inside the vault, by definition — these files ARE
+  // the vault-side records every other provider's admission reads (ADR-47/48).
+  defaultRoot: ({ vaultRealPath }, joinPath) => joinPath(vaultRealPath, ".claudian", "sessions"),
+  create: (env) => createClaudianAdapter(env),
 };
 
 /**
@@ -100,7 +126,7 @@ export const CODEX: ProviderDescriptor = {
  * structural exclusion, not a missing measurement — no probe would change it.
  * Grok and Pi wait for M3 and a real-machine lifecycle probe.
  */
-export const PROVIDERS: readonly ProviderDescriptor[] = [CLAUDE_CODE, CODEX];
+export const PROVIDERS: readonly ProviderDescriptor[] = [CLAUDE_CODE, CODEX, CLAUDIAN];
 
 export function providerById(id: string): ProviderDescriptor | undefined {
   return PROVIDERS.find((provider) => provider.id === id);

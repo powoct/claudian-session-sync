@@ -88,6 +88,14 @@ export interface LedgerEntryRecord {
   readonly abortStreak: number;
   readonly skippedForBudgetPasses: number;
   readonly truncatedTailPasses: number;
+  /**
+   * Hash of the content both sides held at the last convergence this machine
+   * witnessed (§7.2b #4a, ADR-48). Meaningful on the **local** side's entry
+   * only; null until a convergence has been seen. Losing it degrades an
+   * opaque fast-forward to a manual conflict — the §5.5 cost model again:
+   * slow (or in this case, ask the human), never wrong.
+   */
+  readonly lastConvergedHash: string | null;
 }
 
 export interface ObservationsFile {
@@ -227,6 +235,7 @@ function asLedgerEntry(value: unknown): LedgerEntryRecord | null {
     skippedForBudgetPasses:
       typeof v.skippedForBudgetPasses === "number" ? v.skippedForBudgetPasses : 0,
     truncatedTailPasses: typeof v.truncatedTailPasses === "number" ? v.truncatedTailPasses : 0,
+    lastConvergedHash: typeof v.lastConvergedHash === "string" ? v.lastConvergedHash : null,
   };
 }
 

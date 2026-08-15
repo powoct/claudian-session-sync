@@ -42,7 +42,7 @@ skipped — continuing that conversation in Claudian once usually fixes this.
 |---|---|
 | Credentials & CLI config (`auth.json`, `config.toml`, `.credentials.json`…) | Never read, never copied |
 | Any SQLite database (`*.sqlite`, `-wal`, `-shm`) | Machine-local, absolute paths inside |
-| `.claudian/` inside your vault | That travels with your **vault's own** sync — see the warning below |
+| `.claudian/` inside your vault | Not by default — it travels with your **vault's own** sync. An opt-in provider exists for setups whose vault sync cannot carry it; see the warning below |
 | Files the plugin doesn't recognise | Conflict copies from sync tools, backups, anything foreign: reported, left exactly where they are, never touched |
 | Deletions | Deleting a session on one machine never deletes it elsewhere |
 
@@ -56,6 +56,7 @@ kill) on real machines.
 |---|---|---|
 | **Claude Code** | ✅ Supported | Lifecycle measured on macOS + Windows; cross-machine resume verified in a two-machine acceptance run |
 | **Codex** | ✅ Supported | Lifecycle measured on macOS + Windows incl. compact; cross-machine resume verified in a two-machine acceptance run (2026-08-15) |
+| **Claudian records** | ✅ Optional, off by default | Claudian's own conversation records (`.claudian/sessions/`), whole-file synced with converged-base fast-forward — for vaults whose own sync cannot carry dotfolders |
 | **OpenCode** | ❌ Cannot be supported | Its history lives entirely inside one SQLite database; there is no per-session file to carry and no official export. This is structural, not a missing feature |
 | **Grok** | ⏳ Planned | Multi-file session directories with lock files; needs group-atomic apply first |
 | **Pi** | ⏳ Planned | Not yet measured |
@@ -107,9 +108,12 @@ safely is planned work). So:
   both machines.
 - **Obsidian Sync** users: note that Obsidian Sync
   [excludes hidden folders](https://help.obsidian.md/sync/settings) other than
-  `.obsidian`, so it will **not** carry `.claudian/`. Session files still sync and
-  CLI-level resume by ID still works; the conversations just won't show up in Claudian's
-  sidebar on the other machine until its records exist there too.
+  `.obsidian`, so it will **not** carry `.claudian/`. For exactly this case the plugin
+  ships an optional **Claudian records** provider (off by default): enable it on both
+  machines and the records travel through the sync folder instead — identical files are
+  left alone, a one-sided change fast-forwards (with a backup), and anything else becomes
+  a conflict for you to settle. Do **not** enable it if your vault sync already carries
+  `.claudian/` — two transports over one folder feed your sync tool conflicts.
 
 ## How your data is protected
 

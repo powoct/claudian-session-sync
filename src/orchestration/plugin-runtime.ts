@@ -330,7 +330,12 @@ export class PluginRuntime {
   /** Default storage root for a provider on this machine, before any override. */
   defaultProviderRoot(providerId: string): string | null {
     const descriptor = providerById(providerId);
-    return descriptor ? descriptor.defaultRoot(this.host.homedir, this.host.joinPath) : null;
+    return descriptor
+      ? descriptor.defaultRoot(
+          { homedir: this.host.homedir, vaultRealPath: this.host.vaultRoot },
+          this.host.joinPath,
+        )
+      : null;
   }
 
   async conflicts(): Promise<ConflictEntry[]> {
@@ -548,7 +553,11 @@ export class PluginRuntime {
       const configured = binding.providers[descriptor.id];
       if (!configured?.enabled) continue;
       const root =
-        configured.rootOverride ?? descriptor.defaultRoot(this.host.homedir, this.host.joinPath);
+        configured.rootOverride ??
+        descriptor.defaultRoot(
+          { homedir: this.host.homedir, vaultRealPath: this.host.vaultRoot },
+          this.host.joinPath,
+        );
       // Realpath'd here because every containment check downstream compares
       // against this string, and preflight refuses a root that is not its own
       // realpath rather than failing one write at a time.

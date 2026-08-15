@@ -271,7 +271,10 @@ function describeProvider(provider: ProviderDescriptor): string {
   const tier =
     provider.tier === "A"
       ? "Measured append-only, so its sessions can be merged safely."
-      : "Unverified lifecycle — read-only until measured.";
+      : provider.tier === "R"
+        ? "Whole-file records: identical is left alone, a one-sided change fast-forwards " +
+          "(with backup), anything else becomes a conflict for you to settle."
+        : "Unverified lifecycle — read-only until measured.";
   const experimental = provider.experimental
     ? " Experimental: its lifecycle has not been measured on every platform yet."
     : "";

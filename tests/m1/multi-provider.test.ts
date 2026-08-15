@@ -124,25 +124,26 @@ describe("a second provider with a nested layout", () => {
   });
 });
 
-describe("a provider whose primary is not append-only jsonl", () => {
-  it("is skipped with a reason, not run through the jsonl decision table", async () => {
-    // §7.2b exists on paper only. Until it is implemented, an opaque primary
-    // must be refused out loud: the append-jsonl table would call any binary
-    // tail "truncated" and DEFER forever, then tell the user its last *record*
-    // is incomplete — about a file that has no records.
+describe("a provider whose primary the engine cannot merge or copy", () => {
+  it("skips a derived primary with a reason, instead of copying it", async () => {
+    // `derived` means "rebuilt locally, never copied" (§7.2b #5), and
+    // REBUILD_LOCAL has no implementation — no shipped provider produces one.
+    // Copying it instead would move machine-local paths between machines,
+    // which is the §7.3 failure mode wearing a different extension. (Opaque
+    // primaries stopped being refused when ADR-48 gave them their own table.)
     const { machine, root, adapter } = setup();
     await machine.initialiseSyncDir();
-    const opaque = {
+    const derived = {
       ...adapter,
       classifyNeutral: (rel: string) => {
         const classified = adapter.classifyNeutral(rel);
-        return classified === null ? null : { ...classified, mode: "opaque-file" as const };
+        return classified === null ? null : { ...classified, mode: "derived" as const };
       },
     };
     await plantRemote(machine, NESTED_REL);
 
-    await machine.pass({ extraAdapters: [opaque] });
-    const report = await machine.pass({ extraAdapters: [opaque] });
+    await machine.pass({ extraAdapters: [derived] });
+    const report = await machine.pass({ extraAdapters: [derived] });
 
     const skipped = report.actions.find((a) => a.neutralRel === NESTED_REL);
     expect(skipped?.result).toBe("SKIPPED_POLICY");

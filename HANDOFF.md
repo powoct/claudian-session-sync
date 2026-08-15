@@ -267,7 +267,27 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 - **套件缺口(下轮前修)**:验收套件 config.json 的快照树不含 codex 本地 root,
   R3-1 无法做本地侧取证正是因此。
 
-**下一步(全部是用户动作,代码侧无阻塞)**
+**2026-08-15 晚:发布完成 + M3 第一块落地**
+
+- **0.1.0 已发布**:LICENSE(MIT)入库 → 仓库转 public → tag `0.1.0` → release workflow
+  全绿,产物 main.js + manifest.json 挂上。BRAT 地址 `powoct/claudian-session-sync` 生效。
+- **M3 第一块(ADR-48)已实装**:§7.2b opaque 决策表 + **收敛基点快进**(`lastConvergedHash`
+  存本机 ledger,只在本机亲历的收敛事件更新;基点缺失退化为 CONFLICT,fail-safe)+
+  **`claudian` provider**(Tier R,vault 内 `.claudian/sessions/`,默认关闭,双传输警告)+
+  preflight 为「vault 包含 provider:claudian」开唯一豁免。854 用例全绿;注入验证:
+  去掉基点检查 5 红,去掉豁免 4 红。`.deleted.json` 随 provider 跨机 = 记录层删除传播
+  免费获得(session 文件删除传播仍按 ADR-10 排除)。
+- 边界文档已同步:CLAUDE.md 两处改为「默认不含」;README 加 provider 行与开关说明。
+
+**下一步**
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 1 | **发 0.2.0**(含 claudian provider + M4 验收后摘 experimental 的 Codex):bump 三处版本 → tag | 用户动作;或攒一批再发 |
+| 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
+| 3 | M3 剩余:Grok group 原子性(§6.6 staging + mode 守卫逐 group)/ 备份恢复 UI / 孤立 aux 清理 / `.aiss/prev` 评估 | 依次 |
+
+**旧的发布动作清单(已全部完成)**
 
 | # | 事项 | 说明 |
 |---|---|---|

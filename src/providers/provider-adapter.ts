@@ -18,10 +18,12 @@ import type { LogicalId } from "../domain/types";
  * A: append-only primary file, discovered by scanning a directory.
  * B: needs an external index updated before the CLI can see a session.
  * C: read-only — structure understood, lifecycle unverified.
+ * R: whole-file rewrites — synced by the opaque table (§7.2b): converged-base
+ *    fast-forward or a manual conflict, never a picked side.
  *
  * Tier requires measured evidence. Anything unproven stays at C.
  */
-export type ProviderTier = "A" | "B" | "C";
+export type ProviderTier = "A" | "B" | "C" | "R";
 
 export type FileMode = "append-jsonl" | "opaque-file" | "derived";
 
