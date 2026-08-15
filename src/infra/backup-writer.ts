@@ -50,6 +50,18 @@ export interface BackupRequest {
   /** True when preserving the *remote* version a PUSH_OVERWRITE will destroy. */
   readonly remote: boolean;
   readonly action: string;
+  /**
+   * A backup file name rotation must leave alone during this call.
+   *
+   * Exists for restore (§9.3): restoring a version copies the live file into
+   * this same directory, and that copy is by construction *longer* than the
+   * version being restored — so rotation would find the restored one
+   * reproducible from it and delete the very file the user clicked. I1 would
+   * still hold (its bytes are a prefix of a survivor), but the row would
+   * vanish from the only screen that offers it, and a restore that then fails
+   * would leave the user with neither.
+   */
+  readonly protectName?: string;
 }
 
 export interface BackupOutcome {
@@ -121,7 +133,7 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         action: request.action,
       });
 
-      const rotation = await rotate(deps, dirPath, originalName, bytes, name);
+      const rotation = await rotate(deps, dirPath, originalName, bytes, name, request.protectName);
       return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
     },
   };
@@ -142,10 +154,18 @@ async function rotate(
   originalName: string,
   newest: Uint8Array,
   newestName: string,
+  protectName?: string,
 ): Promise<{ deferred: boolean }> {
   const entries = await deps.fs.readDir(dirPath).catch(() => []);
   const mine = entries.filter(
-    (entry) => entry.isFile && entry.name.startsWith(`${originalName}.`) && entry.name.endsWith(".bak"),
+    (entry) =>
+      entry.isFile &&
+      entry.name.startsWith(`${originalName}.`) &&
+      entry.name.endsWith(".bak") &&
+      // Filtered out of the candidate set rather than marked unreproducible:
+      // the latter would set `deferred` and report a deliberate protection as
+      // an I1 near-miss, which is a different thing and worth different alarm.
+      entry.name !== protectName,
   );
 
   const candidates: RotationCandidate[] = [];

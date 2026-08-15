@@ -10,6 +10,7 @@ import type { ConflictResolution } from "./domain/conflict";
 import { AiSessionSyncSettingTab } from "./ui/settings-tab";
 import { ConflictModal, describeOutcome } from "./ui/conflict-modal";
 import { ReportModal } from "./ui/report-modal";
+import { RestoreModal } from "./ui/restore-modal";
 
 /**
  * Assembly, and nothing else.
@@ -63,6 +64,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       callback: () => {
         new ReportModal(this.app, this.runtime?.lastPassReport() ?? null).open();
       },
+    });
+    this.addCommand({
+      id: "restore-backup",
+      name: "Restore an earlier version",
+      callback: () => this.openRestore(),
     });
     this.addCommand({
       id: "show-conflicts",
@@ -199,6 +205,11 @@ export default class AiSessionSyncPlugin extends Plugin {
   private openConflicts(): void {
     const runtime = this.getRuntime();
     new ConflictModal(this.app, runtime, () => void runtime.refresh()).open();
+  }
+
+  private openRestore(): void {
+    const runtime = this.getRuntime();
+    new RestoreModal(this.app, runtime, () => void runtime.refresh()).open();
   }
 
   /** Applies a resolution directly when there is exactly one conflict. */

@@ -42,6 +42,66 @@ export function backupFileName(originalName: string, stamp: string, seq: number,
   return `${originalName}.${stamp}.${sequence}${suffix ? `.${suffix}` : ""}.bak`;
 }
 
+/** `20260806T110000-123Z` — the stamp shape `backupStamp` produces. */
+const STAMP = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-(\d{3})Z$/;
+
+export interface ParsedBackupName {
+  /** Basename of the file this preserves — never a path (§9.3.2 flattens). */
+  readonly originalName: string;
+  readonly stamp: string;
+  readonly takenAtMs: number;
+  readonly seq: number;
+}
+
+/**
+ * The inverse of `backupFileName`, and deliberately its neighbour.
+ *
+ * Recovery may not lean on `index.jsonl` — that file is a convenience for
+ * someone reading the directory and is written best-effort, so a restore that
+ * needed it would be a restore that a lost line can block. Everything the UI
+ * shows about a backup therefore comes from its name plus its bytes, which
+ * makes this parser part of the recovery path rather than a display helper.
+ *
+ * Compose and parse living in one file is the response to a mistake this
+ * project has made twice: a rule written down twice drifts, and the copy that
+ * drifts looser is the one that touches user data.
+ */
+export function parseBackupName(name: string): ParsedBackupName | null {
+  if (!name.endsWith(".bak")) return null;
+  const parts = name.slice(0, -".bak".length).split(".");
+  // `<original...>.<stamp>.<seq>` at minimum, and the original itself contains
+  // dots (`<uuid>.jsonl`), so the fields are taken from the end. A trailing
+  // collision suffix (`nextBackupName`'s last resort) sits between seq and
+  // `.bak`, so try both shapes rather than assuming the common one.
+  for (const tail of [2, 3]) {
+    if (parts.length <= tail) continue;
+    const seqIndex = parts.length - (tail === 2 ? 1 : 2);
+    const stamp = parts[seqIndex - 1];
+    const seq = parts[seqIndex];
+    if (stamp === undefined || seq === undefined) continue;
+    if (!STAMP.test(stamp) || !/^\d{2}$/.test(seq)) continue;
+    const takenAtMs = stampToMs(stamp);
+    if (takenAtMs === null) continue;
+    const originalName = parts.slice(0, seqIndex - 1).join(".");
+    const suffix = tail === 3 ? (parts[parts.length - 1] ?? "") : "";
+    // The no-drift claim, made mechanical: a parse is only accepted when the
+    // composer rebuilds the exact name from it. Two families in one directory
+    // whose names could be read more than one way therefore resolve to the
+    // reading that round-trips, or to null.
+    if (backupFileName(originalName, stamp, Number(seq), suffix) !== name) continue;
+    return { originalName, stamp, takenAtMs, seq: Number(seq) };
+  }
+  return null;
+}
+
+function stampToMs(stamp: string): number | null {
+  const match = STAMP.exec(stamp);
+  if (!match) return null;
+  const [, y, mo, d, h, mi, sec, ms] = match;
+  const at = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${sec}.${ms}Z`);
+  return Number.isNaN(at) ? null : at;
+}
+
 export interface BackupTarget {
   readonly workspaceId: string;
   readonly providerId: string;
