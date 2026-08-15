@@ -119,7 +119,9 @@ safely is planned work). So:
 
 - **Backups before every overwrite.** Any file about to be replaced — on either side —
   is backed up first (default: 3 versions per file per direction, configurable). No
-  backup, no overwrite.
+  backup, no overwrite. *Restore an earlier version* (command palette) lists what was
+  kept and puts one back — and says, before you click, whether the next sync will undo
+  it, propagate it to your other machines, or raise a conflict for you to settle.
 - **Verified writes.** Overwrites re-check the target immediately before renaming the
   new version into place; anything that moved gets re-planned instead of written.
 - **Conflicts keep both versions.** A genuine fork is detected by content, quarantined

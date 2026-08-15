@@ -35,6 +35,7 @@ const EXPECTED_COMMAND_IDS = [
   "dry-run",
   "verify-all",
   "show-last-report",
+  "restore-backup",
   "show-conflicts",
   "conflict-keep-local",
   "conflict-keep-remote",

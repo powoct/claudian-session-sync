@@ -37,6 +37,12 @@ import { type MachineFile, STATE_SCHEMA_VERSION } from "../infra/state-store";
 import { detectIdentityDrift, rotateMachineId } from "../infra/state-store";
 import { createSyncDirStore, newRootFile } from "../infra/sync-dir-store";
 import { PROVIDERS, providerById } from "../providers/registry";
+import {
+  type BackupEntry,
+  type RestoreOutcome,
+  listBackups,
+  restoreBackup,
+} from "./restore-commands";
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
@@ -343,6 +349,31 @@ export class PluginRuntime {
     return deps ? listConflicts(deps) : [];
   }
 
+  async backups(): Promise<BackupEntry[]> {
+    const deps = await this.conflictDeps();
+    return deps ? listBackups(deps) : [];
+  }
+
+  async restore(
+    backupPath: string,
+    expectedHashPrefix: string,
+    expectedLiveHashPrefix: string | null,
+  ): Promise<RestoreOutcome> {
+    const deps = await this.conflictDeps();
+    if (!deps) return { ok: false, reason: "unknown-backup" };
+    const outcome = await restoreBackup(
+      deps,
+      backupPath,
+      expectedHashPrefix,
+      expectedLiveHashPrefix,
+    );
+    // A pass afterwards, exactly as resolution does: a restore changes what
+    // one side holds, and the report — including the CONFLICT a divergent
+    // restore is *meant* to raise — is how the user sees what it did.
+    if (outcome.ok) await this.syncNow();
+    return outcome;
+  }
+
   async resolve(conflictId: string, resolution: ConflictResolution): Promise<ResolveOutcome> {
     const deps = await this.conflictDeps();
     if (!deps) return { ok: false, reason: "unknown-conflict" };
@@ -622,6 +653,11 @@ export class PluginRuntime {
       backup: (request: Parameters<typeof backupWriter.backup>[0]) => backupWriter.backup(request),
       hashBytes: this.host.hashBytes,
       mayWriteRemote: () => this.status.readiness === "READY",
+      // Restore needs two things conflict resolution does not: the adapters
+      // themselves (to find where a backed-up basename belongs now) and the
+      // backup root to read from.
+      providers,
+      backupsDir: home.layout.backupsDir,
     };
   }
 
