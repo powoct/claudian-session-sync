@@ -84,7 +84,11 @@ const EMPTY_ENTRY: Omit<LedgerEntryRecord, "sig" | "firstSeenMs" | "lastSeenMs">
   abortStreak: 0,
   skippedForBudgetPasses: 0,
   truncatedTailPasses: 0,
+  lastConvergedHash: null,
 };
+
+/** A record that exists only to carry a converged base until it is observed. */
+const PLACEHOLDER_SIG = { size: -1, mtimeMs: 0, ctimeMs: 0, ino: -1, tailHash: "" };
 
 export function createPassState(input: PassStateInput): PassState {
   const local = new Map(Object.entries(input.observations.local));
@@ -121,6 +125,22 @@ export function createPassState(input: PassStateInput): PassState {
         lastSeenMs: input.nowMs,
         truncatedTailPasses: entry.truncatedTailPasses,
         remoteHadNonZeroSize: entry.remoteHadNonZeroSize,
+      });
+    },
+    converged(rel) {
+      return local.get(rel)?.lastConvergedHash ?? null;
+    },
+    recordConverged(rel, hash) {
+      // Lives on the local side's entry. The entry may not exist yet — a
+      // PULL_NEW converges before this machine has ever *observed* the landed
+      // file — so the upsert plants a placeholder the next observation will
+      // overwrite; `record()` spreads the previous entry, so the base
+      // survives that overwrite.
+      const previous = local.get(rel);
+      local.set(rel, {
+        ...(previous ?? { ...EMPTY_ENTRY, sig: PLACEHOLDER_SIG, firstSeenMs: input.nowMs }),
+        lastSeenMs: input.nowMs,
+        lastConvergedHash: hash,
       });
     },
   };

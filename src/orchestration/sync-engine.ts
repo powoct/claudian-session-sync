@@ -20,7 +20,14 @@
  *    CrashSignal injected by a test reaches the test instead of being absorbed
  *    as an I/O failure (testing.md §3 requirement 9).
  */
-import { type Action, MALFORMED_TAIL_PASSES, type PlanInput, type SideFacts, plan } from "../domain/planner";
+import {
+  type Action,
+  MALFORMED_TAIL_PASSES,
+  type PlanInput,
+  type SideFacts,
+  plan,
+  planOpaque,
+} from "../domain/planner";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
 import { type E0Signature, judgeStability, signaturesEqual } from "../domain/stability";
 import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
@@ -155,6 +162,15 @@ export interface LedgerView {
   local(neutralRel: string): LedgerEntryView | null;
   remote(neutralRel: string): LedgerEntryView | null;
   record(neutralRel: string, side: "local" | "remote", entry: LedgerEntryView): void;
+  /**
+   * The opaque table's base (§7.2b #4a): hash of the content both sides held
+   * at the last convergence this machine witnessed, or null. Only ever
+   * consulted for `opaque-file` primaries, and only ever *set* from a hash of
+   * bytes read in the pass that witnessed the convergence — it classifies
+   * bytes read now, it never substitutes for reading them (ADR-48 vs ADR-12).
+   */
+  converged(neutralRel: string): string | null;
+  recordConverged(neutralRel: string, hash: string): void;
 }
 
 /**
@@ -252,15 +268,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   for (const { adapter, group } of groups) {
     for (const file of group.files) {
       if (file.role !== "primary") continue;
-      // §7.2b is written but not implemented: everything below this line is the
-      // append-jsonl decision table. Running it over an `opaque-file` primary
-      // would compare a binary as if it were lines — `tailState` calls any
-      // non-UTF8 tail "truncated", so the file would DEFER forever and then
-      // tell the user its "last record has been incomplete", which is not even
-      // a sentence about that file. A `derived` primary would be copied
-      // between machines instead of rebuilt locally. Neither is a thing to do
-      // quietly, and neither is a thing to do at all until §7.2b exists.
-      if (file.mode !== "append-jsonl") {
+      // `derived` stays refused: a derived file is rebuilt locally, never
+      // copied, and REBUILD_LOCAL (§7.2b #5) has no implementation — no
+      // shipped provider produces one. `opaque-file` is routed below to its
+      // own table (ADR-48); `append-jsonl` to the prefix table.
+      if (file.mode === "derived") {
         notices.push(
           `${file.neutralRel}: this provider stores sessions in a form this version does not sync (${file.mode})`,
         );
@@ -378,7 +390,17 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           ),
         },
       };
-      const decision = plan(input);
+      const decision =
+        file.mode === "opaque-file"
+          ? planOpaque({
+              remote: deps.remoteReadiness,
+              local: localFacts,
+              remoteSide: remoteFacts,
+              conflictKnown: false,
+              maxFileSizeBytes: deps.settings.maxFileSizeBytes,
+              lastConvergedHash: deps.ledger.converged(file.neutralRel),
+            })
+          : plan(input);
       await barrier("P4:planned", { neutralRel: file.neutralRel });
 
       // U-11d. A truncated tail defers, and deferring is correct — but a file
@@ -432,6 +454,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const applied = await applyAction(deps, barrier, {
         action: decision.action,
         group,
+        mode: file.mode,
         neutralRel: file.neutralRel,
         localPath,
         remotePath,
@@ -464,6 +487,24 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           violation: applied.violation.violation,
           ...(applied.violation.detail ? { detail: applied.violation.detail } : {}),
         });
+      }
+
+      // The opaque base moves only on convergence this pass witnessed with
+      // real bytes (§7.2b, ADR-48): an observed-equal NOOP, or a landed write.
+      // Deliberately not on the E1 branch above — a remembered hash may say
+      // NOOP, it may not arm a future overwrite.
+      if (file.mode === "opaque-file" && !deps.dryRun) {
+        const convergedHash =
+          decision.action === "NOOP" && decision.reason === "content-identical"
+            ? localFacts.observedHash
+            : applied.result === "APPLIED" &&
+                (decision.action === "PUSH_NEW" || decision.action === "PUSH_OVERWRITE")
+              ? localFacts.observedHash
+              : applied.result === "APPLIED" &&
+                  (decision.action === "PULL_NEW" || decision.action === "PULL_OVERWRITE")
+                ? remoteFacts.observedHash
+                : null;
+        if (convergedHash) deps.ledger.recordConverged(file.neutralRel, convergedHash);
       }
 
       // P8's ledger write is unconditional, including for skipped and aborted
@@ -562,6 +603,7 @@ async function applyAction(
   ctx: {
     action: Action;
     group: SessionGroup;
+    mode: SessionGroup["files"][number]["mode"];
     neutralRel: string;
     localPath: string;
     remotePath: string;
@@ -590,8 +632,12 @@ async function applyAction(
   if (!sourceBytes) return { result: "ABORTED_PRECONDITION" };
 
   // A truncated tail may never be a source: handing another machine half a
-  // record makes it append to a line that was never finished.
-  if (tailState(sourceBytes) === "truncated") return { result: "DEFERRED" };
+  // record makes it append to a line that was never finished. Lines exist
+  // only in the append table's world — an opaque JSON blob routinely has no
+  // trailing newline, and calling that "truncated" would DEFER it forever.
+  if (ctx.mode === "append-jsonl" && tailState(sourceBytes) === "truncated") {
+    return { result: "DEFERRED" };
+  }
 
   let backupPath: string | undefined;
   const overwriting = ctx.action === "PUSH_OVERWRITE" || ctx.action === "PULL_OVERWRITE";

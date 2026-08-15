@@ -139,7 +139,15 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     { name: "syncDir", realPath: deps.binding.syncDirPath },
     { name: "backupDir", realPath: deps.home.layout.backupsDir },
     ...deps.providers.map((p) => ({ name: `provider:${p.adapter.id}`, realPath: p.root })),
-  ]);
+  ]).filter(
+    // The one containment that is definitional rather than a misconfiguration
+    // (ADR-48): the claudian provider's root IS inside the vault — its files
+    // are the vault-side records everything else's admission reads. Every
+    // other pair stays fatal, including this provider against the sync or
+    // backup directory, and including any OTHER provider inside the vault:
+    // this is an exemption for one measured fact, not a loosened rule.
+    (o) => !(o.a === "vault" && o.b === "provider:claudian" && o.relation === "a-contains-b"),
+  );
   if (overlaps.length > 0) {
     const detail = overlaps.map((o) => `${o.a} ${o.relation} ${o.b}`).join("; ");
     return {

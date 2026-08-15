@@ -252,3 +252,98 @@ function tailIsTruncated(side: SideFacts): boolean {
 function result(action: Action, reason: string, flags: readonly PlanFlag[]): PlanResult {
   return { action, reason, flags, conflictKnown: false };
 }
+
+/**
+ * The opaque-file decision table (architecture §7.2b, ADR-48).
+ *
+ * No prefix relation exists here, so the append table's one verifiable safety
+ * condition — "the overwritten bytes are contained in the new bytes" — is
+ * unavailable. Its replacement is the converged base: this machine's ledger
+ * remembers the hash of the content both sides held at the last convergence
+ * *it witnessed*, and a side whose bytes (read this pass) still equal that
+ * base has provably not moved since. Overwriting the unmoved side loses
+ * nothing that is not already the other side's past — and it is backed up
+ * regardless.
+ *
+ * Everything else stays manual. Both sides moved, or the base is missing
+ * (fresh ledger, first contact between two populated stores): CONFLICT, both
+ * branches quarantined, a human picks. The base is never an authorisation
+ * cache in the ADR-12 sense — both hashes under comparison come from bytes
+ * read this pass; the base only tells us which of those bytes are history.
+ */
+export interface OpaquePlanInput {
+  readonly remote: RemoteReadiness;
+  readonly local: SideFacts;
+  readonly remoteSide: SideFacts;
+  /** This exact pair is already quarantined (same meaning as PlanInput's). */
+  readonly conflictKnown: boolean;
+  readonly maxFileSizeBytes: number;
+  /**
+   * Hash of the content both sides held at the last convergence this machine
+   * witnessed, or null when it has never seen one (or the ledger was lost —
+   * which degrades fast-forwards to conflicts, never picks a side).
+   */
+  readonly lastConvergedHash: string | null;
+}
+
+export function planOpaque(input: OpaquePlanInput): PlanResult {
+  const { local, remoteSide: remote } = input;
+  const flags: PlanFlag[] = [];
+
+  if (input.remote === "unsupported-format") {
+    return result("SKIP_UNSUPPORTED_FORMAT", "format-version-unsupported", flags);
+  }
+  if (input.remote === "not-ready") {
+    return result("SKIP_REMOTE_NOT_READY", "remote-not-ready", flags);
+  }
+  if (local.size > input.maxFileSizeBytes || remote.size > input.maxFileSizeBytes) {
+    return result("SKIP_TOO_LARGE", "over-size-limit", flags);
+  }
+  if (local.isPlaceholder || remote.isPlaceholder) {
+    return result("SKIP_PLACEHOLDER", "cloud-placeholder", flags);
+  }
+  // §7.2b #6 — same stability bar, no tail check: there are no lines here, and
+  // no fast path either. The fast path exists because a session someone just
+  // started is worth landing eagerly; a metadata blob is not that.
+  if ((local.exists && !local.stable) || (remote.exists && !remote.stable)) {
+    return result("DEFER", "side-unstable", flags);
+  }
+  // §7.2b #8 — zero bytes is not "absent" and not "the empty prefix" either:
+  // for a whole-file format an empty file is most plausibly a write caught
+  // mid-flight, and the conservative reading of that is to wait.
+  if ((local.exists && local.size === 0) || (remote.exists && remote.size === 0)) {
+    return result("DEFER", "opaque-zero-byte-side", flags);
+  }
+
+  if (input.conflictKnown) {
+    return { action: "NOOP", reason: "conflict-already-known", flags, conflictKnown: true };
+  }
+
+  // #1 — converged. The caller records the base from this.
+  if (local.exists && remote.exists && local.observedHash === remote.observedHash) {
+    return result("NOOP", "content-identical", flags);
+  }
+
+  // #4a/#4b — one side still equals the last witnessed convergence.
+  if (local.exists && remote.exists) {
+    const base = input.lastConvergedHash;
+    if (base !== null && remote.observedHash === base) {
+      return result("PUSH_OVERWRITE", "remote-at-converged-base", flags);
+    }
+    if (base !== null && local.observedHash === base) {
+      return result("PULL_OVERWRITE", "local-at-converged-base", flags);
+    }
+    // #4c — both moved, or no base to reason from.
+    return result(
+      "CONFLICT",
+      base === null ? "opaque-divergent-no-base" : "opaque-divergent-both-moved",
+      flags,
+    );
+  }
+
+  // #2/#3 — one side only. Zero-byte sides were already deferred above.
+  if (local.exists && !remote.exists) return result("PUSH_NEW", "local-only", flags);
+  if (!local.exists && remote.exists) return result("PULL_NEW", "remote-only", flags);
+
+  return result("NOOP", "neither-side-exists", flags);
+}

@@ -452,6 +452,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 | **A** | 单个 append-only 主文件；文件名即 logicalId；CLI 扫目录发现 session | 完整双向 + 前缀安全合并（§7.2） | **完整生命周期 append-only Spike 通过**（OQ-8） |
 | **B** | 主文件 + **外部索引**；不进索引 CLI 就看不见 | 搬 session group + 幂等 `reconcileLocalIndex()`（§6.5）；索引本身**绝不搬运** | 索引重建路径实测可行（优先官方命令）+ 幂等 + schema 版本可检测 |
 | **C** | 未验证，或已知不满足 A/B | 只做 detect + dry-run 报告，**不写本机、不写 sync-dir** | 无需证据（默认档位） |
+| **R** | 整体重写型文件（无追加结构可利用） | opaque 表（§7.2b）：等量 NOOP / 单侧 NEW / 收敛基点快进 / 其余人工冲突,**永不按 mtime/size 选边** | 写入模式实测为整体重写（源码级 + 真机字段核对）+ 跨机拷贝可用性实证 |
 
 #### 6.1.1 各 provider 当前状态
 
@@ -460,6 +461,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 | **Claude Code** | **Tier A ✅**（OQ-8 双平台 PASS；**准入自 ADR-47 起按 vault 记录**：compact / fork / retry / 强杀 / 跨版本全部为严格追加，见 [findings](./findings/2026-08-06-spike-conclusions.md)；实测版本 2.1.211–2.1.223） | A | 无（发布阻塞已解除） |
 | **Codex** | **Tier A ✅(生命周期 + 跨机 resume 双证)**:2026-08-13 双平台生命周期探测 PREFIX_VIOLATION 0(含人工补测的 compact,[findings](./findings/2026-08-13-m2-probe.md));**2026-08-15 M4 验收通过**——B 机 `codex exec resume` 历史完整可续聊、双向回传收敛、UI 续聊同源同文件([findings](./findings/2026-08-15-m4-acceptance.md))。**experimental 已摘**。拉动侧不经记录准入有全链路测试钉着(`codex-pull-unrecorded.test.ts`,R3-1 归因否证) | A | 无 |
 | **OpenCode** | **Tier C，且无升级路径** ❌ —— 2026-08-12 源码调查确证：会话全部存在**单个 SQLite `opencode.db`** 里，provider 目录内不存在任何 per-session 文件，也没有官方 export/import 子命令（[findings](./findings/2026-08-12-claudian-source-survey.md) §3） | 无（结构上不适用，非"未验证"） | 无——再多探测也不会改变结论 |
+| **claudian**（vault 内 `.claudian/sessions/` 会话记录） | **Tier R（M3,ADR-48）**：写入模式已实证为整体重写（2026-08-12 源码调查 §4 + 2026-08-13 P3 真机字段核对）；跨机拷贝可用已两度实证（2026-08-10 人工拷贝、2026-08-15 git 互通 + UI 续聊）。**默认关闭**；仅当 vault 同步不带 `.claudian/` 时才应启用（双传输警告） | R | 无 |
 | **Grok / Pi** | Tier C，只读。Grok 结构已双平台实测(2026-08-13):每 session 一个目录、**10+ 个文件 + 4 对 `.lock`**,父目录名 = urlencode(cwd)——**多文件 group + 锁文件**,比源码调查显示的更复杂,需 §6.6 group 原子性;Pi 两台机器均「装了但无数据」,结构未确认 | Grok 需先做 group 原子性(M3);Pi 待有数据再测 | OQ-6（M3） |
 
 **"Tier A 候选"档位的历史记录**（Claude Code 已于 2026-08-06 通过 OQ-8 晋级，此机制保留给未来的 provider）：候选档位 = 按 Tier A 语义开发，但 UI 标「实验性 · 生命周期未验证」、首次启用强制 dry-run 确认、**对应生命周期 Spike 未通过不发布**。门禁设在**发布时点**而非开发时点——用户拿不到未验证的写入行为，风险控制等价，但不阻塞工程推进（对审核 4.9 的修改采纳，理由见 [testing.md 附录 A](./testing.md)）。
@@ -860,14 +862,30 @@ flowchart LR
 
 | # | 条件 | Action | 说明 |
 |---|---|---|---|
-| 1 | 两侧 hash 相同 | `NOOP` | hash 必须是本次实读（E2） |
-| 2 | 仅 L 存在 | `PUSH_NEW` | — |
-| 3 | 仅 R 存在 | `PULL_NEW` | — |
-| 4 | 双方存在且 hash 不同 | `CONFLICT` | **两侧原文都不动**，各留隔离副本。没有"较新者赢"这回事 |
-| 5 | `mode === "derived"` | `REBUILD_LOCAL` | 由 adapter 重建，**既不 push 也不 pull** |
+| 1 | 两侧 hash 相同 | `NOOP` | hash 必须是本次实读（E2）；同时把收敛基点置为该 hash（见 #4a） |
+| 2 | 仅 L 存在 | `PUSH_NEW` | 落地后基点 := 推送内容的 hash |
+| 3 | 仅 R 存在 | `PULL_NEW` | 落地后基点 := 拉取内容的 hash |
+| **4a** | 双方存在且 hash 不同，**R == 本机收敛基点** | `PUSH_OVERWRITE` | **收敛基点快进（ADR-48）**：被覆盖的 R 的**本轮实读** hash 等于本机 ledger 记录的「上次收敛内容」——即自那次收敛以来只有本机动过。覆盖前照常备份 |
+| **4b** | 双方存在且 hash 不同，**L == 本机收敛基点** | `PULL_OVERWRITE` | 对称：只有对端动过。覆盖前照常备份 |
+| **4c** | 双方存在且 hash 不同，两侧都 ≠ 基点，**或基点缺失** | `CONFLICT` | **两侧原文都不动**，各留隔离副本。没有"较新者赢"这回事；ledger 丢失只会把快进降级成人工冲突，绝不会选错边 |
+| 5 | `mode === "derived"` | `REBUILD_LOCAL` | 由 adapter 重建，**既不 push 也不 pull**（M3 仍未实现：derived 一律 `SKIPPED_POLICY`） |
 | 6 | 任一侧 unstable | `DEFER` | 判定同 §9.1，但不做尾行检查（opaque 没有行的概念） |
 | 7 | 超过体积上限 | `SKIP_TOO_LARGE` | — |
 | 8 | 任一侧 0 字节 | `DEFER`（保守） | 不视为"不存在" |
+
+**收敛基点（lastConvergedHash）的定义与更新规则（ADR-48）**：存放在**本机** ledger
+（`observations.json`，§5.5）的 per-rel 字段，**只**在本机亲历的收敛事件更新——
+等量 `NOOP`（#1）、任一 `*_NEW`/`*_OVERWRITE` 落地（含 append-jsonl 表的），
+更新为收敛内容的 hash；`DEFER`/`CONFLICT`/失败一律不动。它**不是**授权缓存：
+参与判定的两侧 hash 都来自本轮实读（E2），被覆盖一侧的当前字节本轮已完整读过，
+基点只回答「这份字节是否恰好是双方上次一致的那份」。ADR-12 的字面
+（写动作基于本次实读字节）与精神（缓存不得让未读字节被覆盖）均不受触碰。
+基点缺失/过期的最坏代价 = 本可自动快进的一侧被判 `CONFLICT` 交给人——
+与 §5.5「丢 ledger 只慢不错」的既有承诺同构。
+
+为什么 #4a/#4b 不违反下表的三条否决：它不比较 mtime、不比较 size、不合成第三种
+内容；它只在「分歧方向可被本机自己的收敛见证唯一确定」时才动，双向都动过
+（真分叉）仍是 #4c 人工决断。
 
 `derived` 文件既不 push 也不 pull 的理由：派生物含本机绝对路径或本机 id，推上去对别的机器只是垃圾；它在两台机器上必然不同 → 若参与同步，每次 pass 都会产生一次 `CONFLICT`（与 §7.3 就地改写 `cwd` 的失败模式同构）；它可从 primary 重建，丢了不算数据丢失。
 
@@ -1873,6 +1891,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 45 | §8.2 第 1 层白名单在**远端侧**由 `ProviderAdapter.classifyNeutral(neutralRel)` 执行，返回 `null` 即"不是 session"；被拒文件进 `PassReport.unknownFiles`（含第 2/3 层分类）并**原地不动**；远端列举改为按 adapter 归属的递归遍历 | 沿用"replica 里有文件就当 session"（隐式） | 本地侧的白名单是**结构性**的（adapter 只列它认识的名字），远端侧没有任何东西替代它——实测 Syncthing 的 `.sync-conflict-…`、英文区 Dropbox 的 `(conflicted copy …)`、OneDrive 的 `-<hostname>` 三种成品副本全部被拉进 CLI 目录（2026-08-12 复现）。2026-08-10 验收没暴露它，只因为 Dropbox 当时写的是中文名、被 `SEGMENT_CHARSET` 挡下——那是运气不是边界。同一处的另两个错误只有第二个 adapter 存在时才发作：远端文件一律归给 `adapters[0]`（跨 provider 误写），以及远端只列一层目录（日期分层的 provider 完全不可见） |
 | 46 | **Codex 的 workspace 归属由 vault 内 Claudian 的会话记录决定**：只读 `<vault>/.claudian/sessions/*.meta.json`（旧版 `.claude/sessions/`），取 `providerId === "codex"` 的 `sessionId`，再用尾部匹配 `-<id>.jsonl` 在本机 `<CODEX_HOME>/sessions` 定位；**只取 id,绝不使用文件里的绝对路径**。归属只作用于 push 侧,`classifyNeutral`（pull 侧）只校形状 | (a) 读 rollout 首行 `session_meta.payload.cwd` 过滤 ／ (b) 设置里让用户勾选项目白名单 ／ (c) 全同步 + 告知 | `~/.codex/sessions/` 是全局目录,(c) 会把本机**所有**项目的 Codex 对话推进这个 vault 的子树——隐私问题,不是整洁问题。(a) 要求 adapter 在**发现阶段读文件内容**（现有 `listSessions` 没有这个形状）,且 cwd 稳定性未实测。(b) 要 UI 与本机状态,新项目还得手动加。而 `.claudian/sessions/` **就在 vault 里**,"哪些会话属于这个 vault"这个问题它本身就是答案——零猜测、零内容读取。代价是只覆盖经 Claudian 建的会话（纯终端起的 codex 会话不同步）,这对本插件的定位是正确取舍,写进 README。失败一律 fail closed（无 store／无记录／读不动／id 形状不对 ⇒ 什么都不同步）。副作用:OQ-12 一并解开——vault 侧那半份元数据随 vault 同步过去,rollout 由本插件送到,两半齐了 Claudian UI 就有入口 |
 | 47 | **记录准入推广为全 provider 的统一规则（control list）**：所有 provider 的「准入」（什么能进入 sync-dir）都由 vault 内 Claudian 会话记录决定——Claude Code 也从「目录准入」切到「记录准入」。三条配套语义：① **准入 ≠ 成员资格**——已在 sync-dir 里的会话由引擎的 replica 遍历维持双向收敛，与 adapter 列不列它无关（对端 vault 可能永远没有那份记录：Obsidian Sync 不带点目录）；② Claudian 的删除是墓碑（`<convId>.deleted.json`，meta 原地保留），准入读取端必须同样按墓碑排除，否则已删除会话永远被准入；③ **墓碑只终止准入，不删 sync-dir 副本**——删除传播维持 ADR-10 的排除（复活竞态：对端仍在续写时，删掉的副本会被 PUSH_NEW 复活；需要 replica 侧墓碑设计，M3） | (a) Claude Code 维持目录准入（两种模型并存） ／ (b) manifest 加 `claudianConvId` 作控制清单 | (a) 两套准入模型 = 两套 README 说明 + provider 间同步范围不一致，与「共用逻辑、未来并入 Claudian」的方向相悖；且目录准入会把纯终端会话也同步——超出本插件「Claudian 的会话」的定位。(b) manifest 是 hint-only（EV-1/ADR-12），结构上不允许承担控制职责；而成员资格是结构性的——「文件在 replica 里」本身就是成员清单。迁移平滑：已同步的旧会话（含终端起的）靠成员资格继续收敛，只有**新的**终端会话不再被准入。代价：验收剧本造会话的方式要改为「经 Claudian 发起」（或种记录）；每轮 pass 多一次记录目录扫描（小 JSON，OQ-7 一并评估） |
+| 48 | **M3 实装 opaque-file 决策表,并为 §7.2b 增加「收敛基点快进」**(#4a/#4b):双方 hash 不同但一侧等于本机 ledger 记录的 `lastConvergedHash` 时,自动覆盖那一侧(带备份);双侧都动过或基点缺失 → 仍是 CONFLICT。基点只在本机亲历的收敛事件(等量 NOOP / 任一落地)更新。同批交付 **`claudian` provider**(vault 内 `.claudian/sessions/` 的 `conv-*.{meta,inputs,deleted}.json`,每文件独立同步,opaque 模式,默认关闭),preflight 的 root 重叠检查为「vault 包含 provider:claudian」开唯一豁免(该包含是定义性的) | (a) 严守原 #4「不同即 CONFLICT」 ／ (b) LWW(mtime/size) ／ (c) JSON deep-merge | (a) 对每回合整体重写的存储不可用:本机自己的正常推进(L=v2 vs replica=本机上次推的 v1)都会被判 CONFLICT,每个对话回合产生一次隔离——表会把用户训练成无视冲突。(b)(c) 的否决理由(§7.2b 下表)原封不动:快进不比较 mtime/size、不合成第三种内容,只在「分歧方向可被本机收敛见证唯一确定」时动,真分叉仍人工。ADR-12 不受触碰:两侧 hash 均为本轮实读,基点只给已读字节赋予历史含义;基点丢失退化为 CONFLICT(fail-safe,与 §5.5 丢 ledger 只慢不错同构)。`.deleted.json` 随之跨机 → 记录层的删除传播免费获得(对端 Claudian 隐藏会话、本插件停止准入),session 文件删除传播仍按 ADR-10 排除。**双传输警告**:该 provider 仅当 vault 同步不带 `.claudian/` 时才应启用,设置文案写明 |
 
 ---
 

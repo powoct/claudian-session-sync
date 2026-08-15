@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PROVIDERS } from "../../src/providers/registry";
 import { createClaudeCodeAdapter } from "../../src/providers/claude-code/adapter";
 import { createCodexAdapter } from "../../src/providers/codex/adapter";
+import { createClaudianAdapter } from "../../src/providers/claudian/adapter";
 import type { ProviderAdapter } from "../../src/providers/provider-adapter";
 import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
@@ -94,6 +95,26 @@ const FIXTURES: readonly Fixture[] = [
       );
       await claudianRecord(vault, "codex", SID);
       return createCodexAdapter({ ...fsDeps(vault), providerRoot: sessions });
+    },
+  },
+  {
+    id: "claudian",
+    async build() {
+      const root = makeRealTmpDir("consistency-cl");
+      roots.push(root);
+      const store = path.join(root, "vault", ".claudian", "sessions");
+      await fsp.mkdir(store, { recursive: true });
+      await fsp.writeFile(
+        path.join(store, "conv-1786422687897-15ktes7p9.meta.json"),
+        JSON.stringify({ id: "conv-1786422687897-15ktes7p9", providerId: "codex", sessionId: SID }),
+      );
+      const deps = fsDeps(path.join(root, "vault"));
+      return createClaudianAdapter({
+        providerRoot: store,
+        joinPath: deps.joinPath,
+        listDir: deps.listDir,
+        statFile: deps.statFile,
+      });
     },
   },
 ];
