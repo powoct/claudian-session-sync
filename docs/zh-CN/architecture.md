@@ -458,7 +458,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 | Provider | 当前状态 | 目标 Tier | 阻塞 Spike |
 |---|---|---|---|
 | **Claude Code** | **Tier A ✅**（OQ-8 双平台 PASS；**准入自 ADR-47 起按 vault 记录**：compact / fork / retry / 强杀 / 跨版本全部为严格追加，见 [findings](./findings/2026-08-06-spike-conclusions.md)；实测版本 2.1.211–2.1.223） | A | 无（发布阻塞已解除） |
-| **Codex** | **Tier A ✅（生命周期无缺口）**：2026-08-13 双平台探测(0.146.0/0.146.1)PREFIX_VIOLATION 0——exec 新建/resume/**compact(人工 TUI 补测,+4654B 纯追加)**/fork/强杀/杀后恢复/静置全部严格追加或开新文件,只读 resume 零写入,文件名全程不变([findings](./findings/2026-08-13-m2-probe.md);OQ-13 已闭)。experimental 标签保留至 M4 验收跑通一轮 Codex 跨机 resume | A | 无(发布前验收:跨机 resume 一轮) |
+| **Codex** | **Tier A ✅(生命周期 + 跨机 resume 双证)**:2026-08-13 双平台生命周期探测 PREFIX_VIOLATION 0(含人工补测的 compact,[findings](./findings/2026-08-13-m2-probe.md));**2026-08-15 M4 验收通过**——B 机 `codex exec resume` 历史完整可续聊、双向回传收敛、UI 续聊同源同文件([findings](./findings/2026-08-15-m4-acceptance.md))。**experimental 已摘**。拉动侧不经记录准入有全链路测试钉着(`codex-pull-unrecorded.test.ts`,R3-1 归因否证) | A | 无 |
 | **OpenCode** | **Tier C，且无升级路径** ❌ —— 2026-08-12 源码调查确证：会话全部存在**单个 SQLite `opencode.db`** 里，provider 目录内不存在任何 per-session 文件，也没有官方 export/import 子命令（[findings](./findings/2026-08-12-claudian-source-survey.md) §3） | 无（结构上不适用，非"未验证"） | 无——再多探测也不会改变结论 |
 | **Grok / Pi** | Tier C，只读。Grok 结构已双平台实测(2026-08-13):每 session 一个目录、**10+ 个文件 + 4 对 `.lock`**,父目录名 = urlencode(cwd)——**多文件 group + 锁文件**,比源码调查显示的更复杂,需 §6.6 group 原子性;Pi 两台机器均「装了但无数据」,结构未确认 | Grok 需先做 group 原子性(M3);Pi 待有数据再测 | OQ-6（M3） |
 
@@ -1884,7 +1884,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **M1** | Claude Code 单 provider 双向同步；路径映射；前缀安全合并；稳定性 + VO + 备份；身份与路径安全；就绪状态机；冲突三命令；Mac ↔ Win 实测 resume | §5–§9 |
 | **M2** | provider 抽象落地 ✅；Codex 接入 ✅（归属规则见 ADR-46；发布前需真机复测）；跨版本兼容测试。~~OpenCode 接入~~ **删除**——2026-08-12 源码调查确证其为单文件 SQLite，结构上不可同步（§6.1.1）。~~Tier B 索引对齐~~ / ~~多文件 group staging~~ **顺延**：现有全部候选 provider（Codex/Grok/Pi）都不是 Tier B，也都只有单 primary，为不存在的形状付复杂度不合算（§6.6 原则） | §6.1 §6.2 §6.6 §5.4 |
 | **M3** | Grok / Pi 调研；冲突解决 UI；备份恢复 UI；孤立 aux 清理；删除传播评估；`.aiss/prev/` 跨机可恢复方案评估 | §8 §9.3 §9.4.1 |
-| **M4** | README、BRAT 发布、跨平台验收归档 | [testing.md §9](./testing.md) |
+| **M4** | README ✅、release workflow ✅(tag 触发)、跨平台验收归档 ✅([findings 2026-08-15](./findings/2026-08-15-m4-acceptance.md))。**剩余为发布动作**:仓库转 public、LICENSE、`git tag 0.1.0` | [testing.md §9](./testing.md) |
 
 ---
 

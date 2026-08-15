@@ -55,7 +55,7 @@ kill) on real machines.
 | Provider | Status | Notes |
 |---|---|---|
 | **Claude Code** | ✅ Supported | Lifecycle measured on macOS + Windows; cross-machine resume verified in a two-machine acceptance run |
-| **Codex** | ✅ Supported (experimental) | Lifecycle measured on macOS + Windows incl. compact; cross-machine resume not yet acceptance-tested — enable knowingly |
+| **Codex** | ✅ Supported | Lifecycle measured on macOS + Windows incl. compact; cross-machine resume verified in a two-machine acceptance run (2026-08-15) |
 | **OpenCode** | ❌ Cannot be supported | Its history lives entirely inside one SQLite database; there is no per-session file to carry and no official export. This is structural, not a missing feature |
 | **Grok** | ⏳ Planned | Multi-file session directories with lock files; needs group-atomic apply first |
 | **Pi** | ⏳ Planned | Not yet measured |

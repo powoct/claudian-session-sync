@@ -254,6 +254,19 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
   verify 全绿才发布,产物 = main.js + manifest.json)、版本三处同步 bump 到 **0.1.0**、
   验收套件 M4 附录(Codex 跨机 resume 剧本 + subagent 观察项 + maxFileSizeMB 检查)。
 
+**2026-08-15:M4 验收已跑完并归档**([findings/2026-08-15-m4-acceptance.md](docs/zh-CN/findings/2026-08-15-m4-acceptance.md)):
+
+- **A 项(Codex 跨机 resume)通过**,连同 P2 生命周期,**experimental 已摘**(README
+  provider 表同步更新)。B1/B2 观察符合预期:subagent 结论回传主线程、不影响续聊;
+  `.claudian/` 经 git 互通时对端 UI 完整可用且 UI 续聊写同一 rollout。C 项 64 默认
+  生效,零 SKIP_TOO_LARGE。两侧 I1 成立。
+- **R3-1**:B 侧现场推断「拉动侧受记录准入约束」**已否证**——快照取证(replica 文件
+  在 DEFER 窗口字节冻结)+ 两条全链路测试(`codex-pull-unrecorded.test.ts`,真实
+  PluginRuntime,无记录/无库均正常落地)。现场 DEFER 的真实机制未定(report 未留存),
+  若再现:先存「Show last sync report」的 Why 列。
+- **套件缺口(下轮前修)**:验收套件 config.json 的快照树不含 codex 本地 root,
+  R3-1 无法做本地侧取证正是因此。
+
 **下一步(全部是用户动作,代码侧无阻塞)**
 
 | # | 事项 | 说明 |
@@ -261,7 +274,7 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 | 1 | **仓库转 public** | BRAT 要求;转之前确认 tmp/ 不入库(已 gitignore)、无隐私残留(check:secrets 全绿) |
 | 2 | **LICENSE** | 仓库还没有 LICENSE 文件;Obsidian 社区惯例 MIT,由用户定 |
 | 3 | **打 tag 发布**:`git tag 0.1.0 && git push origin 0.1.0` | release workflow 自动 verify + 构建 + 挂产物;tag 名必须恰好等于 manifest 版本(无 v 前缀) |
-| 4 | **M4 验收**(重拷 `tmp/acceptance/` 后按附录跑):Codex 跨机 resume 一轮,通过后摘 experimental;归档记录 | 剧本在套件 M4 附录 |
+| 4 | ~~M4 验收~~ ✅ 已完成并归档(2026-08-15);experimental 已摘 | — |
 | 5 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性（含 review/5 M2-5：mode 守卫从逐 primary 提为逐 group——aux 与 primary 的 mode 可能不同,整组 DEFER 而非逐文件跳过） | M3 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：

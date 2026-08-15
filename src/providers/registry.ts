@@ -70,8 +70,13 @@ export const CLAUDE_CODE: ProviderDescriptor = {
 export const CODEX: ProviderDescriptor = {
   id: "codex",
   label: "Codex",
+  // Earned twice over: the lifecycle probe (2026-08-13, both platforms,
+  // compact included) and a two-machine acceptance run (2026-08-15) whose
+  // core assertion — resume-by-id on the other machine, full history — is the
+  // same one Claude Code's M1 exit required. The experimental flag came off
+  // with the second, not the first: lifecycle evidence says the merge is
+  // safe, only an acceptance run says the product works.
   tier: "A",
-  experimental: true,
   rootDescription:
     "Where the CLI keeps rollout files, normally <CODEX_HOME>/sessions. Override this if " +
     "CODEX_HOME points elsewhere on this machine.",
