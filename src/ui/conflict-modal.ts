@@ -157,6 +157,11 @@ export function describeOutcome(
         "That side changed since this list was drawn, so this is no longer the same " +
         "disagreement. Run a sync and reopen — the current one will appear as its own entry."
       );
+    case "sync-in-progress":
+      // Not an error, and specifically not a reason to go looking: a sync is
+      // applying right now and this would be a second writer on the same
+      // files. Seconds, not minutes.
+      return "A sync is running right now. Nothing was changed; try again in a moment.";
     case "remote-not-ready":
       // Naming the other button matters: from the user's side the two look
       // symmetric, and being told one of them is unavailable without being

@@ -115,6 +115,8 @@ export type ResolveFailure =
    */
   | "kept-unreadable"
   | "remote-not-ready"
+  /** A pass is applying right now — the same lock a pass takes (§9.4). */
+  | "sync-in-progress"
   | "backup-failed"
   | "path-rejected"
   | "write-failed";

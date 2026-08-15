@@ -210,6 +210,8 @@ export function describeRestore(
         "That session is not on this machine or in the sync folder any more, so there is no " +
         "file to put it back into. Use “Show me the folder” and copy it by hand."
       );
+    case "sync-in-progress":
+      return "A sync is running right now. Nothing was changed; try again in a moment.";
     case "remote-not-ready":
       return (
         "The sync folder is not ready, so nothing may be written to it yet. Backups taken " +
