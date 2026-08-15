@@ -157,6 +157,10 @@ Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 Every behavioural claim above traces to a decision record (ADR 1–47) and, where it
 matters, to a real-machine measurement.
 
+## License
+
+[MIT](LICENSE)
+
 ---
 
 ## 简体中文摘要
