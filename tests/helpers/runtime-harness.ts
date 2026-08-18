@@ -38,6 +38,8 @@ export class RuntimeHarness {
   readonly runtime: PluginRuntime;
 
   private stored: unknown = null;
+  /** Folders the plugin asked the desktop to open, for the §9.3.4 tests. */
+  readonly opened: string[] = [];
   private readonly clock;
 
   private constructor(root: string, options: HarnessOptions) {
@@ -71,6 +73,10 @@ export class RuntimeHarness {
       homedir: this.homedir,
       vaultRoot: this.vaultRoot,
       pid: process.pid,
+      openFolder: async (target: string) => {
+        this.opened.push(target);
+        return true;
+      },
       loadSettings: async () => this.stored,
       saveSettings: async (value) => {
         this.stored = value;

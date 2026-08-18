@@ -71,6 +71,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       callback: () => this.openRestore(),
     });
     this.addCommand({
+      id: "open-backups-folder",
+      name: "Open the backups folder",
+      callback: () => void this.openBackupsFolder(),
+    });
+    this.addCommand({
       id: "show-conflicts",
       name: "Show conflicts",
       callback: () => this.openConflicts(),
@@ -144,6 +149,7 @@ export default class AiSessionSyncPlugin extends Plugin {
       pid: process.pid,
       loadSettings: () => this.loadData(),
       saveSettings: (value) => this.saveData(value),
+      openFolder: (target) => openInFileManager(target),
     });
 
     this.runtime.onChange((status) => this.renderStatus(status));
@@ -212,6 +218,27 @@ export default class AiSessionSyncPlugin extends Plugin {
     new RestoreModal(this.app, runtime, () => void runtime.refresh()).open();
   }
 
+  /**
+   * §9.3.4's first requirement: the user can find the backups.
+   *
+   * Always says the path, whether or not the folder opened. A file manager
+   * that refuses is an inconvenience; a message that claims to have opened
+   * something and did not is the failure this project keeps naming.
+   */
+  private async openBackupsFolder(): Promise<void> {
+    const runtime = this.getRuntime();
+    const dir = await runtime.backupsDir();
+    if (dir === null) {
+      new Notice(
+        "There is no backup folder yet — this vault has no workspace identity, so nothing " +
+          "has been synced or backed up.",
+      );
+      return;
+    }
+    const opened = await runtime.reveal(dir);
+    new Notice(opened ? `Backups are in ${dir}` : `Could not open it. Backups are in ${dir}`);
+  }
+
   /** Applies a resolution directly when there is exactly one conflict. */
   private async resolveSingle(resolution: ConflictResolution): Promise<void> {
     const runtime = this.getRuntime();
@@ -232,5 +259,33 @@ export default class AiSessionSyncPlugin extends Plugin {
 
   private renderStatus(status: RuntimeStatus): void {
     this.statusBarEl?.setText(status.short);
+  }
+}
+
+/**
+ * Shows a directory in the desktop file manager (§9.3.4).
+ *
+ * `electron` is required lazily and defensively. It is external to the bundle
+ * and always present in Obsidian desktop, which this plugin declares itself
+ * to be (`isDesktopOnly`) — but a missing shell must degrade to "here is the
+ * path" rather than throwing out of a click handler, because the path is the
+ * thing the user actually needs and the folder opening is a convenience.
+ */
+async function openInFileManager(target: string): Promise<boolean> {
+  try {
+    // Not a static import: `electron` has no types here and is external to
+    // the bundle, so the module specifier is built at runtime to keep the
+    // bundler from trying to resolve it at all.
+    const electron = (await import(/* @vite-ignore */ String("electron"))) as {
+      shell?: { openPath?: (path: string) => Promise<string> };
+    };
+    const openPath = electron.shell?.openPath;
+    if (!openPath) return false;
+    // `openPath` resolves to "" on success and to an error message otherwise,
+    // which is a return value worth checking rather than a promise worth
+    // assuming.
+    return (await openPath(target)) === "";
+  } catch {
+    return false;
   }
 }

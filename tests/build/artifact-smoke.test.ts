@@ -36,6 +36,7 @@ const EXPECTED_COMMAND_IDS = [
   "verify-all",
   "show-last-report",
   "restore-backup",
+  "open-backups-folder",
   "show-conflicts",
   "conflict-keep-local",
   "conflict-keep-remote",

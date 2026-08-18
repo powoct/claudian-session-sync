@@ -201,6 +201,27 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
   private renderBehaviour(containerEl: HTMLElement, settings: PortableSettings): void {
     new Setting(containerEl).setName("Behaviour").setHeading();
 
+    // §9.3.4: a user must be able to *find* the backups, from here as well as
+    // from the command palette. The retention setting immediately below is
+    // the natural place to wonder where they are.
+    new Setting(containerEl)
+      .setName("Backups folder")
+      .setDesc(
+        "Every version this plugin was about to overwrite is kept here. “Restore an earlier " +
+          "version” in the command palette lists them and puts one back.",
+      )
+      .addButton((button) =>
+        button.setButtonText("Open").onClick(async () => {
+          const dir = await this.runtime.backupsDir();
+          if (dir === null) {
+            new Notice("There is no backup folder yet — nothing has been backed up.");
+            return;
+          }
+          const opened = await this.runtime.reveal(dir);
+          new Notice(opened ? `Backups are in ${dir}` : `Could not open it. Backups are in ${dir}`);
+        }),
+      );
+
     const keep = boundsFor("backupKeep");
     new Setting(containerEl)
       .setName("Backups to keep")

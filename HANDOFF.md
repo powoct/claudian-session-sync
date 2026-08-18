@@ -288,6 +288,10 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
   (CLI 追加的行会进不了任何备份)、「什么都不在了」那一行**永远失败**。三条均已修 +
   注入验证会红。评审里「跨 provider 定位」一条经核实**不成立**(locator 按 provider 构建)。
 - ~~恢复点击时重新探测 readiness / 与定时 pass 抢锁~~ ✅ **已修(ADR-50,一并覆盖 resolve)**。
+- ~~"Show me the folder" 真正打开目录 + §9.3.4 的「打开备份目录」命令与设置按钮~~ ✅ **已交付**
+  (2026-08-18):能力经 `RuntimeHost.openFolder` 注入(`main.ts` 是唯一 require electron 的
+  地方),冲突弹窗的「Show me both」同样改为真的打开隔离目录;打不开时一律说"打不开"并给出
+  路径,不复用成功文案。
 - **未采纳但已记档的后续项**(评审提出,均非阻塞):列表惰性化
   (当前每次全量读取,P5 实测规模下可接受)、"Show me the folder" 真正打开目录 +
   §9.3.4 要求的「打开备份目录」命令、以及 export/"另存一份" 原语(评审认为对多数

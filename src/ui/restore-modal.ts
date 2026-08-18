@@ -102,9 +102,18 @@ export class RestoreModal extends Modal {
     reveal.addEventListener("click", () => {
       // The escape hatch for every case the buttons above cannot serve —
       // including a session that no longer exists anywhere, where writing it
-      // back would mean inventing a path.
-      new Notice(`The backup is at ${backup.path}`);
+      // back would mean inventing a path. It opens the folder for real, and
+      // says the path either way: a button labelled "show me" that shows
+      // nothing is a small version of the same lie as a resolution that
+      // silently does nothing.
+      void this.revealFolder(backup.path);
     });
+  }
+
+  private async revealFolder(target: string): Promise<void> {
+    const folder = target.slice(0, Math.max(0, target.lastIndexOf("/")));
+    const opened = await this.runtime.reveal(folder.length > 0 ? folder : target);
+    new Notice(opened ? `The backup is at ${target}` : `Could not open it. The backup is at ${target}`);
   }
 
   private async apply(backup: BackupEntry): Promise<void> {

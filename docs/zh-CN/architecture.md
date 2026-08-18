@@ -1284,8 +1284,8 @@ seq   = 两位十进制，00 起
 
 | 能力 | 形式 |
 |---|---|
-| 找得到目录 | 命令 `打开备份目录`（`shell.openPath`）+ 设置面板按钮 |
-| 看得到清单 | 命令 `列出最近备份` → 报告视图：时间、provider、logicalId、行数、字节数、hash 前 8 位、触发它的 Action、绝对路径 |
+| 找得到目录 | 命令 `打开备份目录`（`shell.openPath`）+ 设置面板按钮 ✅ 2026-08-18 交付（能力经 `RuntimeHost.openFolder` 注入，`main.ts` 是唯一 require electron 的地方；**打不开时必须说"打不开"并给出路径**，绝不复用成功文案） |
+| 看得到清单 | 命令 `列出最近备份` → 报告视图：时间、provider、logicalId、行数、字节数、hash 前 8 位、触发它的 Action、绝对路径 ✅ 由 `Restore an earlier version`（ADR-49）交付，并多给一件事：点击前就说明下一次同步会怎么处理 |
 | 清单来源 | `<backupDir>/index.jsonl`（append-only）。**只是索引**：删了不影响恢复与正确性，损坏时回退为扫目录 |
 | 报告可追溯 | 每个 `*_OVERWRITE` 在 `PassReport` 中必须携带 `backupPath`；没有它就是实现 bug，测试直接断言 |
 
