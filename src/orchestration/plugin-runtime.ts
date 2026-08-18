@@ -76,6 +76,16 @@ export interface RuntimeHost {
   /** Obsidian's `loadData` / `saveData`; the vault-side portable settings. */
   loadSettings(): Promise<unknown>;
   saveSettings(value: unknown): Promise<void>;
+  /**
+   * Shows a directory in the desktop file manager (§9.3.4).
+   *
+   * Injected rather than called, like every other outside effect: the runtime
+   * stays runnable in a plain Node test, and the one file that knows about
+   * Electron stays the one file that knows about Obsidian. Returns false when
+   * the platform refused — the caller then says where the folder is instead of
+   * claiming to have opened it.
+   */
+  openFolder(target: string): Promise<boolean>;
 }
 
 /**
@@ -347,6 +357,30 @@ export class PluginRuntime {
   async conflicts(): Promise<ConflictEntry[]> {
     const deps = await this.conflictDeps();
     return deps ? listConflicts(deps) : [];
+  }
+
+  /**
+   * The backup root for this workspace, or null before there is one.
+   *
+   * §9.3.4's first requirement is that a user can *find* the backups; the
+   * command and the settings button both need somewhere to point.
+   */
+  async backupsDir(): Promise<string | null> {
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!workspaceId) return null;
+    const home = await this.homeStore();
+    return this.host.joinPath(home.layout.backupsDir, workspaceId);
+  }
+
+  /**
+   * Opens a folder, and says whether it worked.
+   *
+   * The path is reported either way by the caller. "Show me the folder" that
+   * silently does nothing is the same class of lie as a resolution that
+   * silently does nothing (R2-1) — smaller, but the same shape.
+   */
+  async reveal(target: string): Promise<boolean> {
+    return this.host.openFolder(target).catch(() => false);
   }
 
   async backups(): Promise<BackupEntry[]> {

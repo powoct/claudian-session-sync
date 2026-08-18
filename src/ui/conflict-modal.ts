@@ -109,8 +109,19 @@ export class ConflictModal extends Modal {
 
   private async apply(conflict: ConflictEntry, resolution: ConflictResolution): Promise<void> {
     const outcome = await this.runtime.resolve(conflict.conflictId, resolution);
+    if (outcome.ok && outcome.action === "REVEAL") {
+      // "Show me both" now shows them. It said where they were and left the
+      // finding to the user, which for a directory nested five levels inside
+      // a sync folder is most of the work.
+      const opened = await this.runtime.reveal(outcome.directory);
+      new Notice(
+        opened
+          ? describeOutcome(outcome, conflict)
+          : `Could not open it. ${describeOutcome(outcome, conflict)}`,
+      );
+      return;
+    }
     new Notice(describeOutcome(outcome, conflict));
-    if (outcome.ok && outcome.action === "REVEAL") return;
     if (outcome.ok) this.onResolved();
     // Re-render on failure too: a refusal usually means the world moved (or a
     // file was briefly locked), and a list drawn a minute ago is exactly what
