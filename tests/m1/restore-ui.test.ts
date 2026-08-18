@@ -43,6 +43,7 @@ const entry = (over: Partial<BackupEntry> = {}): BackupEntry => ({
 const stubRuntime = (backups: readonly BackupEntry[]) =>
   ({
     backups: async () => [...backups],
+    backupCount: async () => backups.length,
     restore: async () => ({
       ok: true,
       neutralRel: "claude-code/s.jsonl",

@@ -95,8 +95,20 @@ export interface EngineDeps {
   readonly evidence?: EvidenceCache;
   /** Hash of bytes; injected because domain and infra must stay separable. */
   readonly hashBytes: (bytes: Uint8Array) => string;
-  /** Backup hook; returns the path written, or null when it could not be. */
-  readonly backup: (input: BackupRequest) => Promise<string | null>;
+  /**
+   * Backup hook; returns the path written, or null when it could not be.
+   *
+   * `rotationDeferred` says the retention limit did not bind: a surplus copy
+   * was kept because no survivor could be proven to contain it (§9.3.3). For
+   * an append-only session that is rare; for a provider that rewrites whole
+   * records it is *every* time, because an older whole-file version is never
+   * a prefix of a newer one — so `backupKeep` silently stops bounding
+   * anything and the area grows without limit. The flag is the only way the
+   * user can learn that, which is why it travels rather than being dropped.
+   */
+  readonly backup: (
+    input: BackupRequest,
+  ) => Promise<{ readonly path: string | null; readonly rotationDeferred?: boolean }>;
   /**
    * Validates a write target through PathGuard.
    *
@@ -203,6 +215,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const actions: ActionEntry[] = [];
   const violations: ViolationEntry[] = [];
   const unknownFiles: UnknownFileEntry[] = [];
+  /** Providers whose backup retention did not bind this pass (§9.3.3). */
+  const rotationDeferredFor = new Set<string>();
   const notices: string[] = [];
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
@@ -456,6 +470,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         group,
         mode: file.mode,
         neutralRel: file.neutralRel,
+        onRotationDeferred: () => rotationDeferredFor.add(adapter.id),
         localPath,
         remotePath,
         localBytes,
@@ -539,6 +554,19 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   }
 
   await barrier("P7:reconciled", {});
+
+  // Said once per pass rather than once per file: for a whole-file provider
+  // every backup defers, and a notice per record would be noise instead of
+  // news. What the user needs to know is that the number they set is not
+  // bounding anything for that provider, and why.
+  for (const providerId of rotationDeferredFor) {
+    notices.push(
+      `${providerId}: backups are being kept past the retention limit because none of the older ` +
+        "versions can be reproduced from a newer one — this provider rewrites whole records, so " +
+        "nothing is ever redundant. The folder will keep growing; prune it by hand if it matters.",
+    );
+  }
+
   await barrier("P8:before-commit", {});
   await barrier("P8:committed", {});
 
@@ -605,6 +633,8 @@ async function applyAction(
     group: SessionGroup;
     mode: SessionGroup["files"][number]["mode"];
     neutralRel: string;
+    /** Called when retention could not bind; the pass says so once, at the end. */
+    onRotationDeferred: () => void;
     localPath: string;
     remotePath: string;
     localBytes: Uint8Array | null;
@@ -653,8 +683,9 @@ async function applyAction(
       remote: !pulling,
       action: ctx.action,
     });
-    if (written === null) return { result: "FAILED_BACKUP" };
-    backupPath = written;
+    if (written.path === null) return { result: "FAILED_BACKUP" };
+    backupPath = written.path;
+    if (written.rotationDeferred === true) ctx.onRotationDeferred();
   }
   await barrier("P6:after-backup", { neutralRel: ctx.neutralRel });
 

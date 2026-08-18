@@ -297,7 +297,10 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
         remote: request.remote,
         action: request.action,
       });
-      return outcome.path;
+      // The whole outcome, not just the path: `rotationDeferred` is how the
+      // pass learns that retention did not bind (§9.3.3), and dropping it here
+      // was why nothing could ever say so.
+      return outcome;
     },
     mintWritePath: createWritePathMinter(writeRootsFor(deps)),
     machineIdPrefix: deps.machineId.slice(0, 8),

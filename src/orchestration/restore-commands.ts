@@ -128,6 +128,25 @@ export interface RestoreCommandDeps {
 }
 
 /**
+ * How many backups are described in full, newest first.
+ *
+ * Describing one means reading it — the hash is its identity and the line
+ * count is how a user tells two versions apart — and comparing it with both
+ * live sides, which is what lets a row say what the next sync will do. That is
+ * unavoidable per row and must therefore be bounded per *listing*: an
+ * unbounded one reads every backup and both live sides of every session every
+ * time the dialog opens, which against the measured workload (a 23 MiB Codex
+ * rollout, three backups per direction) is hundreds of megabytes to paint a
+ * screen — and on a cloud drive with on-demand files, reads that hydrate the
+ * whole replica side as a side effect.
+ *
+ * Names carry their own timestamp, so the newest can be chosen before anything
+ * is opened. Nothing is hidden by this: the dialog shows a bounded page and
+ * says how many older ones remain in the folder.
+ */
+export const DEFAULT_LIST_LIMIT = 60;
+
+/**
  * Every backup this workspace holds, newest first.
  *
  * Walks `backups/<workspaceId>/<provider>[/remote]`, which is the layout
@@ -135,60 +154,117 @@ export interface RestoreCommandDeps {
  * a disabled provider has no adapter to locate targets with and offering a
  * restore that cannot be performed is worse than not listing it.
  */
-export async function listBackups(deps: RestoreCommandDeps): Promise<BackupEntry[]> {
+export async function listBackups(
+  deps: RestoreCommandDeps,
+  options: { readonly limit?: number; readonly only?: string } = {},
+): Promise<BackupEntry[]> {
+  const limit = options.limit ?? DEFAULT_LIST_LIMIT;
   const entries: BackupEntry[] = [];
 
+  // Pass one: names only. Cheap enough to do over the whole history, which is
+  // what makes "newest first" true of the history rather than of whatever
+  // happened to be read first.
+  const candidates: Array<{
+    provider: RestoreCommandDeps["providers"][number];
+    remote: boolean;
+    dir: string;
+    name: string;
+    path: string;
+    parsed: NonNullable<ReturnType<typeof parseBackupName>>;
+  }> = [];
   for (const provider of deps.providers) {
     for (const remote of [false, true]) {
       const dir = remote
         ? deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id, "remote")
         : deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id);
-      const listing = await deps.fs.readDir(dir).catch(() => []);
-      if (listing.length === 0) continue;
-
-      const actions = await readActions(deps, dir);
-      const located = await locator(deps, provider);
-
-      for (const item of listing) {
+      for (const item of await deps.fs.readDir(dir).catch(() => [])) {
         if (!item.isFile) continue;
         const parsed = parseBackupName(item.name);
         if (parsed === null) continue;
         const path = deps.joinPath(dir, item.name);
-        const bytes = await deps.fs.readFile(path).catch(() => null);
-        if (bytes === null) continue;
-
-        const neutralRel = located(parsed.originalName);
-        const sides = await readSides(deps, provider, neutralRel);
-        const own = remote ? sides.remote : sides.local;
-        const other = remote ? sides.local : sides.remote;
-        entries.push({
-          path,
-          name: item.name,
-          providerId: provider.adapter.id,
-          originalName: parsed.originalName,
-          takenAtMs: parsed.takenAtMs,
-          sizeBytes: bytes.length,
-          lineCount: countLines(bytes),
-          hashPrefix: shortHash(deps.hashBytes(bytes)),
-          remote,
-          action: actions.get(item.name) ?? "",
-          neutralRel,
-          liveRelation:
-            neutralRel === null
-              ? "unknown"
-              : own === null
-                ? "absent"
-                : deps.hashBytes(own) === deps.hashBytes(bytes)
-                  ? "identical"
-                  : "differs",
-          liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
-          outcome: predict(deps, bytes, other, neutralRel, provider),
-        });
+        if (options.only !== undefined && options.only !== path) continue;
+        candidates.push({ provider, remote, dir, name: item.name, path, parsed });
       }
     }
   }
+  candidates.sort((a, b) => b.parsed.takenAtMs - a.parsed.takenAtMs);
 
-  return entries.sort((a, b) => b.takenAtMs - a.takenAtMs);
+  // Pass two: read only what will be described. Both caches are per listing —
+  // rows of one session share its live sides, and one directory's index is
+  // read once however many of its rows survive the cut.
+  const sidesByRel = new Map<string, { local: Uint8Array | null; remote: Uint8Array | null }>();
+  const actionsByDir = new Map<string, Map<string, string>>();
+  const locators = new Map<string, (originalName: string) => string | null>();
+
+  for (const candidate of candidates.slice(0, limit)) {
+    const { provider, remote, dir, name, path, parsed } = candidate;
+    let actions = actionsByDir.get(dir);
+    if (!actions) {
+      actions = await readActions(deps, dir);
+      actionsByDir.set(dir, actions);
+    }
+    let located = locators.get(provider.adapter.id);
+    if (!located) {
+      located = await locator(deps, provider);
+      locators.set(provider.adapter.id, located);
+    }
+
+    const bytes = await deps.fs.readFile(path).catch(() => null);
+    if (bytes === null) continue;
+
+    const neutralRel = located(parsed.originalName);
+    const sidesKey = `${provider.adapter.id}\u0000${neutralRel ?? ""}`;
+    let sides = sidesByRel.get(sidesKey);
+    if (!sides) {
+      sides = await readSides(deps, provider, neutralRel);
+      sidesByRel.set(sidesKey, sides);
+    }
+    const own = remote ? sides.remote : sides.local;
+    const other = remote ? sides.local : sides.remote;
+    entries.push({
+      path,
+      name,
+      providerId: provider.adapter.id,
+      originalName: parsed.originalName,
+      takenAtMs: parsed.takenAtMs,
+      sizeBytes: bytes.length,
+      lineCount: countLines(bytes),
+      hashPrefix: shortHash(deps.hashBytes(bytes)),
+      remote,
+      action: actions.get(name) ?? "",
+      neutralRel,
+      liveRelation:
+        neutralRel === null
+          ? "unknown"
+          : own === null
+            ? "absent"
+            : deps.hashBytes(own) === deps.hashBytes(bytes)
+              ? "identical"
+              : "differs",
+      liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
+      outcome: predict(deps, bytes, other, neutralRel, provider),
+    });
+  }
+
+  // Already newest-first from the candidate sort, which ran over the whole
+  // history rather than over the page.
+  return entries;
+}
+
+/** How many backups exist in total, for the "and N older ones" line. */
+export async function countBackups(deps: RestoreCommandDeps): Promise<number> {
+  let total = 0;
+  for (const provider of deps.providers) {
+    for (const remote of [false, true]) {
+      const dir = remote
+        ? deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id, "remote")
+        : deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id);
+      for (const item of await deps.fs.readDir(dir).catch(() => [])) {
+        if (item.isFile && parseBackupName(item.name) !== null) total += 1;
+      }
+    }
+  }
+  return total;
 }
 
 export async function restoreBackup(
@@ -208,7 +284,10 @@ export async function restoreBackup(
   // Re-listed rather than trusted: the row was drawn at some earlier moment,
   // and everything about it — where the file belongs, whether it is still
   // there — is a claim about now.
-  const entry = (await listBackups(deps)).find((candidate) => candidate.path === backupPath);
+  // Re-described rather than trusted — the row is a claim about an earlier
+  // moment — but scoped to this one backup: re-reading the whole history to
+  // answer a question about one file is what made the dialog expensive.
+  const entry = (await listBackups(deps, { only: backupPath, limit: 1 }))[0];
   if (!entry) return { ok: false, reason: "unknown-backup" };
   if (entry.neutralRel === null) return { ok: false, reason: "target-not-located" };
   if (entry.remote && !deps.mayWriteRemote()) return { ok: false, reason: "remote-not-ready" };
