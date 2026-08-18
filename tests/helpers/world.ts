@@ -595,7 +595,7 @@ export class Machine {
       dryRun: options.dryRun ?? false,
       ledger: this.ledger,
       hashBytes: sha256,
-      backup: async (request) => this.writeBackup(request),
+      backup: async (request) => ({ path: await this.writeBackup(request) }),
       mintWritePath: async (target) => this.mint(target),
       machineIdPrefix: this.name === "A" ? "aaaaaaaa" : "bbbbbbbb",
       nowIso: () => new Date(this.clock.nowMs()).toISOString(),

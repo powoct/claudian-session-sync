@@ -27,6 +27,13 @@ afterEach(async () => {
 /**
  * Two machines that have overwritten each other once, which is the only way a
  * backup comes into existence at all.
+ *
+ * Every case built on this drives four `settle()`s, and each of those is three
+ * real passes over a real filesystem — so they carry explicit timeouts rather
+ * than vitest's 5 s default, the same exception `conflict-commands.test.ts`
+ * states for the same reason. Without it they pass alone and fail whenever the
+ * machine is busy, which is the worst kind of test: one that reports load as a
+ * defect.
  */
 async function withBackups() {
   const a = await RuntimeHarness.create();
@@ -61,7 +68,7 @@ describe("listing what was kept", () => {
     // §11.1: a prefix, never a whole hash, and never a line of the session.
     expect(entry?.hashPrefix.length).toBe(8);
     expect(JSON.stringify(backups)).not.toContain("written on");
-  });
+  }, 30_000);
 
   it("says what restoring would lead to, before anything is clicked", async () => {
     const { a } = await withBackups();
@@ -77,7 +84,7 @@ describe("listing what was kept", () => {
     // with — which holds the longer version A just pulled.
     expect(local?.outcome).toBe("will-be-undone");
     expect(local?.neutralRel).toBe(`claude-code/${SID}.jsonl`);
-  });
+  }, 30_000);
 
   it("survives an unreadable index — recovery never depends on it", async () => {
     const { a } = await withBackups();
@@ -94,7 +101,7 @@ describe("listing what was kept", () => {
       before.map((entry) => entry.path).sort(),
     );
     expect(after.every((entry) => entry.action === "")).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe("putting a version back", () => {
@@ -125,7 +132,7 @@ describe("putting a version back", () => {
     const outcome = await a.runtime.restore(entry?.path as string, "deadbeef", entry?.liveHashPrefix ?? null);
 
     expect(outcome).toEqual({ ok: false, reason: "backup-changed" });
-  });
+  }, 30_000);
 
   it("refuses an unknown path rather than writing to it", async () => {
     const { a } = await withBackups();
@@ -137,7 +144,7 @@ describe("putting a version back", () => {
     );
 
     expect(outcome).toEqual({ ok: false, reason: "unknown-backup" });
-  });
+  }, 30_000);
 
   it("runs a pass afterwards, so the report says what the sync then did", async () => {
     const { a } = await withBackups();

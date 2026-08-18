@@ -11,6 +11,7 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { planRotation } from "../../src/infra/backup-store";
 import { afterAll, describe, expect, it } from "vitest";
 import type { MachineId, SafeAbsolutePath, WorkspaceId } from "../../src/domain/types";
 import { sequentialIdGen } from "../../src/infra/clock";
@@ -495,5 +496,27 @@ describe("rotation is governed by I1 (§9.3.3)", () => {
     const kept = (await fsp.readdir(backupDir(stateRoot))).filter((n) => n.endsWith(".bak"));
     expect(kept, "the divergent branch survives keep=1").toHaveLength(2);
     expect(second.rotationDeferred).toBe(true);
+  });
+});
+
+describe("retention does not bind for a provider that rewrites whole records", () => {
+  it("keeps every version and says so, because none is reproducible from a newer one", () => {
+    // ADR-48 brought in a provider whose versions are whole-file rewrites, and
+    // §9.3.3's rule — delete only what a survivor provably contains — can
+    // never fire for those. So `backupKeep` silently stops bounding anything
+    // and the area grows for as long as the provider is enabled. That is the
+    // safe direction (deleting would destroy the only copy), but it is not
+    // what the user set, so the plan has to report it.
+    const versions = Array.from({ length: 5 }, (_, i) => ({
+      name: `conv-1.meta.json.2026081${i}T000000-000Z.00.bak`,
+      createdAtMs: 1_000 + i,
+      recoverableFromSurvivor: false,
+    }));
+
+    const plan = planRotation(versions, 3);
+
+    expect(plan.deleteNames).toEqual([]);
+    expect(plan.keptCount).toBe(5);
+    expect(plan.deferred).toBe(true);
   });
 });

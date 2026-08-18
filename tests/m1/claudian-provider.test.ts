@@ -22,6 +22,10 @@ import { RuntimeHarness } from "../helpers/runtime-harness";
 const CONV = "conv-1786422687897-15ktes7p9";
 const META = `${CONV}.meta.json`;
 
+// Each case drives at least one `settle()`, and a settle is three real passes
+// through the real composition root. Explicit timeouts rather than vitest's
+// 5 s default, for the reason `conflict-commands.test.ts` states: on a busy
+// machine the default turns load into a failure report.
 const machines: RuntimeHarness[] = [];
 afterEach(async () => {
   while (machines.length) await machines.pop()?.dispose();
@@ -56,7 +60,7 @@ describe("a provider whose root lives inside the vault", () => {
 
     // The report must be a real pass, not a root-overlap abort.
     expect(report?.abortReason ?? null).toBeNull();
-  });
+  }, 30_000);
 
   it("pushes a record and fast-forwards its rewrites without a conflict", async () => {
     const machine = await harnessWithClaudian();
@@ -94,7 +98,7 @@ describe("a provider whose root lives inside the vault", () => {
     expect(overwrite?.reason).toBe("remote-at-converged-base");
     // I1: the overwritten replica version was backed up first.
     expect(overwrite?.backupPath).toBeTruthy();
-  });
+  }, 30_000);
 
   it("pulls the other machine's records, tombstones included", async () => {
     const a = await harnessWithClaudian();
@@ -118,7 +122,7 @@ describe("a provider whose root lives inside the vault", () => {
     // Claudian on this machine now hides the conversation, and this plugin's
     // own admission stops carrying its sessions (ADR-47). No session file was
     // deleted anywhere — ADR-10 still holds.
-  });
+  }, 30_000);
 
   it("turns a genuine fork into a conflict, never a picked side", async () => {
     const a = await harnessWithClaudian();
@@ -146,7 +150,33 @@ describe("a provider whose root lives inside the vault", () => {
     // Neither original moved: B still holds its own rewrite, the replica A's.
     const bLocal = JSON.parse(await fsp.readFile(path.join(storeDir(b), META), "utf8"));
     expect(bLocal.rev).toBe("b2");
-  });
+  }, 30_000);
+
+  it("says out loud that retention has stopped bounding the backup folder", async () => {
+    // §9.3.3 deletes only what a survivor provably contains, and for whole-file
+    // records nothing ever is — so `backupKeep` quietly stops applying and the
+    // folder grows for as long as this provider is on. Keeping is the safe
+    // direction; keeping *silently* is not, and the flag that would have said
+    // so was being dropped between the writer and the report.
+    const machine = await harnessWithClaudian();
+    await writeRecord(machine, META, { id: CONV, providerId: "codex", sessionId: null, rev: 1 });
+    await machine.settle();
+
+    // Enough rewrites that the retention limit would have bitten for an
+    // append-only file: default keep is 3.
+    const notices: string[] = [];
+    for (let rev = 2; rev <= 6; rev++) {
+      await writeRecord(machine, META, { id: CONV, providerId: "codex", sessionId: null, rev });
+      for (let i = 0; i < 3; i++) {
+        await machine.runtime.syncNow();
+        machine.advanceClock(95_000);
+        notices.push(...(machine.runtime.lastPassReport()?.notices ?? []));
+      }
+    }
+
+    expect(notices.join(" ")).toContain("claudian");
+    expect(notices.join(" ")).toContain("kept past the retention limit");
+  }, 60_000);
 
   it("conflicts rather than guesses when there is no witnessed base", async () => {
     // Two populated stores meeting for the first time: same record name,
@@ -167,5 +197,5 @@ describe("a provider whose root lives inside the vault", () => {
     const action = report?.actions.find((x) => x.neutralRel === `claudian/${META}`);
     expect(action?.action).toBe("CONFLICT");
     expect(action?.reason).toBe("opaque-divergent-no-base");
-  });
+  }, 30_000);
 });

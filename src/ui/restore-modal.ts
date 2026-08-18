@@ -18,8 +18,7 @@ import { Modal, Notice, type App } from "obsidian";
 import type { BackupEntry } from "../orchestration/restore-commands";
 import type { PluginRuntime } from "../orchestration/plugin-runtime";
 
-/** Enough to choose from without turning the dialog into a file manager. */
-const MAX_ROWS = 60;
+
 
 export class RestoreModal extends Modal {
   constructor(
@@ -69,10 +68,14 @@ export class RestoreModal extends Modal {
         "after the restore goes into the replaced file and is lost.",
     });
 
-    for (const backup of backups.slice(0, MAX_ROWS)) this.renderOne(contentEl, backup);
-    if (backups.length > MAX_ROWS) {
+    for (const backup of backups) this.renderOne(contentEl, backup);
+    // The list is a bounded page of the newest, because describing a row means
+    // reading it and both live sides. What it left out is stated rather than
+    // implied — an empty tail would read as "this is everything".
+    const total = await this.runtime.backupCount();
+    if (total > backups.length) {
       contentEl.createEl("p", {
-        text: `…and ${backups.length - MAX_ROWS} older ones, in the backup folder.`,
+        text: `…and ${total - backups.length} older ones, in the backup folder.`,
       });
     }
   }

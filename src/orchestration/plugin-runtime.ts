@@ -40,6 +40,7 @@ import { PROVIDERS, providerById } from "../providers/registry";
 import {
   type BackupEntry,
   type RestoreOutcome,
+  countBackups,
   listBackups,
   restoreBackup,
 } from "./restore-commands";
@@ -386,6 +387,12 @@ export class PluginRuntime {
   async backups(): Promise<BackupEntry[]> {
     const deps = await this.conflictDeps();
     return deps ? listBackups(deps) : [];
+  }
+
+  /** Everything the folder holds, so the dialog can say what it left out. */
+  async backupCount(): Promise<number> {
+    const deps = await this.conflictDeps();
+    return deps ? countBackups(deps) : 0;
   }
 
   async restore(

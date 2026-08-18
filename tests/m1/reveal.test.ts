@@ -73,6 +73,7 @@ const conflictEntry = {
 function stubRuntime(opened: string[], succeeds: boolean) {
   return {
     backups: async () => [backupEntry],
+    backupCount: async () => 1,
     conflicts: async () => [conflictEntry],
     reveal: async (target: string) => {
       opened.push(target);
