@@ -58,7 +58,7 @@ kill) on real machines.
 | **Codex** | ✅ Supported | Lifecycle measured on macOS + Windows incl. compact; cross-machine resume verified in a two-machine acceptance run (2026-08-15) |
 | **Claudian records** | ✅ Optional, off by default | Claudian's own conversation records (`.claudian/sessions/`), whole-file synced with converged-base fast-forward — for vaults whose own sync cannot carry dotfolders |
 | **OpenCode** | ❌ Cannot be supported | Its history lives entirely inside one SQLite database; there is no per-session file to carry and no official export. This is structural, not a missing feature |
-| **Grok** | ⏳ Planned | Multi-file session directories with lock files; needs group-atomic apply first |
+| **Grok** | 🧪 Experimental, off by default | Lifecycle measured on macOS + Windows (2026-08-24). A Grok session is a *folder* whose files disagree about how they are written: the history is appended, the record that makes the session visible is rewritten whole — so they are carried under different rules. The two-machine acceptance run has **not** been done yet, which is what the experimental label means here |
 | **Pi** | ⏳ Planned | Not yet measured |
 
 Every provider is **off by default**. Enabling one for the first time forces a dry run so
@@ -181,6 +181,8 @@ A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接�
   覆盖前必备份;不认识的文件永远原地不动;不传播删除。
 - **请勿把 `.claudian/` 排除在你的 vault 同步之外**——Claudian 的会话列表靠它;
   注意 Obsidian 官方同步不带隐藏文件夹(`.obsidian` 除外)。
+- **Grok 目前是实验性的**:生命周期已双平台实测,但两机往返验收还没做完,所以默认关闭
+  并在设置里标着实验性。同步的是会话本体(记录 + 历史),其余文件由对端 CLI 自行重建。
 - 本插件与 Claudian 项目**无隶属关系**。
 
 设置与安全细节见上文英文说明;设计文档在 [docs/zh-CN/](docs/zh-CN/)。

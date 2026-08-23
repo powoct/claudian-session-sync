@@ -691,6 +691,17 @@ export class FakeCli {
     const entries = await fsp.readdir(this.projectDir).catch(() => []);
     return entries.filter((name) => name.endsWith(".jsonl")).sort();
   }
+
+  /**
+   * Everything in the directory, including names `list()` filters out.
+   *
+   * `list()` answers "what would the CLI show", which is the right question
+   * almost everywhere and the wrong one for "did a file we never meant to
+   * land arrive anyway" — it cannot see a non-jsonl file at all.
+   */
+  async listAll(): Promise<string[]> {
+    return (await fsp.readdir(this.projectDir).catch(() => [])).sort();
+  }
 }
 
 export class FakeSession {

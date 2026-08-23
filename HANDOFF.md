@@ -1,9 +1,21 @@
 # HANDOFF — 交接说明
 
-> 更新时间：2026-08-12（M1 Exit 已达成；M2 已开工：Claudian 源码调查完成，远端白名单缺陷已修）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：**2026-08-24**（M1/M2/M4 已完成并发布 0.1.0；M3 主体交付：备份恢复 UI、`.aiss/prev` 否决、**Grok 接入**）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态：步骤 8 复验通过，M1 Exit 达成；R2-1 已修待真机顺手确认
+## 当前状态（2026-08-24）
+
+| 里程碑 | 状态 |
+|---|---|
+| **M0 / M1** | ✅ 完成，M1 Exit 达成（2026-08-11 步骤 8 复验通过） |
+| **M2** | ✅ 完成：provider 抽象 + **Codex 接入**（Tier A，2026-08-15 两机验收后已摘 experimental）；OpenCode 判定为结构上不可同步并移出范围 |
+| **M4** | ✅ 完成：README / LICENSE(MIT, 2026, powoct) / release workflow / 仓库转 public / **0.1.0 已发布** |
+| **M3** | 🟡 主体已交付：冲突 UI（M1 即有）、**备份恢复 UI**（ADR-49/50）、`.aiss/prev` **评估后否决**（ADR-51）、`claudian` provider（ADR-48）、**Grok 接入**（ADR-52/53/54，本批）。剩：孤立 aux 清理命令、Pi（无数据） |
+
+**唯一待办的人类动作**：Grok 的真机验收（`tmp/acceptance/AGENTS.md` 末尾的 Grok 九步附录），
+它是 Grok 摘掉 `experimental` 标签的闸门。在那之前 Grok **可写但默认关闭且标实验性**。
+
+## 历史状态：步骤 8 复验通过，M1 Exit 达成
 
 **2026-08-10 首轮真机验收已执行**（Mac ↔ Windows，记录在验收机器的
 `tmp/acceptance/out/`，脱敏摘要入库为
@@ -341,10 +353,12 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **发 0.2.0**(含 claudian provider + M4 验收后摘 experimental 的 Codex):bump 三处版本 → tag | 用户动作;或攒一批再发 |
-| 0 | **跑 `tmp/probe-m2/` 的 P6(Grok 生命周期 + 最小可见集)** —— 注意是 **probe-m2**,不是 `tmp/probe/`(后者的白名单里没有 grok,`--dir` 会被直接拒)。P6 的删文件实验只在 `GROK_HOME` 沙箱里做,开头先验证 CLI 是否认它;不认就整节跳过 | M3 的 Grok group 原子性;G1 不成立则 Grok 永远只能 Tier C |
-| 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 3 | ~~备份恢复 UI~~ ✅(ADR-49)、~~点击路径的锁与就绪闸门~~ ✅(ADR-50)。M3 剩余:Grok group 原子性(§6.6 staging + mode 守卫逐 group,**需先跑 Grok 生命周期探测**)/ 孤立 aux 清理 / `.aiss/prev` 评估 | 依次 |
+| **1** | **Grok 真机验收(九步,两个方向)** —— 剧本在 `tmp/acceptance/AGENTS.md` 末尾的 Grok 附录,规范在 testing.md §9.6 | **用户动作**。它是摘 `experimental` 的闸门;G3/G4 不过 ⇒ Grok 改回只读;**G8 不过是数据安全缺陷,优先级最高** |
+| 2 | **重跑 `evidence.mjs init`** 再开始验收 | 本批把快照改成覆盖**每个已启用 provider** 的本机 root(`providerRoots` + `local:<id>` 树);旧的 `out/config.json` 没有这个字段 |
+| 3 | **发 0.2.0**(claudian provider + Grok):bump 三处版本 → tag | 用户动作;建议等 Grok 验收结果再发 |
+| 4 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
+| 5 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
+| 6 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口) | 不阻塞,顺手 |
 
 **旧的发布动作清单(已全部完成)**
 
@@ -363,6 +377,55 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
   （这条原本是「Windows 上可能整片会话无法同步」的疑虑）。
 - 目录深度就是 `YYYY/MM/DD` 三层，与 adapter 的假设一致；首行 `session_meta.payload` 含
   `cwd` 与 `cli_version`。
+
+### M3 · Grok 接入（2026-08-24，本批）
+
+**输入**：用户在 macOS + Windows 两台真机上跑完了 `tmp/probe-m2/` 的 P6，产物在
+`tmp/probe-m2/out_r2/`（38 张生命周期快照 + 两份平台小结，不入库）。
+脱敏摘要入库为 [findings/2026-08-24-grok-probe.md](docs/zh-CN/findings/2026-08-24-grok-probe.md)。
+
+**先做的事：不信小结，逐条对着原始快照复核。** 结果是两份小结在多处不准，其中一处
+**改变了设计**：
+
+- 两份小结对「缺 `summary.json` 时 resume 会怎样」给了互相矛盾且都错的描述。按快照复核，
+  双平台的真实结果是——**目标会话零写入，用户的下一个 turn 被静默追加进了另一个会话**
+  （macOS 是 g06 fork 出来的那个 +3 行、`prompt_history` +126 B；Windows 同形）。
+  且 macOS 侧排除了「回落到最近使用的会话」这个解释。
+- 于是 G1 的读法从「primary 落位前不可见」收紧为 **「primary 落位之前，这个会话目录不能
+  对 CLI 存在」**——因为指向它的一次 resume 会污染**别人的**对话，而那些写入是合法纯追加，
+  本插件会忠实地复制到所有机器。
+- 其余修正：`announcement_state.json` 只变一次且是**机器作用域**（fork 连 mtime 都照抄）；
+  `title_refresh_idx` 在 mac 上只从 `"0"` 变成 `"2"`（跳过 `"1"`），Windows 全程不变，
+  **不是单调计数器**；「差异从偏移 0 开始」在本数据集**不成立**（快照只在 64 KB 整数倍存
+  前缀 hash，而所有 JSON 状态文件都小于 64 KB，报的偏移只是「已证明相等的下界」）；
+  强杀实验两平台**不是同一个实验**，不支持任何 OS 结论。
+
+**交付**
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 1 | **引擎首次支持多文件 group** | 移除了 `if (file.role !== "primary") continue;`。三条安全规则：组内 **primary 最后落地**；`maxFilesPerPass` 按 **group** 分配（**带下限**：超预算的组独占一轮，否则永远不动）；**replica 里没有 primary 的 group 一个文件都不落**（`primary-not-in-replica`） |
+| 2 | **Grok adapter**（ADR-52） | 逐文件分级：`summary.json` = primary 走 §7.2b opaque；`chat_history/updates/rewind_points` 走 §7.2 前缀表；其余不入白名单。中立路径 `grok/<uuid>/<member>`，落位按对端 vault 重算 `encodeURIComponent(realpath(vault))` |
+| 3 | **`replicaOnly` 契约**（ADR-53） | 移除上面那行 `continue` 会让 Claude Code 的 `<sid>.origin.json` 被拉进 CLI 目录。**原测试抓不到**——那个 fake CLI 只列 `.jsonl`。先把断言改成读目录、复现变红，再用显式字段修 |
+| 4 | **备份路径加 `<logicalId>` 层**（ADR-54，**阻塞级**） | 评审复现：Grok 是第一个**文件名在会话之间重复**的 provider，而备份按 basename 命名、恢复按 basename 定位 ⇒ **从会话 A 取的备份会覆盖会话 B 的对话，返回 `ok:true`**。顺带修好轮转（原本也按文件名圈候选集）。旧的扁平备份仍可列可恢复；**文件名有歧义时返回「定位不到」而不是猜** |
+| 5 | 半落地告警 | 判定写成「**本机没有 primary 而 aux 落了**」，不是「primary 的写失败了」——最常见的撕裂根本没有错误（aux 先安静下来落地，primary 因不稳定 `DEFER`） |
+| 6 | 注册表 | Grok **默认关闭 + `experimental`**，首次启用强制 dry-run |
+
+**质量**：932 + 21 条测试全绿，`npm run verify` 六项门禁全 OK；**8 次注入验证**全部先红后绿
+（组内顺序 / 组内预算 / 缺 primary 不组装 / notice 存在性 / 备份 logicalId 层 / 预算下限 /
+notice 只认 FAILED_ / 旧扁平布局兼容）。
+
+**开发机顺手关掉的半个闸门**：本机也装了 grok，在沙箱 `GROK_HOME` 里实测——
+**只放 `summary.json` + `chat_history.jsonl` 的会话仍被 `sessions list` 列出**，
+且全程没有 `session_search.sqlite`（比探测的推断更硬）。G1 充分性的**列表这一半已关闭**；
+resume 那一半要登录态，留给真机。另发现 `grok export` 对一个没有 `updates.jsonl` 的会话报
+`Session not found`，但 `sessions list` 列得出——**两条解析路径不同**，且抬高了
+`updates.jsonl` 的地位（同步集本来就包含它）。
+
+**还没测的东西**（findings §七有完整表，按后果排序）：⛔ 真两机往返（两次「跨 cwd」都在
+同一台机器上做，**没有一个字节真的在两机之间走过**）、⛔ G1 充分性的 resume 那一半、
+rewind 与 `/compact`（唯一可能就地重写历史的操作，最坏后果是多一次人工冲突）、
+稳定窗口实测值、`$GROK_HOME` 顶层从未进快照。
 
 ## 真机验收怎么跑
 
@@ -437,15 +500,19 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 
 ## 阻塞项
 
-无阻塞，可直接开工 M1。以下是已知的非阻塞欠账：
+代码侧无阻塞。唯一挡在 Grok 摘 `experimental` 前面的是**人类动作**（真机九步验收）。
 
 | 项 | 性质 | 说明 |
 |---|---|---|
-| OQ-7 规模性能基准 | 非阻塞（M2） | 1000 session 的 pass 耗时与备份膨胀 |
-| OQ-10 漫游 profile | 非阻塞（M2） | `%USERPROFILE%\.claudian-session-sync` 是否被漫游同步 |
-| OQ-6 生命周期 | 非阻塞（M2/M3） | OpenCode/Grok/Pi 结构已摸清，append-only 未验证 |
+| **OQ-15 Grok 两机往返 + G1 充分性** | ⛔ **挡 Grok 摘 experimental**（不挡接入） | 两次「跨 cwd」实验都在同一台机器上做，两机之间没有一个字节真的走过。列表这一半已在开发机关掉 |
+| OQ-14 Grok rewind / `/compact` | 非阻塞 | grok 1.0.5 无 headless 入口。风险已封顶：若是截断 ⇒ 判 `CONFLICT`、两侧都留、不丢字节 |
+| OQ-16 Grok 稳定窗口实测值 | 非阻塞 | 现有设计按观察判定；要精确值需 5 秒粒度专项探测 |
+| ~~OQ-7 规模性能基准~~ | ✅ 关闭（2026-08-13） | 百文件/百 MiB 级：全量 hash 亚秒 |
+| OQ-10 漫游 profile | 非阻塞 | `%USERPROFILE%\.claudian-session-sync` 是否被漫游同步 |
+| ~~OQ-6 生命周期~~ | ✅ 关闭（2026-08-24） | OpenCode 结构上不可同步；**Grok 已接入**；Pi 两台机器都「装了但无会话」 |
 | UNC 路径 | 非阻塞 | 未测（无权限），实测前按不支持处理 |
-| `memory/` 子目录归属 | 非阻塞 | M1 白名单不同步它，记为已知限制（F-7） |
+| `memory/` 子目录归属 | 非阻塞 | 白名单不同步它，记为已知限制（F-7） |
+| Grok 的 `resources_state.json` / `compaction*` / `plan*` / `terminal` / `web_fetch` | 非阻塞（已知限制） | 真实库里存在但沙箱从未产出，**不在白名单** ⇒ 不同步。刻意的：`announcement_state.json` 已被证明是机器作用域，「未知成员默认跟着走」会把 A 机的指纹移植到 B 机 |
 
 ## 交接说明
 

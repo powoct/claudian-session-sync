@@ -369,8 +369,14 @@ function writer(stateRoot: string, keep: number) {
   };
 }
 
-const backupDir = (stateRoot: string, remote = false) =>
-  path.join(stateRoot, "backups", WS, "claude-code", ...(remote ? ["remote"] : []));
+/**
+ * `backups/<ws>/<provider>[/remote]/<logicalId>` — the session segment is part
+ * of the layout since §9.3.2 gained it, because a backup's file name alone
+ * stopped identifying a session once a provider existed whose sessions all
+ * hold a file with the same name.
+ */
+const backupDir = (stateRoot: string, remote = false, logicalId = "s") =>
+  path.join(stateRoot, "backups", WS, "claude-code", ...(remote ? ["remote"] : []), logicalId);
 
 describe("backup before overwrite", () => {
   it("copies the version about to be destroyed", async () => {

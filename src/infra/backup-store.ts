@@ -107,20 +107,36 @@ export interface BackupTarget {
   readonly providerId: string;
   /** True when preserving a *remote* version about to be overwritten (§9.3.2). */
   readonly remote: boolean;
+  /** The session the file belongs to; the segment that keeps names distinct. */
+  readonly logicalId: string;
 }
 
 /**
- * `backups/<workspaceId>/<providerId>[/remote]`.
+ * `backups/<workspaceId>/<providerId>[/remote]/<logicalId>`.
  *
  * The `remote/` subtree is what makes PUSH_OVERWRITE survivable. The version
  * being overwritten there may have come from another machine and will vanish
  * from the sync directory the moment it is replaced, so the overwriting machine
  * has to bring a copy down first. Without it, PUSH_OVERWRITE would be the one
  * action that can destroy bytes with no local record — a direct I1 violation.
+ *
+ * The `<logicalId>` segment is not organisation, it is correctness. A backup is
+ * named after the file it copied, and until Grok every provider put the session
+ * id in that name — `<uuid>.jsonl`, `rollout-<ts>-<uuid>.jsonl`,
+ * `conv-<id>.meta.json` — so one flat directory per provider could never hold
+ * two files with the same name from different sessions. Grok's members are a
+ * fixed vocabulary (`summary.json`, `chat_history.jsonl`, …) repeated in every
+ * session, so the name stopped answering "which session is this from" and the
+ * directory has to. Two things depended on that answer: which live file a
+ * restore writes into, and which copies retention may delete as reproducible.
  */
 export function backupDirFor(target: BackupTarget): string[] {
   const parts = [target.workspaceId, target.providerId];
   if (target.remote) parts.push("remote");
+  // Safe as a sibling of the literal `remote`: every adapter's logicalId
+  // pattern is a uuid or `conv-<digits>-<alnum>`, neither of which can spell
+  // it. The path still goes through PathGuard before anything is written.
+  parts.push(target.logicalId);
   return parts;
 }
 

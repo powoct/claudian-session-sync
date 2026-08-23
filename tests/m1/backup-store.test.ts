@@ -85,22 +85,35 @@ describe("backup naming", () => {
 });
 
 describe("backup layout (§9.3.2)", () => {
-  it("separates each workspace and provider", () => {
-    expect(backupDirFor({ workspaceId: "ws", providerId: "claude-code", remote: false })).toEqual([
-      "ws",
-      "claude-code",
-    ]);
+  const SID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+  it("separates each workspace, provider and session", () => {
+    expect(
+      backupDirFor({ workspaceId: "ws", providerId: "claude-code", remote: false, logicalId: SID }),
+    ).toEqual(["ws", "claude-code", SID]);
   });
 
   it("keeps overwritten remote versions in their own subtree", () => {
     // This is what makes PUSH_OVERWRITE survivable: the version being replaced
     // may have come from another machine and disappears from the sync directory
     // the moment it is overwritten, so a local copy has to exist first.
-    expect(backupDirFor({ workspaceId: "ws", providerId: "claude-code", remote: true })).toEqual([
-      "ws",
-      "claude-code",
-      "remote",
-    ]);
+    expect(
+      backupDirFor({ workspaceId: "ws", providerId: "claude-code", remote: true, logicalId: SID }),
+    ).toEqual(["ws", "claude-code", "remote", SID]);
+  });
+
+  it("puts two sessions' copies of one file name in different places", () => {
+    // The reason the session segment exists at all. Grok's members are a fixed
+    // vocabulary repeated in every session, so `chat_history.jsonl.<stamp>.bak`
+    // stopped identifying anything — and both a restore's target and
+    // retention's "can a survivor reproduce this" question were answered from
+    // that name.
+    const other = "01a02f27-c1aa-7aa1-9580-e4188952ef3b";
+    expect(
+      backupDirFor({ workspaceId: "ws", providerId: "grok", remote: false, logicalId: SID }),
+    ).not.toEqual(
+      backupDirFor({ workspaceId: "ws", providerId: "grok", remote: false, logicalId: other }),
+    );
   });
 });
 

@@ -168,22 +168,37 @@ export async function listBackups(
     provider: RestoreCommandDeps["providers"][number];
     remote: boolean;
     dir: string;
+    /** The session, from the directory that holds the copy; null for pre-§9.3.2 flat backups. */
+    logicalId: string | null;
     name: string;
     path: string;
     parsed: NonNullable<ReturnType<typeof parseBackupName>>;
   }> = [];
   for (const provider of deps.providers) {
     for (const remote of [false, true]) {
-      const dir = remote
+      const base = remote
         ? deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id, "remote")
         : deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id);
-      for (const item of await deps.fs.readDir(dir).catch(() => [])) {
-        if (!item.isFile) continue;
-        const parsed = parseBackupName(item.name);
-        if (parsed === null) continue;
-        const path = deps.joinPath(dir, item.name);
-        if (options.only !== undefined && options.only !== path) continue;
-        candidates.push({ provider, remote, dir, name: item.name, path, parsed });
+      // Both levels: copies are written under `<base>/<logicalId>/`, and a
+      // version of this plugin before that wrote them straight into `<base>`.
+      // Those older copies must stay listable and restorable — a backup that
+      // becomes unreachable because the layout moved is I1 broken by an
+      // upgrade.
+      const dirs: Array<{ dir: string; logicalId: string | null }> = [{ dir: base, logicalId: null }];
+      for (const item of await deps.fs.readDir(base).catch(() => [])) {
+        // `remote` is a sibling of the session directories, never one of them.
+        if (item.isFile || (!remote && item.name === "remote")) continue;
+        dirs.push({ dir: deps.joinPath(base, item.name), logicalId: item.name });
+      }
+      for (const { dir, logicalId } of dirs) {
+        for (const item of await deps.fs.readDir(dir).catch(() => [])) {
+          if (!item.isFile) continue;
+          const parsed = parseBackupName(item.name);
+          if (parsed === null) continue;
+          const path = deps.joinPath(dir, item.name);
+          if (options.only !== undefined && options.only !== path) continue;
+          candidates.push({ provider, remote, dir, logicalId, name: item.name, path, parsed });
+        }
       }
     }
   }
@@ -194,10 +209,10 @@ export async function listBackups(
   // read once however many of its rows survive the cut.
   const sidesByRel = new Map<string, { local: Uint8Array | null; remote: Uint8Array | null }>();
   const actionsByDir = new Map<string, Map<string, string>>();
-  const locators = new Map<string, (originalName: string) => string | null>();
+  const locators = new Map<string, Awaited<ReturnType<typeof locator>>>();
 
   for (const candidate of candidates.slice(0, limit)) {
-    const { provider, remote, dir, name, path, parsed } = candidate;
+    const { provider, remote, dir, logicalId, name, path, parsed } = candidate;
     let actions = actionsByDir.get(dir);
     if (!actions) {
       actions = await readActions(deps, dir);
@@ -212,7 +227,7 @@ export async function listBackups(
     const bytes = await deps.fs.readFile(path).catch(() => null);
     if (bytes === null) continue;
 
-    const neutralRel = located(parsed.originalName);
+    const neutralRel = located(parsed.originalName, logicalId);
     const sidesKey = `${provider.adapter.id}\u0000${neutralRel ?? ""}`;
     let sides = sidesByRel.get(sidesKey);
     if (!sides) {
@@ -256,11 +271,18 @@ export async function countBackups(deps: RestoreCommandDeps): Promise<number> {
   let total = 0;
   for (const provider of deps.providers) {
     for (const remote of [false, true]) {
-      const dir = remote
+      const base = remote
         ? deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id, "remote")
         : deps.joinPath(deps.backupsDir, deps.workspaceId, provider.adapter.id);
-      for (const item of await deps.fs.readDir(dir).catch(() => [])) {
-        if (item.isFile && parseBackupName(item.name) !== null) total += 1;
+      for (const item of await deps.fs.readDir(base).catch(() => [])) {
+        if (item.isFile) {
+          if (parseBackupName(item.name) !== null) total += 1;
+          continue;
+        }
+        if (!remote && item.name === "remote") continue;
+        for (const inner of await deps.fs.readDir(deps.joinPath(base, item.name)).catch(() => [])) {
+          if (inner.isFile && parseBackupName(inner.name) !== null) total += 1;
+        }
       }
     }
   }
@@ -377,31 +399,67 @@ function livePrefix(deps: RestoreCommandDeps, bytes: Uint8Array | null): string 
 }
 
 /**
- * Basename → the neutral path of a file that exists on that side now.
+ * Which live file a backup belongs to.
  *
- * Built once per directory rather than per row: it lists the provider and
- * walks the replica subtree, and a backup directory holding twenty rows would
- * otherwise do that twenty times.
+ * Keyed by `(logicalId, basename)`, because the basename alone stopped being an
+ * identity the moment a provider existed whose sessions all contain a file
+ * called `chat_history.jsonl`. A name-only lookup silently resolved to
+ * whichever session was enumerated last, and the restore then overwrote *that*
+ * session — a cross-session destruction the user was never shown.
+ *
+ * Backups written before the layout carried the session id have no logicalId,
+ * so they still resolve by name — correct for every provider that existed
+ * then, since all of theirs put the session id in the file name. When such a
+ * name is ambiguous the answer is `null`: the row says the target cannot be
+ * located and offers the folder, which is the honest outcome rather than a
+ * guess with a one-in-N chance of destroying a conversation.
+ *
+ * Built once per provider rather than per row: it lists the provider and walks
+ * the replica subtree, and a directory holding twenty rows would otherwise do
+ * that twenty times.
  */
 async function locator(
   deps: RestoreCommandDeps,
   provider: RestoreCommandDeps["providers"][number],
-): Promise<(originalName: string) => string | null> {
-  const byBasename = new Map<string, string>();
+): Promise<(originalName: string, logicalId: string | null) => string | null> {
+  const byKey = new Map<string, string>();
+  const byBasename = new Map<string, string | null>();
+
+  const remember = (neutralRel: string, logicalId: string) => {
+    const base = baseNameOf(neutralRel);
+    byKey.set(`${logicalId}\u0000${base}`, neutralRel);
+    // `null` marks "more than one session claims this name" — kept distinct
+    // from "absent" so the fallback can refuse rather than pick.
+    const seen = byBasename.get(base);
+    if (seen === undefined) byBasename.set(base, neutralRel);
+    else if (seen !== neutralRel) byBasename.set(base, null);
+  };
 
   for (const group of await provider.adapter.listSessions().catch(() => [])) {
-    for (const file of group.files) {
-      byBasename.set(baseNameOf(file.neutralRel), file.neutralRel);
-    }
+    for (const file of group.files) remember(file.neutralRel, group.logicalId);
   }
-  await walkReplica(deps, provider.adapter, byBasename);
+  await walkReplica(deps, provider.adapter, remember);
 
-  return (originalName) => {
+  return (originalName, logicalId) => {
+    if (logicalId !== null) {
+      const exact = byKey.get(`${logicalId}\u0000${originalName}`);
+      if (exact !== undefined) return exact;
+      // The session is gone from both sides, but the backup still knows where
+      // it belonged, and every adapter rebuilds a target path from the neutral
+      // path alone. Reconstruct it and let the adapter's own classifier be the
+      // authority on whether the shape is one of its own.
+      for (const shape of [
+        `${provider.adapter.id}/${logicalId}/${originalName}`,
+        `${provider.adapter.id}/${originalName}`,
+      ]) {
+        if (provider.adapter.classifyNeutral(shape) !== null) return shape;
+      }
+      return null;
+    }
     const known = byBasename.get(originalName);
-    if (known !== undefined) return known;
+    if (known !== undefined) return known; // may be null: ambiguous, refuse
     // Flat fallback: for a provider whose layout is one directory deep, the
-    // basename *is* the whole relative path, and the adapter's own classifier
-    // is the authority on whether that shape is one of its own.
+    // basename *is* the whole relative path.
     const flat = `${provider.adapter.id}/${originalName}`;
     return provider.adapter.classifyNeutral(flat) === null ? null : flat;
   };
@@ -410,7 +468,7 @@ async function locator(
 async function walkReplica(
   deps: RestoreCommandDeps,
   adapter: ProviderAdapter,
-  into: Map<string, string>,
+  remember: (neutralRel: string, logicalId: string) => void,
   rel: string = adapter.id,
   depth = 1,
 ): Promise<void> {
@@ -420,14 +478,14 @@ async function walkReplica(
     if (item.isFile) {
       // Validated, not merely found: the replica is a directory an external
       // sync tool writes into, and an unvalidated name from it would become a
-      // path this command writes to (§8.2's whole point).
-      if (!into.has(item.name) && adapter.classifyNeutral(childRel) !== null) {
-        into.set(item.name, childRel);
-      }
+      // path this command writes to (§8.2's whole point). The classifier also
+      // supplies the session id, which is the half the file name lost.
+      const classified = adapter.classifyNeutral(childRel);
+      if (classified !== null) remember(childRel, classified.logicalId);
       continue;
     }
     if (item.name === QUARANTINE_DIR) continue;
-    if (depth < 6) await walkReplica(deps, adapter, into, childRel, depth + 1);
+    if (depth < 6) await walkReplica(deps, adapter, remember, childRel, depth + 1);
   }
 }
 

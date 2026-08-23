@@ -919,6 +919,35 @@ console.log(JSON.stringify(rows, null, 2));
 | 9 | **回滚验证**：从备份手动恢复一份，resume | 恢复的文件 CLI 可正常加载；sha256 == 备份 sha256 | evidence + 截图 |
 | 10 | 关掉 Obsidian 期间在 CLI 里聊，再开 Obsidian | 启动后**两轮 pass 之内**（启动观察轮 + 下一轮/一次手动同步）捕获到新内容（首轮只观察，属设计——2026-08-10 裁决） | PassReport + evidence |
 
+### 9.6 Grok 验收剧本(摘 `experimental` 的闸门,OQ-15)
+
+P6 证明了 Grok **能**同步;这一节证明它**同步对了**。两件事从未被测过,而它们恰好是
+产品承诺本身:**没有一个字节真的在两台机器之间走过**(6b.2 的两个实验都在同一台机器上
+换 cwd,同 `GROK_HOME`/同 OS/同构建/同登录态),以及**只放同步集能不能被 CLI 认出**
+(移文件实验只测了必要性)。在这两条通过之前,设置面板的 `experimental` 标记不摘。
+
+前置:两台机器都装了 Grok 且在 Claudian 里各自登录过;插件已配好同一个 sync 目录;
+Grok provider 已启用(首次启用会强制 dry-run 确认)。
+
+| 步 | 操作 | 期望 | 证据 |
+|---|---|---|---|
+| G1 | **A 机**:经 Claudian 起一个 Grok 会话,聊 3 轮,静置 90 s,手动同步 | replica 出现 `<wsId>/grok/<sid>/` 且**恰好三个文件**:`summary.json`、`chat_history.jsonl`、`updates.jsonl`。`prompt_context.json`/`system_prompt.txt`/`events.jsonl`/`*.lock` **不在里面** | replica `ls` + 两侧 sha256 |
+| G2 | **B 机**(此前从未在本 vault 里用过 Grok,`~/.grok/sessions/<encodeURIComponent(vault)>` 不存在):等文件到达,手动同步 | 目录被创建;三个文件落地,sha256 与 A 机相同;`summary.json` 的 `info.id` == 目录名 | 目录名截图 + evidence 表 |
+| G3 | **B 机**:`grok sessions list` | **列出这个会话** ← 这是 **G1 充分性**的第一半:只有同步集、没有 `system_prompt.txt`/`prompt_context.json`/`events.jsonl`,CLI 仍要认得它 | CLI 输出(只截会话数与 uuid,标题按红线不入档) |
+| G4 | **B 机**:`grok --resume <sid> -p "..."` | 成功,**历史完整**(`grok export` 行数 ≥ A 机 G1 之后的行数);缺席的三个文件被 CLI 就地重建 | export 行数 + 重建后目录 `ls` |
+| G5 | **B 机**:再聊 2 轮,静置 90 s,手动同步 | replica 的 `chat_history.jsonl` 纯追加变长;`summary.json` 走 `PUSH_OVERWRITE` + `remote-at-converged-base`(**不是** CONFLICT);备份区有覆盖前副本 | PassReport + 备份 evidence |
+| G6 | **A 机**:手动同步,然后 resume | `chat_history.jsonl` `PULL_OVERWRITE`;`summary.json` 快进;A 机 resume 看得到 B 机那 2 轮 | PassReport + CLI 输出 |
+| G7 | **反向重跑 G2–G4**(win → mac 与 mac → win 都要过一遍) | 同上 | 同上 |
+| G8 | **半落地演练**:手动把 replica 里某个会话的 `summary.json` 移走,B 机同步 | 三个文件**一个都不落**;报告里是 `DEFER` + `primary-not-in-replica`;B 机的 `<sid>/` 目录不被创建 | PassReport + 目录 `ls` |
+| G9 | **分叉**:断开同步,两机各聊 1 轮,恢复 | `summary.json` `CONFLICT` 且两分支都在隔离区;`chat_history.jsonl` 也判 `CONFLICT`(双侧都追加过 ⇒ 互不为前缀);**两侧原始文件字节未变** | §9.3 的两张表 |
+
+**任何一步不过 ⇒ `experimental` 不摘。** G3/G4 不过则回到只读(说明同步集不够);
+G8 不过是数据安全缺陷,优先级高于一切功能项——它防的是「turn 落进别人的对话」
+(findings 2026-08-24 §三)。
+
+顺带补测(不阻塞,回填 OQ-14):在沙箱 `GROK_HOME` 里对一个会话执行 rewind(TUI,
+Esc Esc 选点)与 `/compact`,各看一次 `chat_history.jsonl` 是变短还是变长。
+
 ### 9.5 各里程碑 Exit Criteria
 
 | 里程碑 | 通过标准 |
@@ -926,7 +955,7 @@ console.log(JSON.stringify(rows, null, 2));
 | **M0** | §12 交付清单 G-01…G-11 全绿 |
 | **M1** | §9.4 十步**全部**通过；§15 门禁全绿；`EXPECTED_UNVERIFIED === 0`。~~OQ-1/3/5/8/9 有结论~~ ✅ **已全部完成**（2026-08-06，见 §10 与 findings），Claude Code 已标 Tier A ✅ |
 | **M2** | M1 剧本回归仍通过；OQ-2 有结论；Codex 或 OpenCode 至少一个达成 Tier B 双机 resume；S-22…S-27、R-14、X-01、X-02 落地；OQ-7 基准达标 |
-| **M3** | 冲突解决 UI 走通 §9.4 步骤 8 的完整闭环；备份恢复 UI 可用；孤立 aux 清理命令可用 |
+| **M3** | 冲突解决 UI 走通 §9.4 步骤 8 的完整闭环；备份恢复 UI 可用；孤立 aux 清理命令可用；**Grok 接入**(逐文件分级 + 多文件 group)自动化测试全绿。**Grok 摘 `experimental` 另需 §9.6 全过**——那是发布闸门,不是 M3 闸门 |
 | **M4** | 干净机器按 README 从零配置成功；BRAT 安装验证；验收记录已归档 |
 
 ---

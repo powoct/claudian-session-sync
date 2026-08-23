@@ -25,6 +25,15 @@ export const sha256 = (bytes: Uint8Array): string =>
 export interface HarnessOptions {
   readonly hostname?: string;
   readonly nowMs?: number;
+  /**
+   * Makes writes to matching paths fail with EACCES.
+   *
+   * The one thing a real temp directory cannot be talked into doing on demand:
+   * failing *one* file of a group while its siblings succeed. Permissions are
+   * per-directory, and the siblings share it — so the seam is here rather than
+   * in a fixture that would have to lie about something else instead.
+   */
+  readonly failWrite?: (target: string) => boolean;
 }
 
 export class RuntimeHarness {
@@ -35,6 +44,9 @@ export class RuntimeHarness {
 
   readonly providerRoot: string;
   readonly projectDir: string;
+  /** `<home>/.grok/sessions`, and this vault's project directory inside it. */
+  readonly grokRoot: string;
+  readonly grokProjectDir: string;
   readonly runtime: PluginRuntime;
 
   private stored: unknown = null;
@@ -51,18 +63,45 @@ export class RuntimeHarness {
     // The escape rule for real: the directory name is derived from this
     // vault's path, so two harnesses genuinely differ.
     this.projectDir = path.join(this.providerRoot, escapeProjectPath(this.vaultRoot));
+    this.grokRoot = path.join(this.homedir, ".grok", "sessions");
+    // Grok's own rule, not a stand-in for it: the CLI names the directory
+    // `encodeURIComponent(<resolved cwd>)`, measured byte-exact on both
+    // platforms.
+    this.grokProjectDir = path.join(this.grokRoot, encodeURIComponent(this.vaultRoot));
     this.clock = fixedClock(options.nowMs ?? 1_700_000_000_000);
 
     const ids = sequentialIdGen();
-    const fs = createNodeFsGateway({
+    const real = createNodeFsGateway({
       ids,
       platform: process.platform,
       pid: process.pid,
       sleep: async () => undefined,
     });
+    const refuse = (target: string) => {
+      const error: NodeJS.ErrnoException = new Error(`EACCES: injected, open '${target}'`);
+      error.code = "EACCES";
+      return error;
+    };
+    const fail = options.failWrite;
+    const fs = fail
+      ? {
+          ...real,
+          writeFileAtomic: async (target: string, ...rest: never[]) => {
+            if (fail(target)) throw refuse(target);
+            return (real.writeFileAtomic as (...a: unknown[]) => Promise<void>)(target, ...rest);
+          },
+          writeFileNoReplace: async (target: string, ...rest: never[]) => {
+            if (fail(target)) throw refuse(target);
+            return (real.writeFileNoReplace as (...a: unknown[]) => Promise<{ ok: boolean }>)(
+              target,
+              ...rest,
+            );
+          },
+        }
+      : real;
 
     const host: RuntimeHost = {
-      fs,
+      fs: fs as typeof real,
       clock: this.clock,
       ids,
       joinPath: (...parts) => path.join(...parts),
@@ -92,6 +131,10 @@ export class RuntimeHarness {
       harness.vaultRoot,
       harness.syncDir,
       harness.projectDir,
+      // Grok installed, this vault never used with it — the state a machine is
+      // in right before it pulls its first session. The project directory is
+      // deliberately *not* created.
+      harness.grokRoot,
     ]) {
       await fsp.mkdir(dir, { recursive: true });
     }
@@ -117,7 +160,7 @@ export class RuntimeHarness {
     });
     // Same sync folder, different everything else.
     Object.assign(peer, { syncDir: other.syncDir });
-    for (const dir of [peer.homedir, peer.vaultRoot, peer.projectDir]) {
+    for (const dir of [peer.homedir, peer.vaultRoot, peer.projectDir, peer.grokRoot]) {
       await fsp.mkdir(dir, { recursive: true });
     }
     await fsp.mkdir(path.join(peer.vaultRoot, ".claudian-session-sync"), { recursive: true });
@@ -206,6 +249,87 @@ export class RuntimeHarness {
     await this.runtime.syncNow(options);
     this.advanceClock(95_000);
     return this.runtime.syncNow(options);
+  }
+
+  /**
+   * Writes a Grok session the way the CLI leaves one: a directory whose
+   * members disagree about how they are written.
+   *
+   * `chat_history.jsonl` and `updates.jsonl` are appended; `summary.json` is
+   * rewritten whole, pretty-printed and without a trailing newline, which is
+   * the shape whose tail the append table would otherwise call truncated. The
+   * derived members are written too — they must be visibly *not* synced rather
+   * than absent from the fixture.
+   */
+  async writeGrokSession(
+    sessionId: string,
+    options: { readonly turns?: number; readonly rev?: number; readonly record?: boolean } = {},
+  ): Promise<void> {
+    const dir = path.join(this.grokProjectDir, sessionId);
+    await fsp.mkdir(dir, { recursive: true });
+
+    if (options.record !== false) {
+      const store = path.join(this.vaultRoot, ".claudian", "sessions");
+      await fsp.mkdir(store, { recursive: true });
+      await fsp.writeFile(
+        path.join(store, `conv-grok-${sessionId}.meta.json`),
+        `${JSON.stringify({ id: `conv-grok-${sessionId}`, providerId: "grok", sessionId }, null, 2)}\n`,
+      );
+    }
+
+    const chat = path.join(dir, "chat_history.jsonl");
+    const existing = await fsp.readFile(chat, "utf8").catch(() => "");
+    const start = existing.split("\n").length - 1;
+    let appended = "";
+    let updates = "";
+    for (let i = 0; i < (options.turns ?? 0); i++) {
+      appended += `{"type":"user","content":"turn ${start + i}"}\n`;
+      updates += `{"method":"update","params":{"sessionId":"${sessionId}","n":${start + i}}}\n`;
+    }
+    if (appended) {
+      await fsp.appendFile(chat, appended);
+      await fsp.appendFile(path.join(dir, "updates.jsonl"), updates);
+    } else if (existing === "") {
+      await fsp.writeFile(chat, "");
+      await fsp.writeFile(path.join(dir, "updates.jsonl"), "");
+    }
+
+    // The identity carrier: `info.id` equals the directory name, and the CLI
+    // does not recognise a session where the two disagree.
+    await fsp.writeFile(
+      path.join(dir, "summary.json"),
+      JSON.stringify(
+        {
+          info: { id: sessionId },
+          num_messages: start + (options.turns ?? 0),
+          grok_home: path.join(this.homedir, ".grok"),
+          rev: options.rev ?? 1,
+        },
+        null,
+        2,
+      ),
+    );
+    // Derived and machine-local: holds this machine's paths, rebuilt by the
+    // CLI when absent. Present in every fixture so "not synced" is a fact the
+    // tests observe rather than a fixture that never had it.
+    await fsp.writeFile(
+      path.join(dir, "prompt_context.json"),
+      JSON.stringify({ working_directory: this.vaultRoot, shell_path: "/bin/zsh" }),
+    );
+    // The rest of what a real session directory holds. Written so that "these
+    // are not synced" is something the tests observe rather than something the
+    // fixture arranges by omission — the whitelist is only a boundary if there
+    // is something on the other side of it.
+    await fsp.writeFile(path.join(dir, "system_prompt.txt"), "you are grok\n");
+    await fsp.writeFile(path.join(dir, "events.jsonl"), '{"e":"turn"}\n');
+    await fsp.writeFile(path.join(dir, "signals.json"), JSON.stringify({ turnCount: 1 }));
+    await fsp.writeFile(path.join(dir, "title_refresh_idx"), "0");
+    await fsp.writeFile(path.join(dir, "summary.json.lock"), "");
+    await fsp.writeFile(path.join(dir, "chat_history.jsonl.lock"), "");
+  }
+
+  grokPath(sessionId: string, member: string): string {
+    return path.join(this.grokProjectDir, sessionId, member);
   }
 
   async dispose(): Promise<void> {

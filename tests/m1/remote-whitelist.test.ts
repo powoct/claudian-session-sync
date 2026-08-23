@@ -112,5 +112,9 @@ describe("files in the replica that no adapter recognises", () => {
 
     expect(await machine.cli.list()).toEqual([]);
     expect(outcome.report?.unknownFiles ?? []).toEqual([]);
+    // `cli.list()` only reports `.jsonl`, so it cannot see this file arriving.
+    // The directory itself has to be checked, or the assertion above passes
+    // whether or not the aux file was pulled.
+    expect(await machine.cli.listAll()).toEqual([]);
   });
 });
