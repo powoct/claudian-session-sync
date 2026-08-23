@@ -512,6 +512,7 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 | ~~OQ-6 生命周期~~ | ✅ 关闭（2026-08-24） | OpenCode 结构上不可同步；**Grok 已接入**；Pi 两台机器都「装了但无会话」 |
 | UNC 路径 | 非阻塞 | 未测（无权限），实测前按不支持处理 |
 | `memory/` 子目录归属 | 非阻塞 | 白名单不同步它，记为已知限制（F-7） |
+| **Windows 备份路径余量** | 非阻塞（有数字，需盯） | ADR-54 给备份路径加了 `<logicalId>` 一层，**Windows 上少了 37 字符余量**。按你真实 vault 路径实测最深一条（codex `remote/` 备份）= **239/259**，改动前 202。超限失败在安全方向（备份失败 ⇒ 取消覆盖 ⇒ 不丢字节，报告显示 `PATH_TOO_LONG`），但那个文件会停止同步。真撞上的修法：超长时回落到扁平位置（见 architecture §9.3.2 的注） |
 | Grok 的 `resources_state.json` / `compaction*` / `plan*` / `terminal` / `web_fetch` | 非阻塞（已知限制） | 真实库里存在但沙箱从未产出，**不在白名单** ⇒ 不同步。刻意的：`announcement_state.json` 已被证明是机器作用域，「未知成员默认跟着走」会把 A 机的指纹移植到 B 机 |
 
 ## 交接说明
