@@ -462,7 +462,8 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 | **Codex** | **Tier A ✅(生命周期 + 跨机 resume 双证)**:2026-08-13 双平台生命周期探测 PREFIX_VIOLATION 0(含人工补测的 compact,[findings](./findings/2026-08-13-m2-probe.md));**2026-08-15 M4 验收通过**——B 机 `codex exec resume` 历史完整可续聊、双向回传收敛、UI 续聊同源同文件([findings](./findings/2026-08-15-m4-acceptance.md))。**experimental 已摘**。拉动侧不经记录准入有全链路测试钉着(`codex-pull-unrecorded.test.ts`,R3-1 归因否证) | A | 无 |
 | **OpenCode** | **Tier C，且无升级路径** ❌ —— 2026-08-12 源码调查确证：会话全部存在**单个 SQLite `opencode.db`** 里，provider 目录内不存在任何 per-session 文件，也没有官方 export/import 子命令（[findings](./findings/2026-08-12-claudian-source-survey.md) §3） | 无（结构上不适用，非"未验证"） | 无——再多探测也不会改变结论 |
 | **claudian**（vault 内 `.claudian/sessions/` 会话记录） | **Tier R（M3,ADR-48）**：写入模式已实证为整体重写（2026-08-12 源码调查 §4 + 2026-08-13 P3 真机字段核对）；跨机拷贝可用已两度实证（2026-08-10 人工拷贝、2026-08-15 git 互通 + UI 续聊）。**默认关闭**；仅当 vault 同步不带 `.claudian/` 时才应启用（双传输警告） | R | 无 |
-| **Grok / Pi** | Tier C，只读。Grok 结构已双平台实测(2026-08-13):每 session 一个目录、**10+ 个文件 + 4 对 `.lock`**,父目录名 = urlencode(cwd)。**2026-08-20 开发机(grok 1.0.5)补充观察:文件集不固定**——只有 7 个文件、`events.jsonl` 为 0 字节、且多出验收机没有的 `title_refresh_idx`;更关键的是 **group 成员模式混合且含机器相关内容**:`chat_history.jsonl` 是逐行 `{type,content}`(追加候选),而 `summary.json`(含 `updated_at`/`num_messages`/**`grok_home` 绝对路径**)、`prompt_context.json`(含 **`working_directory`/`shell_path`**)、`title_refresh_idx`(1 字节计数器)都是整份重写。**§7.3 的机器相关内容问题与 §6.6 的多文件原子性在这里同时出现**,所以 Grok 不是"补一个 group staging 就能接"的 provider | Grok:先跑 P6(逐文件合并语义 + 最小可见集 G1),G1 不成立则永久留 Tier C;Pi 待有数据再测 | OQ-6（M3）、**P6** |
+| **Grok** | **Tier A/R 混合(逐文件分级),可写 ✅** —— 2026-08-24 双平台 P6 探测(grok 1.0.5,38 张生命周期快照,[findings](./findings/2026-08-24-grok-probe.md))回答了全部阻塞问题:**发现机制是扫目录**(`session_search.sqlite` 是搜索缓存,把会话拷进无索引的全新 GROK_HOME 仍被列出)⇒ 不是 Tier B;**跨 cwd 落位成立**(搬到另一 cwd 的项目目录后可见、可 resume、历史完整)⇒ 可跨机同步;**不变式 G1 成立,primary = `summary.json`**(唯一缺席即从列表消失、且不被 CLI 重建的文件)。group 成员**两张决策表并存**:`chat_history.jsonl`/`updates.jsonl`/`rewind_points.jsonl` 严格追加(正常使用期间 PREFIX_VIOLATION 0),`summary.json` 每 turn 整份重写 ⇒ 走 §7.2b。**混龄 group 自愈**(回滚 summary + 最新 chat_history ⇒ resume 正常,summary 被按当前历史重新生成,但陈旧副本独有的状态会被静默丢弃)——这条实测是 §6.6 不为 Grok 引入 staging 事务的依据。⚠️ **缺 `summary.json` 时 resume 会把 turn 追加进另一个会话**(双平台同形),这是 §6.6.1 三条硬规则的由来。**接入即打 `experimental`、默认关闭** | A/R(逐文件) | 发布(摘 experimental)阻塞:**OQ-15 两机往返 + G1 充分性**。不阻塞接入的:OQ-14(rewind/compact)、OQ-16(稳定窗口) |
+| **Pi** | Tier C,只读。双平台均"装了但无会话数据"(`~/.pi/agent/sessions` 为空),结构无法确认 | 待定 | 需要真实会话数据 |
 
 **"Tier A 候选"档位的历史记录**（Claude Code 已于 2026-08-06 通过 OQ-8 晋级，此机制保留给未来的 provider）：候选档位 = 按 Tier A 语义开发，但 UI 标「实验性 · 生命周期未验证」、首次启用强制 dry-run 确认、**对应生命周期 Spike 未通过不发布**。门禁设在**发布时点**而非开发时点——用户拿不到未验证的写入行为，风险控制等价，但不阻塞工程推进（对审核 4.9 的修改采纳，理由见 [testing.md 附录 A](./testing.md)）。
 
@@ -472,7 +473,7 @@ T6 是关键：即使 T1 因时钟异常失效，随机抽样仍给出与时钟�
 
 ```ts
 type ProviderId = "claude-code" | "codex" | "opencode" | "grok" | "pi";
-type Tier = "A" | "B" | "C";
+type Tier = "A" | "B" | "C" | "R";   // §6.1；provider 可逐文件分级（Grok 同时用 A 与 R）
 type Platform = "darwin" | "win32" | "linux";
 
 /** 文件的同步语义，决定它走哪张决策表 */
@@ -557,7 +558,9 @@ interface ProviderAdapter {
    *  session，引擎既不落地也不改动它，只在报告里列出（ADR-45）。
    *  实现约束：必须与同一 adapter 的 `listSessions` 共用一份白名单声明 */
   classifyNeutral(neutralRel: SafeRelativePath, ctx: AdapterCtx):
-    { logicalId: LogicalId; role: FileRole; mode: SyncMode } | null;
+    { logicalId: LogicalId; role: FileRole; mode: SyncMode;
+      /** 本插件自己写在 sync-dir 里、永不落地到 CLI 目录的文件（ADR-53） */
+      replicaOnly?: boolean } | null;
 
   /** 可选的内容规范化，必须与 fromNeutral 严格互逆（§7.3） */
   toNeutral?(buf: Buffer, ctx: AdapterCtx): Buffer;
@@ -739,7 +742,79 @@ Tier B 的定义特征是**文件落地不等于 session 可见**。这带来 Ti
 
 Codex 的 group 与 Claude Code 一样只有单个 primary ✅——OQ-2 之前假设它的可见性依赖外部索引（Tier B），实测推翻了这一点，两者都走 Tier A 路径。
 
-**M1 的实际形态**：Claude Code 的 group 退化为"单 primary + 一个 optional-aux"。因此 M1 **只落地接口与不变式，不实现多文件 staging 事务的完整机制**——单文件的原子 rename 已经是原子提交。多文件 staging 推迟到 M2 接入第一个真正的多文件 provider 时。代码路径从一开始就统一，但不为不存在的场景付复杂度。
+**M1 的实际形态**：Claude Code 的 group 退化为"单 primary + 一个 optional-aux"。因此 M1 **只落地接口与不变式，不实现多文件 staging 事务的完整机制**——单文件的原子 rename 已经是原子提交。多文件 staging 推迟到接入第一个真正的多文件 provider 时。代码路径从一开始就统一，但不为不存在的场景付复杂度。
+
+#### 6.6.1 Grok:第一个真正的多文件 group(M3)
+
+Grok 每个 session 是一个**目录**,里面十来个文件,而且**两张决策表并存**(实测见
+[findings](./findings/2026-08-24-grok-probe.md)):
+
+| 成员 | 角色 | mode | 依据 |
+|---|---|---|---|
+| `summary.json` | **primary** | `opaque-file`(§7.2b) | 唯一缺席即令会话从 `sessions list` 消失的文件;**不被 CLI 重建**;会话 uuid 存在它的 `info.id`,与目录名相等 |
+| `chat_history.jsonl` | `aux`(不可缺) | `append-jsonl`(§7.2) | 历史权威。缺席时 CLI 会从 `updates.jsonl` **有损重建**(实测 ≈61%),所以必须搬本体 |
+| `updates.jsonl` | `aux` | `append-jsonl` | 严格追加、无机器相关内容;真实库里 11/22 会话才有 ⇒ 懒创建,缺席合法 |
+| `rewind_points.jsonl` | `aux` | `append-jsonl` | 同上 |
+| `prompt_context.json` | — | `derived` | 含 `working_directory`/`shell_path`/`agents_md_files`,**机器相关**;缺席被 CLI 重建 |
+| `system_prompt.txt` | — | `derived` | 缺席被 CLI 重建,且重建字节**与原件完全相同**(38 次采样只有一个 hash)——可确定性重建 |
+| `events.jsonl` | — | `derived` | 缺席被 CLI 重建;它的重建**与被移走的内容无关**(只含新 turn),所以同步它没有意义而不同步它没有代价 |
+| `signals.json`/`title_refresh_idx`/`announcement_state.json`/… | — | 不在白名单 | 计数器与 UI 状态;真实库里多数会话根本没有这些文件 |
+| `*.lock` | — | **永不同步** | 恒 0 字节(全平台全快照),是 flock 的载体而非内容 |
+| `session_search.sqlite`(sessions 根下)、项目级 `prompt_history.jsonl` 与 `.cwd` | — | **永不同步** | 不属于任何 session;sqlite 另受 §6.5 红线 5 约束 |
+
+**中立路径 `grok/<sessionId>/<文件名>`**:本机路径里的项目目录名是
+`encodeURIComponent(realpath(vault))`,**机器相关**,所以不进中立层;`targetPathFor`
+在对端按对端的 vault 路径重算——与 Claude Code 的 project 目录同构。
+**会话目录名必须原样保留**(它与 `summary.json` 的 `info.id` 相等,不等则 CLI 不识别)。
+
+**不为 Grok 引入 `.aiss-stage-<passId>/` 暂存事务**,理由是实测而非省事:
+
+1. **新 session**:G1 成立 ⇒ `summary.json` 落位之前该会话不在列表里。把 primary 排到
+   最后写,窗口就只是同一轮 pass 内的几毫秒。
+2. **更新既有 session**:混龄实测(双平台)显示 CLI **自愈**——回滚 `summary.json`
+   而保持最新 `chat_history.jsonl`,resume 正常、不截断,summary 在下一轮被按当前历史
+   重新生成。撕裂的**更新**不会坏,所以暂存换来的原子性没有可保护的对象。
+
+代之以三条更便宜、可测的规则:
+
+- **组内顺序**:同一 group 的写入按 `aux → primary` 排序,primary 永远最后落地。
+- **组内预算不可分割**:`maxFilesPerPass` 按 **group** 分配。整组放不进本轮预算就
+  一个文件都不动——否则 primary 会被推到下一轮,把"几毫秒的窗口"变成"几分钟"。
+  **但有下限**:一个成员数就超过 `maxFilesPerPass` 的 group 允许独占一轮跑完,否则
+  预算每轮重置而 group 永远不变小,"等有空位"会变成"这个会话永远不同步"
+  (`maxFilesPerPass` 的下界是 1,而 Grok 的 group 有 3–4 个成员)。
+- **replica 里没有 primary 的 group,一个文件都不落**(动作记 `primary-not-in-replica`)。
+  这种 group 只可能来自远端,而且只可能是因为推送方还没写完;等一轮的代价是一轮,
+  组装它的代价见下。
+
+> **G1 的边界比"看不见"更硬。** 探测里那一步的真实结果不是"resume 失败"也不是
+> "开成新会话",而是——**用户的下一个 turn 被静默追加进了另一个会话**(双平台同形,
+> findings 2026-08-24 §三)。那些写入是合法的纯追加,本插件会忠实地把污染复制到
+> 所有机器。所以这条不变式的正确读法是:**primary 到位之前,这个会话目录不能对 CLI
+> 存在**;`--resume <uuid>` 本来就绕过列表直接按 ID 读盘,而 ID 恰好随 Claudian 的
+> vault 记录同步过去。上面三条规则针对的正是这个缺口。
+>
+> 同一条实测也解释了为什么 `.quarantine/` 必须继续留在 sync 目录里而**永远不进
+> `sessions/`**(ADR-34/40):在 Grok 的目录下多放一份会话副本,不是"多一个可选项",
+> 是给这个解析规则多一个可以选错的对象。
+
+**成员之间的判定不联动**:每个成员各自走自己那张表,一个成员 CONFLICT 不阻止另一个
+成员落地。这不是妥协——由上一条实测,混龄组合本来就是 CLI 能自愈的状态;而"一个成员
+冲突就冻结整组"会让一次 `summary.json` 分歧把仍然可以安全前缀合并的 `chat_history.jsonl`
+一起卡住,把可自愈的状态变成需要人工的状态。
+
+**唯一留下的半落地状态**:本轮有 aux 落地,而**本机没有这个会话的 primary**。按
+ADR-30 不回滚(回滚是在已经出错的状态下再做一次破坏性写),改为**明说**——报告里推
+一条"这个会话只写了一半,下一轮同步补齐前不要在 CLI 里打开它"。
+
+判定刻意写成「本机没有 primary 且它这轮没落地」,而不是「primary 的写失败了」:
+最常见的撕裂**根本没有错误**——aux 先安静下来通过稳定性判定并落地,而同步工具还在写
+primary,于是 primary 以 `DEFER` 返回,报告里一片正常。反过来,**本机已有一个陈旧
+primary 不算撕裂**:那是混龄状态,实测 CLI 会把它按当前历史重新生成。
+
+> **角色的三分只留在文档里。** 代码里 `SessionFileRef.role` 只有 `primary | aux`:
+> 由"成员判定不联动"这条,`required-aux` 与 `optional-aux` 的失败语义差别在本实现下
+> 没有任何可观察的区别,现在把它建模进类型只会产生一个永远走不到的分支。
 
 **三段式 apply**：
 
@@ -1240,19 +1315,30 @@ M1 **移除 `backup.enabled`**。理由：[testing.md §1](./testing.md) 的 I1 
 
 ```
 <homedir>/.claudian-session-sync/backups/<workspaceId>/<providerId>/
+  <logicalId>/
     <原文件名>.<stamp>.<seq>.bak            # 覆盖本机文件前的本机版本
-  remote/
+  remote/<logicalId>/
     <原文件名>.<stamp>.<seq>.bak            # PUSH_OVERWRITE 前被覆盖的**远端**版本
 
 stamp = YYYYMMDDTHHMMSS-mmmZ   （UTC，去掉 ISO 的 ":" 与 "."；字典序 == 时间序）
 seq   = 两位十进制，00 起
-例：9f2c8d41-….jsonl.20260806T110000-123Z.00.bak
+例：<sid>/9f2c8d41-….jsonl.20260806T110000-123Z.00.bak
 ```
 
 - ISO-8601 原样含 `:`，在 Windows 上是**非法文件名字符**（NTFS 上还会被解释成 ADS 分隔符），必须去掉
 - 同毫秒碰撞：`seq` 从 `00` 起用 `open(path,"wx")` 探测，`EEXIST` → `seq++`；到 `99` 仍碰撞 → 追加 `IdGen.token(3)` 的 6 位十六进制；再失败 → 视为备份失败
 - **`remote/` 子目录是 `PUSH_OVERWRITE` 的退路**：被覆盖的远端版本可能来自另一台机器，覆盖后在 sync-dir 上消失，因此覆盖方必须先把它读下来存本机。这条与 I1 直接挂钩
 - 放 home 下而非 vault / sync-dir：不污染 vault 同步、不占网盘配额、不会被放大同步到所有机器（ADR-9）
+- **`<logicalId>` 这一层是正确性，不是整洁**（ADR-54）。备份以「它拷贝的那个文件的名字」命名，而在 Grok 之前每个 provider 的文件名里都带着会话 id（`<uuid>.jsonl`、`rollout-<ts>-<uuid>.jsonl`、`conv-<id>.meta.json`），所以一个扁平目录里不可能出现两个同名文件。Grok 的成员名是一套在**每个**会话里重复出现的固定词汇（`summary.json`、`chat_history.jsonl`…），文件名从此不再回答「这是哪个会话的」。有两件事依赖那个答案:**恢复往哪个活文件写**,以及**轮转可以删掉哪些「survivor 能复现」的副本**
+- ⚠️ **代价:Windows 上的路径余量少了 37 个字符。** 按用户真实 vault 路径实测,最深的一条
+  (codex 的 `remote/` 备份)是 **239/259**——改动前是 202。仍在限内,但余量从 57 掉到 20。
+  超限的后果是**安全方向**:`mint` 拒绝 → 备份失败 → §9.3.3 规定「备份失败取消覆盖」,
+  不丢字节,报告里是 `backup-dir-rejected:PATH_TOO_LONG`。**但那个文件会就此停止同步**,
+  所以这不是可以无视的一格。若真有人撞上,首选方案是**超长时回落到扁平位置**
+  (那三个 provider 的文件名本来就唯一,回落后完全正确;Grok 回落后有歧义 ⇒ 定位器按现有
+  规则拒绝并指向「打开备份文件夹」,备份本身仍在)。记在这里而不是现在就实现,
+  是因为它需要一条只在超长路径下才走到的分支,而现在没有能让它变红的真实配置
+- 旧版本写在扁平位置的备份**仍然可列、可恢复**:列举同时读两层;定位时没有 logicalId 就退回按文件名匹配,而**名字有歧义时返回「定位不到」而不是猜**——用户会看到「找不到落点、请用『打开备份文件夹』」,而不是一次有 1/N 概率毁掉另一段对话的写入
 
 #### 9.3.3 写入、权限与失败语义
 
@@ -1904,6 +1990,9 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 49 | **备份恢复(§9.3 的读取半边)**:列表只从**目录**重建(索引可丢),恢复 = 一次普通覆盖并因此走全部覆盖规则(先备份目标、同一 mint、远端需 READY),外加三条恢复特有的:① 轮转必须**放过正在恢复的那一份**(`backup({protectName})`);② **verify-then-swap**——列表画出时记下活文件哈希,备份后/写入前各校验一次,不一致即 `target-changed` 中止;③ 目标不存在时走**创建分支**(不备份、`writeFileNoReplace`),而不是走覆盖分支。「下一步会发生什么」的预测**对比另一侧**并按 `mode` 分支 | (a) 只做「打开备份目录」按钮 ／ (b) 恢复即覆盖,不做预测 | (a) 等于不交付 I1:保证在盘上成立、用户却只能手工考古。(b) 的三个坑均由 2026-08-16 设计评审在实现前抓到并复现:轮转会把用户刚点的那份删掉(keep=3 实测 ENOENT);备份与写入之间 CLI 追加的行**任何备份里都没有**(引擎的 `applyAction` 有重新观测,恢复没有);「什么都不在了,恢复会放回去」这一行**永远失败**(备份不存在的源返回 null ⇒ backup-failed)。预测算错边同样致命:决策表比的是本地 vs 远端,按同侧算会把「会推给所有机器」说成「只是本地回退」,而 opaque provider 连前缀语义都不适用(§7.2b #4a 会静默外推) |
 | 50 | **用户触发的写入(冲突解决、备份恢复)与 pass 走同一道闸门**:① 取同一把 `PassLock`(§9.4),取不到即 `sync-in-progress` 拒绝并提示"稍后再试";② 远端可写性在**点击当下重新观测**(reachable + `root.json` 的 rootId 与本机记录一致),而不是读上一次 pass 缓存的 `status.readiness` | 沿用现状(点击不取锁、读缓存状态) | 锁:一次 resolve/restore 与定时 pass、第二个 Obsidian 窗口、甚至另一台机器可能同时改同一个文件——用户唯一"看着它发生"的操作反而是唯一无保护的。就绪:`status.readiness` **只由 pass 重算**(见 computeStatus 注释),同步盘卸载后点击仍以为 READY,会在未挂载的挂载点里造出一棵树(NR-9),或写进被重建过、rootId 已不同的目录(NR-2)——这正是 marker 文件存在的意义。刻意**不**跑完整就绪评估(它要数遍整个 workspace 子树,是 per-pass 成本且回答的是趋势问题):点击只需更窄且更保守的子集,误判"未就绪"的代价是一句带理由的拒绝,而不是写错地方。本机侧恢复不受该闸门影响——同步盘的状态与本机文件无关,一并拒绝会让无关故障看起来像数据被扣住 |
 | 51 | **`.aiss/prev/` 跨机可恢复方案:评估后否决**(M3 交付项完成,取代 ADR-15 里"记为 M3 可选增强"的悬置)。同批把 `rotationDeferred` 从 pass-runner 接到报告 notice;备份列表改为**有界页**(默认 60,按文件名时间戳排序后只读要展示的那些),`restoreBackup` 只重述那一份而非整个历史 | (a) 建内容寻址的不可变副本区 ／ (b) 只建**版本账本**(记超前版本的 size/hash/lineCount,任何机器截断当前共享文件即可还原,约 200 B/次) ／ (c) 维持现状 | **否决的决定性理由不是成本,而是收益近乎为零**——§7.2 的 `PUSH_OVERWRITE` 只在本地严格包含远端时触发,所以被销毁的远端版本就是覆盖它那份的**字节前缀**,躺在同一个 sync 目录里,任何机器都能读到(testing.md 的 I1 判据第一条正是"是某个 live 文件的字节前缀");唯一不是前缀的情形(双机在同一传输周期内各自推送)**早已由 `.quarantine/` 覆盖**,而那本就是内容寻址的机器中立不可变区,规模是 O(分歧数) 而非 O(所有覆盖)。成本侧也比 ADR-15 估计的更差:内容寻址给的是收敛命名而非去重,append-only 文件的相邻版本永不相同,k 个版本约 S·k/2;按实测 23 MiB rollout 与 5 分钟 pass 间隔,一个活跃会话一个工作日就是 GiB 级**上传并被每台机器下载**。GC 不是"难",是被既有决策**禁止**:§5.6 规则 3 不许 sync-dir 里的字段授权破坏性操作,ADR-34 不许插件删 sync-dir 里的东西(删除会传播到所有机器),而按年龄需要跨机时钟(ADR-2/14 已否)、按数量需要两台机器认同的全序(内容寻址刻意拒绝提供)。放置位置还是两难:放 workspace 子树下则 GC 的删除会撞上 NR-6/NR-7 的收缩阈值把插件冻成只读,放 `.aiss/` 下则破坏 ADR-5 的按 workspace 清理,且诚实地做要 bump `formatVersion` —— 按 §5.4 这会让所有尚未升级的机器**完全只读**。**备选 (b) 记录在案**:若将来出现真实需求(残余场景仅三条:opaque 的 #4a 快进、keep-local 解决、恢复写入远端侧——三者的逐字副本都只在动手那台机器上),账本方案是廉价答案,不必回到 (a) |
+| 52 | **Grok 接入(M3):provider 内部**逐文件**分 Tier,而不是给整个 provider 一个 Tier**。`summary.json` 走 §7.2b(opaque + 收敛基点),`chat_history.jsonl`/`updates.jsonl`/`rewind_points.jsonl` 走 §7.2,其余一律 `derived` 或不入白名单;`toNeutral`/`fromNeutral` 保持 identity(**不**把 `grok_home` 规范化成占位符);不引入 `.aiss-stage-<passId>/` 暂存事务,改用「组内顺序 primary 最后 + 组内预算不可分割」 | (a) 整个 provider 判 Tier R(全部走 opaque) ／ (b) 整个 provider 判 Tier A(全部走前缀表) ／ (c) 按 §7.3 把 `summary.json` 里的 `grok_home`/cwd 换成占位符,让两机字节相等 ／ (d) 按 §6.6 原文实现完整 staging 事务 | (a) 会把 `chat_history.jsonl` 这个**实测严格追加**的对话本体降级成"不同即冲突"——两台机器各说一句就是一次人工冲突,等于不能用。(b) 会拿前缀表去判 `summary.json`,而它每回合从偏移 0 起整份重写:每次都判 `CONFLICT`(§7.2 没有"整体重写"这一格),primary 永远卡住 ⇒ 会话永远同步不过去。**逐文件分级是唯一与实测吻合的粒度**,而且接口早就是逐文件的(`SessionFileRef.mode`),不需要新概念。(c) 收益是"少一次往返重写",代价是 §7.3 明文警告的最高风险改动(内容改写破坏前缀比较);而**正确性不需要它**——§7.2b 的快进按"本机上次收敛过的字节"判定,不按"两边是否相等",单侧推进照样快进,只有双侧同时动才冲突,那本就是 §9.4.3 声明不保证的并发场景。真需要时按 §7.3 的占位符方案补,round-trip property test 已经预留。(d) 的原子性没有保护对象:双平台混龄实测证明撕裂的**更新**会被 CLI 自愈(summary 被按当前历史重新生成、历史不截断),而撕裂的**新建**由 G1 + primary 最后落地已经挡住;暂存目录反而要在用户的 CLI 目录里新建临时目录树并处理其崩溃残留,是净负债。**唯一被暂存事务挡而被本方案放行的场景**——预算把 group 切成两半——用"组内预算不可分割"直接消除,因为 `--resume <uuid>` 绕过列表按 ID 读盘,而 ID 随 Claudian 记录同步过去,窗口从毫秒变成分钟就不再是理论问题 |
+| 53 | **`classifyNeutral` 增加 `replicaOnly`**:本插件写在 sync-dir 里、永不落地到 CLI 目录的文件(目前只有 Claude Code 的 `<sid>.origin.json`)由 adapter 显式声明,而不是靠引擎"只处理 primary"顺带挡住 | (a) 让 `classifyNeutral` 对它返回 `null` ／ (b) 把它标成 `derived` ／ (c) 维持现状 | 引擎接 Grok 时必须开始处理 aux 成员,那一刻"只处理 primary"这条隐式保护就没了——`<sid>.origin.json` 会被拉进用户的 CLI 目录。**现有测试抓不到**:它断言的是 `cli.list()`,而那个 fake 只列 `.jsonl`,所以这条回归可以静默通过(已复现:补上目录断言后立刻变红)。(a) 会把我们自己写的文件报成"外来异物",在报告里制造一条永远存在的假警报;(b) 语义是错的——`derived` 说的是"CLI 会重建它",而这个文件本机压根不该有,而且每轮会多一条 `SKIPPED_POLICY` 动作与一条措辞不对的 notice。显式字段是唯一一个既不说谎也不产生噪声的选项 |
+| 54 | **备份路径加入 `<logicalId>` 一层**(§9.3.2),恢复的定位键从「文件名」改为「(会话, 文件名)」;旧的扁平备份继续可列可恢复,但**文件名有歧义时返回「定位不到」而不是猜一个** | (a) 维持扁平布局,只在恢复时用备份索引 `index.jsonl` 的 `logicalId` 消歧 ／ (b) 把 logicalId 拼进文件名 ／ (c) 歧义时直接拒绝恢复(不改布局) | 接 Grok 之前,「备份文件名」与「哪个会话」是一一对应的,所以扁平目录是安全的;Grok 的成员名在每个会话里重复,这个前提消失了,而**两处代码沉默地依赖它**:恢复的定位表按文件名建(后写入者覆盖先写入者),轮转的候选集按文件名前缀圈定。前者的后果已被复现——从会话 A 取的备份被报成属于会话 B,点下去把 B 的对话覆盖成 A 的内容,返回 `ok:true`、报告里没有任何异常。(a) 不行:§9.3.4 明确要求「恢复不依赖索引」,有一条回归测试钉着索引损坏后仍能恢复;把消歧建在索引上等于把这条保证还回去。(b) 会撞上 `parseBackupName` 的按点分段——claudian 的 logicalId 本身含点(`conv-…​.meta`)。(c) 是安全的但把 Grok 的备份变成「列得出、恢复不了」,等于对新 provider 放弃 I1 的可用性一半。目录分层同时**顺带修好轮转**:候选集自然按会话圈定,`backupKeep` 重新生效(否则多会话的 Grok 用户会永远看到 rotationDeferred)。代价是 Windows 上路径多 ~37 字符,最坏情形(codex + remote + 长用户名)实测仍在 259 以内;真超了 PathGuard 会拒绝,备份失败取消覆盖——安全方向 |
 
 ---
 
@@ -1914,7 +2003,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **M0** | 脚手架：package/lockfile、TS、Vitest、esbuild、ESLint、Obsidian manifest、三平台 CI、覆盖率与 no-skip 门禁 | [testing.md §12](./testing.md) |
 | **M1** | Claude Code 单 provider 双向同步；路径映射；前缀安全合并；稳定性 + VO + 备份；身份与路径安全；就绪状态机；冲突三命令；Mac ↔ Win 实测 resume | §5–§9 |
 | **M2** | provider 抽象落地 ✅；Codex 接入 ✅（归属规则见 ADR-46；发布前需真机复测）；跨版本兼容测试。~~OpenCode 接入~~ **删除**——2026-08-12 源码调查确证其为单文件 SQLite，结构上不可同步（§6.1.1）。~~Tier B 索引对齐~~ / ~~多文件 group staging~~ **顺延**：现有全部候选 provider（Codex/Grok/Pi）都不是 Tier B，也都只有单 primary，为不存在的形状付复杂度不合算（§6.6 原则） | §6.1 §6.2 §6.6 §5.4 |
-| **M3** | Grok / Pi 调研；~~冲突解决 UI~~ ✅(M1 已交付)；~~备份恢复 UI~~ ✅(ADR-49/50、§9.3.4 命令与按钮)；孤立 aux 清理(待 Grok)；~~删除传播评估~~ ✅(记录层随 ADR-48 免费获得,session 文件仍按 ADR-10 排除)；~~`.aiss/prev/` 跨机可恢复方案评估~~ ✅ **已评估并否决(ADR-51)** | §8 §9.3 §9.4.1 |
+| **M3** | ~~Grok 调研~~ ✅ **接入(ADR-52/53、§6.6.1)**——双平台 P6 通过,逐文件分级,引擎首次支持多文件 group(primary 最后落地 / 组内预算不可分割 / replica 缺 primary 不组装),打 `experimental` 默认关闭,摘标签闸门 = OQ-15;Pi 仍无数据;~~冲突解决 UI~~ ✅(M1 已交付)；~~备份恢复 UI~~ ✅(ADR-49/50、§9.3.4 命令与按钮)；孤立 aux 清理(待 Grok)；~~删除传播评估~~ ✅(记录层随 ADR-48 免费获得,session 文件仍按 ADR-10 排除)；~~`.aiss/prev/` 跨机可恢复方案评估~~ ✅ **已评估并否决(ADR-51)** | §6.6.1 §8 §9.3 §9.4.1 |
 | **M4** | README ✅、release workflow ✅(tag 触发)、跨平台验收归档 ✅([findings 2026-08-15](./findings/2026-08-15-m4-acceptance.md))。**剩余为发布动作**:仓库转 public、LICENSE、`git tag 0.1.0` | [testing.md §9](./testing.md) |
 
 ---
@@ -1932,16 +2021,21 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **OQ-3** | Windows 转义规则 | ✅ 通过 | `C--Users-…` 证实；规则 = realpath + 逐字符映射（§6.3）；UNC 未测按不支持处理 |
 | **OQ-4** | 网盘按需占位符 | ✅ 有结论 | 判据 = `OFFLINE` + `RECALL_ON_DATA_ACCESS`，`REPARSE_POINT` 不可用（§9.5）；实现留 M2 |
 | **OQ-5** | 未知扩展名容忍度 | ✅ 通过 | 6 类异物全部不进列表、不报错、不被改动；隔离与 staging 可与原文件同目录（§8） |
-| **OQ-6** | OpenCode / Grok / Pi 存储结构 | 🟡 部分 | 结构已摸清（OpenCode=sqlite+官方 export/import；Grok=目录多文件；Pi=单 jsonl 另一套转义）；生命周期未验证 | 
+| **OQ-6** | OpenCode / Grok / Pi 存储结构 | ✅ **关闭**(2026-08-24) | OpenCode = 单 SQLite,**结构上不可同步**且无升级路径(§6.1.1);**Grok = 目录多文件,双平台 P6 全部通过**——扫目录发现、跨 cwd 落位成立、G1 成立(primary=`summary.json`)、逐文件两张表并存,判 Tier A/R 混合可写([findings](./findings/2026-08-24-grok-probe.md)、ADR-52);Pi 两台机器都「装了但无会话」,保持 Tier C,需要真实数据才能重开 |
 | **OQ-7** | 大规模 pass 耗时与备份膨胀 | ✅ **当前规模下关闭**(2026-08-13) | 百文件/百 MiB 级实测:全量 hash 亚秒(mac codex 183 MiB ≈ 155ms),遍历/stat ≤10ms;`maxFileSizeMB` 默认因实测 23 MiB 常规 rollout 从 20 调到 64。GB 级再重开 |
 | **OQ-8** | **生命周期是否严格 append-only** | ✅ **PASS** | 双平台 36 快照零违规；compact/fork/retry 全是**追加**；文件名恒等于 sessionId；末尾恒 LF；空会话不落盘 → **Tier A 成立，无需任何降级** |
 | **OQ-9** | junction / 8.3 短名 | ✅ 通过 | `lstat` 识别 junction 为 symlink（拦截有效）；`realpath` 不展开 8.3 短名（字符串层拒绝必须保留）（§9.7.4） |
 | **OQ-10** | 漫游 profile | ⏳ 未做 | M2 |
+| **OQ-14** | **Grok 的 rewind 与 `/compact` 是否就地重写 `chat_history.jsonl`** | ⏳ 未测(不阻塞接入) | grok 1.0.5 无任何 headless rewind 入口,TUI 不接受 pty 注入的按键(双平台各两次尝试均挂起);`/compact` 同样未跑过,而真实库里 3 个会话有 `compaction*` 条目,它是**正常使用中**唯一可能就地重写历史的操作。**风险已封顶**:若是截断,对本插件表现为一次前缀违反 ⇒ 判 `CONFLICT`、两侧进 `.quarantine/`、不丢字节(I1)。待人工在沙箱内补测 |
+| **OQ-15** | **Grok 的真两机往返 + G1 充分性** | ⛔ **未测,且是摘 `experimental` 的闸门** | 6b.2 的两个实验都在同一台机器上换 cwd(同 `GROK_HOME`/同 OS/同构建/同登录态),Windows 的"跨机模拟"用的是它自己的基线副本——**两机之间没有一个字节真的走过**。充分性只关掉了一半:开发机实测「只放 `summary.json`+`chat_history.jsonl` 到一个全新 GROK_HOME 的正确项目目录 ⇒ 仍被 `sessions list` 列出,且全程没有 `session_search.sqlite`」;**resume 并且历史完整**那一半要登录态,留在验收 G3/G4。剧本见 [testing.md §9.6](./testing.md) |
+| **OQ-16** | **Grok 的稳定窗口实测值** | ⏳ 未测(不阻塞) | 两次静置都发生在无活跃写入者时;唯一尾部观测是 Windows 孤儿进程的 165.9 秒,且它在 resume 写过 `summary.json` **之后**又重写了一遍——一轮 pass 可能抓到 CLI 随后丢弃的 primary。缓解手段是既有的覆盖前备份 + 下一轮再收敛 |
 | **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ✅ **已决（ADR-46）** | 用 vault 内 Claudian 的会话记录做归属源——它在 vault 里，所以"属于这个 vault"是它的构造性质，不需要读 rollout 内容也不需要猜 `cwd`。已实现并有回归（`tests/m1/codex-adapter.test.ts`）。**遗留**：真机确认 `.claudian/sessions/` 的实际文件名与字段在你的版本上与样本一致（探测套件 P3） |
 | **OQ-13** | **Codex compact 是否 append-only** | ✅ **PASS**(2026-08-13 人工 TUI 补测) | `/compact` 使 rollout +4654B **严格前缀追加**(103093→107747B,0 违规)——compacted 历史以新条目落盘,与 Claude Code 的 compact 同构。Codex 发布阻塞解除 |
 | **OQ-12** | 只同步 rollout，Claudian UI 里会不会出现该会话 | ✅ **有结论（源码）** | Claudian 从不扫盘枚举 Codex 会话，只按 vault 内 `.claudian/sessions/<id>.meta.json` 存的 `sessionId`/`threadId` 去找文件。**所以两半必须都在**：vault 侧那半随 vault 自身的同步走，rollout 这半由本插件送。两半齐了 UI 就有入口（2026-08-10 验收的人工拷贝附加验证已实证过这条路径）。README 必须写明：**别把 `.claudian/` 排除在 vault 同步之外** |
 
 **计划外发现**（F-1…F-9，详见 findings）中对实现有直接影响的三条：picker 不显示 headless 来源的会话（同步验证一律按 ID resume）；resume 打开不发消息也可能追加约 236 B（稳定性判定天然覆盖）；Windows 目录 fsync 返回 `EPERM`（`FsGateway` 在 win32 上跳过目录 fsync）。
+
+**2026-08-24 补充(codex 0.147.0,非 P6)**:SIGTERM 强杀后 `~/.codex/thread-writer-locks/<threadId>.lock` 残留,**其后约 5–7 分钟内 resume 该线程被拒**(`thread-store conflict: … already has an active writer`),到期自动清理后纯追加续写。锁在 `sessions/` 之外,**不影响文件同步**,rollout 双平台仍 0 违规、Tier A 不变;但对端拿到一个刚被强杀的会话时会撞上这个错——等几分钟即可,**不要去搬或删锁文件**,README 需写明。同轮另确认 `session_index.jsonl` 在 0.146 时代就已存在(r1 产物可查),0.147 不是新增索引,OQ-2 的判定不受影响。
 
 ---
 

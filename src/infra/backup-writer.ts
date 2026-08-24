@@ -96,6 +96,7 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         workspaceId: request.workspaceId,
         providerId: request.providerId,
         remote: request.remote,
+        logicalId: request.logicalId,
       });
       const dirPath = deps.joinPath(deps.home.layout.backupsDir, ...relDir);
       const dir = deps.home.mint(dirPath);

@@ -228,3 +228,38 @@ describe("the ways a restore could destroy something (design review, 2026-08-16)
     expect((await fsp.stat(a.sessionPath(SID))).size).toBe(entry?.sizeBytes);
   }, 30_000);
 });
+
+describe("backups written by an earlier layout (§9.3.2, ADR-54)", () => {
+  it("still lists and still restores them", async () => {
+    // The session segment was added to the backup path after these existed. A
+    // backup that becomes unreachable because the layout moved is I1 broken by
+    // an upgrade, which is worse than the ambiguity the move was fixing.
+    const { a } = await withBackups();
+    const flatDir = path.join(a.homedir, ".claudian-session-sync", "backups");
+    const nested = (await a.runtime.backups()).find((entry) => !entry.remote);
+    expect(nested, "fixture must produce a backup to relocate").toBeDefined();
+
+    // Move it up one level, which is exactly where the old writer put it.
+    const legacy = path.join(
+      path.dirname(path.dirname(nested?.path as string)),
+      path.basename(nested?.path as string),
+    );
+    await fsp.rename(nested?.path as string, legacy);
+    expect(path.dirname(legacy)).not.toBe(path.dirname(nested?.path as string));
+    expect(legacy.startsWith(flatDir)).toBe(true);
+
+    const listed = (await a.runtime.backups()).find((entry) => entry.path === legacy);
+    expect(listed, "an older backup must still be listed").toBeDefined();
+    // And still aimed at a real file — for every provider that existed under
+    // the flat layout the file name carries the session id, so the name alone
+    // is still an unambiguous answer.
+    expect(listed?.neutralRel).toBe(`claude-code/${SID}.jsonl`);
+
+    const outcome = await a.runtime.restore(
+      legacy,
+      listed?.hashPrefix as string,
+      listed?.liveHashPrefix ?? null,
+    );
+    expect(outcome.ok).toBe(true);
+  }, 30_000);
+});

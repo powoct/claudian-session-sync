@@ -17,6 +17,7 @@ import type { ProviderAdapter, ProviderTier } from "./provider-adapter";
 import { createClaudeCodeAdapter } from "./claude-code/adapter";
 import { createCodexAdapter } from "./codex/adapter";
 import { createClaudianAdapter } from "./claudian/adapter";
+import { createGrokAdapter } from "./grok/adapter";
 
 export interface AdapterEnvironment {
   readonly providerRoot: string;
@@ -117,6 +118,34 @@ export const CLAUDIAN: ProviderDescriptor = {
   create: (env) => createClaudianAdapter(env),
 };
 
+export const GROK: ProviderDescriptor = {
+  id: "grok",
+  label: "Grok",
+  // Per file, not per provider (ADR-52). "R" is the conservative headline:
+  // this provider's commit point is a whole-file record, so some disagreements
+  // can only be resolved by a person. Its conversation history merges by
+  // prefix like any Tier A file.
+  tier: "R",
+  // The lifecycle probe (2026-08-24, both platforms) settled every blocking
+  // question — discovery is a directory scan, relocation across machines
+  // works, G1 holds. What it could not reach is rewind: grok 1.0.5 has no
+  // headless entry point for it, and the pty could not drive the TUI. The
+  // worst case is bounded — a truncation reads as a prefix violation, which
+  // means a conflict with both versions kept, not lost bytes — but "we have
+  // not seen this operation" is what the flag is for.
+  experimental: true,
+  rootDescription:
+    "Where the CLI keeps its per-project session directories, normally " +
+    "<GROK_HOME>/sessions or ~/.grok/sessions. Override this if GROK_HOME points elsewhere " +
+    "on this machine.",
+  scopeNote:
+    "Only conversations this vault has a Claudian record for are synced. Grok stores each " +
+    "session as a folder of files; this carries the conversation and its history, and lets " +
+    "the CLI rebuild the rest on the other machine.",
+  defaultRoot: ({ homedir }, joinPath) => joinPath(homedir, ".grok", "sessions"),
+  create: (env) => createGrokAdapter(env),
+};
+
 /**
  * What exists, in the order the settings panel shows it.
  *
@@ -124,9 +153,10 @@ export const CLAUDIAN: ProviderDescriptor = {
  * entirely inside one SQLite database with no per-session file and no official
  * export route, so there is nothing this plugin can carry (§6.1.1). That is a
  * structural exclusion, not a missing measurement — no probe would change it.
- * Grok and Pi wait for M3 and a real-machine lifecycle probe.
+ * Pi is absent for the opposite reason: both probe machines had it installed
+ * with no sessions at all, so its shape is still unmeasured.
  */
-export const PROVIDERS: readonly ProviderDescriptor[] = [CLAUDE_CODE, CODEX, CLAUDIAN];
+export const PROVIDERS: readonly ProviderDescriptor[] = [CLAUDE_CODE, CODEX, GROK, CLAUDIAN];
 
 export function providerById(id: string): ProviderDescriptor | undefined {
   return PROVIDERS.find((provider) => provider.id === id);

@@ -55,6 +55,16 @@ export interface NeutralClassification {
   readonly logicalId: LogicalId;
   readonly role: "primary" | "aux";
   readonly mode: FileMode;
+  /**
+   * Ours, and only ever in the sync directory.
+   *
+   * Recognised so the report does not call it a foreign artifact, and never
+   * landed in the CLI's own directory — Claude Code's `<sid>.origin.json` is
+   * the only one (§6.3). Distinct from `derived`, which describes a file the
+   * CLI rebuilds: this one has no local counterpart at all, so there is
+   * nothing to say about it each pass.
+   */
+  readonly replicaOnly?: boolean;
 }
 
 export interface ProviderAdapter {

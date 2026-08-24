@@ -129,9 +129,12 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
       return {
         logicalId: classified.logicalId as LogicalId,
         role: classified.kind,
-        // Both shapes are jsonl the CLI appends to; the aux file is ours and is
-        // never pulled anyway (the engine acts on primaries only).
         mode: "append-jsonl" as const,
+        // `<sid>.origin.json` is written by this plugin, in the sync directory,
+        // and belongs nowhere else. Said explicitly rather than relying on the
+        // engine to act on primaries only — that was true while every provider
+        // had a single-file group, and stopped being true with Grok.
+        ...(classified.kind === "aux" ? { replicaOnly: true } : {}),
       };
     },
 

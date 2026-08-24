@@ -21,6 +21,7 @@ import { PROVIDERS } from "../../src/providers/registry";
 import { createClaudeCodeAdapter } from "../../src/providers/claude-code/adapter";
 import { createCodexAdapter } from "../../src/providers/codex/adapter";
 import { createClaudianAdapter } from "../../src/providers/claudian/adapter";
+import { createGrokAdapter } from "../../src/providers/grok/adapter";
 import type { ProviderAdapter } from "../../src/providers/provider-adapter";
 import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
@@ -114,6 +115,30 @@ const FIXTURES: readonly Fixture[] = [
         joinPath: deps.joinPath,
         listDir: deps.listDir,
         statFile: deps.statFile,
+      });
+    },
+  },
+  {
+    id: "grok",
+    async build() {
+      const root = makeRealTmpDir("consistency-gk");
+      roots.push(root);
+      const vault = path.join(root, "vault");
+      const sessions = path.join(root, "sessions");
+      // A session is a directory, and the members deliberately span both
+      // decision tables plus one file the whitelist must refuse.
+      const sessionDir = path.join(sessions, "encoded-vault", SID);
+      await fsp.mkdir(sessionDir, { recursive: true });
+      await fsp.writeFile(path.join(sessionDir, "summary.json"), '{"info":{"id":"x"}}');
+      await fsp.writeFile(path.join(sessionDir, "chat_history.jsonl"), '{"type":"user"}\n');
+      await fsp.writeFile(path.join(sessionDir, "updates.jsonl"), '{"jsonrpc":"2.0"}\n');
+      await fsp.writeFile(path.join(sessionDir, "prompt_context.json"), "{}");
+      await fsp.writeFile(path.join(sessionDir, "summary.json.lock"), "");
+      await claudianRecord(vault, "grok", SID);
+      return createGrokAdapter({
+        ...fsDeps(vault),
+        providerRoot: sessions,
+        customDirName: "encoded-vault",
       });
     },
   },

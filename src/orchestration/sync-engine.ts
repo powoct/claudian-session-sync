@@ -39,8 +39,8 @@ import type { FsGateway } from "../infra/fs-gateway";
 import { isDenylisted, isTransferArtifact } from "../infra/path-guard";
 import type { Clock, IdGen } from "../infra/clock";
 import type {
-  NeutralClassification,
   ProviderAdapter,
+  SessionFileRef,
   SessionGroup,
 } from "../providers/provider-adapter";
 import {
@@ -56,6 +56,9 @@ import {
   isErrorResult,
   noopBarrier,
 } from "./pass-report";
+
+/** The four actions that put bytes on disk; everything else observes. */
+const WRITE_ACTIONS = new Set<Action>(["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE"]);
 
 /** Known errno values worth catching per file; anything else propagates. */
 const CATCHABLE_IO = new Set(["ENOENT", "EACCES", "EPERM", "EBUSY", "EISDIR", "ENOTDIR", "EMFILE", "ENOSPC"]);
@@ -262,6 +265,14 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   // is a session at all, and anything it refuses is reported and left exactly
   // where it lies.
   const seen = new Set(groups.flatMap(({ group }) => group.files.map((f) => f.neutralRel)));
+  // Keyed by provider and logical id, so a file only the replica has joins the
+  // group it belongs to instead of forming a group of its own. That mattered
+  // not at all while every provider's session was one file, and matters a lot
+  // now: a session whose history is in the replica and whose commit point is
+  // not is a session that must not be assembled on this machine (§6.6.1).
+  const byLogicalId = new Map<string, { adapter: ProviderAdapter; group: SessionGroup }>();
+  for (const held of groups) byLogicalId.set(`${held.adapter.id}\u0000${held.group.logicalId}`, held);
+
   for (const { adapter, rel, siblings } of await listReplicaFiles(deps)) {
     if (seen.has(rel)) continue;
     const classified = adapter.classifyNeutral(rel);
@@ -274,32 +285,94 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       });
       continue;
     }
-    groups.push({ adapter, group: remoteOnlyGroup(rel, classified) });
+    // Recognised, and deliberately not a member: this plugin wrote it into the
+    // sync directory and it belongs nowhere else.
+    if (classified.replicaOnly) continue;
+
+    const file: SessionFileRef = {
+      role: classified.role,
+      absPath: "",
+      neutralRel: rel,
+      mode: classified.mode,
+    };
+    const key = `${adapter.id}\u0000${classified.logicalId}`;
+    const existing = byLogicalId.get(key);
+    if (existing) {
+      // Same object as the one in `groups`, so the array sees this too.
+      existing.group = { ...existing.group, files: [...existing.group.files, file] };
+      continue;
+    }
+    const added = {
+      adapter,
+      group: { logicalId: classified.logicalId, files: [file], lastModifiedMs: 0 },
+    };
+    byLogicalId.set(key, added);
+    groups.push(added);
   }
 
   let budget = deps.settings.maxFilesPerPass;
 
   for (const { adapter, group } of groups) {
+    // `derived` stays refused: a derived file is rebuilt locally, never
+    // copied, and REBUILD_LOCAL (§7.2b #5) has no implementation. Grok's
+    // adapter simply does not list its derived members, so this only fires
+    // for a provider that names one — but naming one and having it silently
+    // ignored is the failure this branch exists to prevent.
     for (const file of group.files) {
-      if (file.role !== "primary") continue;
-      // `derived` stays refused: a derived file is rebuilt locally, never
-      // copied, and REBUILD_LOCAL (§7.2b #5) has no implementation — no
-      // shipped provider produces one. `opaque-file` is routed below to its
-      // own table (ADR-48); `append-jsonl` to the prefix table.
-      if (file.mode === "derived") {
-        notices.push(
-          `${file.neutralRel}: this provider stores sessions in a form this version does not sync (${file.mode})`,
-        );
+      if (file.mode !== "derived") continue;
+      notices.push(
+        `${file.neutralRel}: this provider stores sessions in a form this version does not sync (${file.mode})`,
+      );
+      actions.push(
+        entry(group, file.neutralRel, adapter.id, "DEFER", `unsupported-mode:${file.mode}`, "SKIPPED_POLICY"),
+      );
+    }
+
+    // §6.6.1: the budget is spent per *group*, not per file. A group that does
+    // not fit waits whole. Splitting one across passes would land the aux
+    // members now and the primary minutes later — and for the window between
+    // them the session is half-written, invisible in the CLI's list but still
+    // reachable by `--resume <id>`, with the id arriving separately through
+    // the vault's Claudian record. Whole-group deferral keeps that window at
+    // the few milliseconds one pass needs.
+    const planned = orderedForCommit(group);
+
+    // No commit point, no assembly. A group reaching here without a primary
+    // can only have come from the replica, and only because the machine that
+    // pushed it has not finished: landing its history alone would leave a
+    // session directory the CLI does not list — and a Grok resume aimed at
+    // that id was measured writing the user's next turn into a *different*
+    // session (findings 2026-08-24). Waiting costs a pass; assembling costs
+    // someone else's conversation.
+    if (planned.length > 0 && !planned.some((file) => file.role === "primary")) {
+      for (const file of planned) {
         actions.push(
-          entry(group, file.neutralRel, adapter.id, "DEFER", `unsupported-mode:${file.mode}`, "SKIPPED_POLICY"),
+          entry(group, file.neutralRel, adapter.id, "DEFER", "primary-not-in-replica", "SKIPPED_POLICY"),
         );
-        continue;
       }
-      if (budget <= 0) {
+      continue;
+    }
+
+    // …with a floor. A group larger than `maxFilesPerPass` would otherwise
+    // defer for ever — the budget resets each pass and the group never
+    // shrinks, so "wait for room" becomes "never sync this session". A group
+    // that cannot fit an untouched budget is instead allowed to run alone: it
+    // is the only work this pass does, which is the smallest departure from
+    // the setting that still makes progress.
+    if (planned.length > budget && budget < deps.settings.maxFilesPerPass) {
+      for (const file of planned) {
         actions.push(entry(group, file.neutralRel, adapter.id, "DEFER", "budget-exhausted", "SKIPPED_BUDGET"));
-        continue;
       }
-      budget--;
+      continue;
+    }
+    budget -= planned.length;
+
+    // Watched so a half-assembled group is said out loud rather than left in
+    // the action rows to be noticed. See the notice below for why it matters.
+    let auxLanded = false;
+    let primaryPending = false;
+
+    for (const file of planned) {
 
       const localPath = await adapter.targetPathFor(file.neutralRel);
       const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel);
@@ -495,6 +568,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         ...(quarantinedId ? { conflictId: quarantinedId } : {}),
       });
 
+      // The dangerous state named directly, rather than inferred from a result
+      // code: *this machine has no commit point for a session directory that
+      // now exists*. Keying on FAILED_* would miss the quiet and far more
+      // common way it happens — the aux members go quiet while the sync tool
+      // is still writing the primary, so the primary comes back DEFERRED with
+      // no error anywhere. Keying on "a planned write did not land" misses it
+      // too, because a deferred file was never planned as a write.
+      //
+      // A primary that is already on this machine is deliberately excluded: a
+      // stale one is the mixed-age case, which the CLI was measured to heal by
+      // regenerating it. What cannot heal is its absence.
+      if (file.role !== "primary") {
+        if (WRITE_ACTIONS.has(decision.action) && applied.result === "APPLIED") auxLanded = true;
+      } else if (!localO2.exists && applied.result !== "APPLIED") {
+        primaryPending = true;
+      }
+
       if (applied.violation) {
         violations.push({
           rootSymbol: pullingAction(decision.action) ? "providerRoot" : "syncDir",
@@ -550,6 +640,20 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const source = pulled ? remoteBytes : localBytes;
       recordEvidence(deps, file.neutralRel, "local", localPost, wrote && pulled ? source : readStillValid ? localBytes : null);
       recordEvidence(deps, file.neutralRel, "remote", remotePost, wrote && !pulled ? source : readStillValid ? remoteBytes : null);
+    }
+
+    // The one state ADR-30's "do not roll back" leaves behind that a user
+    // could act on before the next pass repairs it. Rolling back would be a
+    // fresh destructive write in an already-failing state, so this says what
+    // happened instead: for a provider whose commit point is a separate file,
+    // opening the session now is the thing not to do (findings 2026-08-24 —
+    // a Grok resume aimed at a session with no summary.json was measured
+    // appending the turn to a different conversation).
+    if (auxLanded && primaryPending) {
+      notices.push(
+        `${group.logicalId}: part of this session was written but its main file was not — ` +
+          "do not open it in the CLI until the next sync finishes it",
+      );
     }
   }
 
@@ -1075,14 +1179,6 @@ async function listReplicaFiles(
   }
 }
 
-function remoteOnlyGroup(neutralRel: string, classified: NeutralClassification): SessionGroup {
-  return {
-    logicalId: classified.logicalId,
-    files: [{ role: classified.role, absPath: "", neutralRel, mode: classified.mode }],
-    lastModifiedMs: 0,
-  };
-}
-
 function pullingAction(action: Action): boolean {
   return action === "PULL_NEW" || action === "PULL_OVERWRITE";
 }
@@ -1091,4 +1187,24 @@ function errnoOf(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
     ? String((error as { code: unknown }).code)
     : undefined;
+}
+
+/**
+ * The order a group's files are written in: primary last (§6.6, §6.6.1).
+ *
+ * G1 says the primary is the group's only visibility switch, so as long as it
+ * lands after everything else, a session that is being created is invisible to
+ * the CLI until it is complete. That is the whole of the atomicity Grok's
+ * measurement showed is needed — a torn *update* self-heals, a torn *creation*
+ * would not, and this ordering is what prevents the second.
+ *
+ * `derived` members are already excluded: they are refused above, and no
+ * adapter lists them.
+ */
+function orderedForCommit(group: SessionGroup): SessionFileRef[] {
+  const syncable = group.files.filter((file) => file.mode !== "derived");
+  return [
+    ...syncable.filter((file) => file.role !== "primary"),
+    ...syncable.filter((file) => file.role === "primary"),
+  ];
 }
