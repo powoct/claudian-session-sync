@@ -570,6 +570,15 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 
 ### 待做的杂项（非阻塞，顺手时处理）
 
+- ⚠️ **2026-08-27：一次 `pull_request` 事件没有触发 CI**（PR #9，纯文档）。排查结论：不是仓库
+  配置——`ci.yml` 的 `on: pull_request` **没有路径过滤**、workflow `state=active`、repo Actions
+  `enabled=true`、仓库 public、GitHub 状态页 Actions/Webhooks/Pull Requests 全 operational，
+  PR head SHA 与本地一致。该 commit 的 `check-runs` 里只有第三方的 Mermaid app，**`ci` 这个
+  workflow run 压根没被创建**。关掉再重开 PR 不产生新 SHA，也没能重发事件；推一个新 commit
+  才恢复。**教训**：`gh pr checks` 在「没跑」和「跑过了」两种情况下输出长得很像——PR #8 那次是
+  三行 pass，这次是一行 skipping。**判据要看 run 是否存在，不是看有没有红**：
+  `gh api repos/<o>/<r>/commits/<sha>/check-runs -q .total_count`，或 `gh run list --branch <b>`
+
 - macOS 侧 OQ-1 Round 2（Windows 包落到 mac 再验一次反方向）——Windows→mac 方向已验过，此项只是对称补全，优先级低
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
 - ✅ **三平台 CI 已全绿**（2026-08-07，run 31186382661）。此前从 M0 起连续 5 次 push 都是 Linux 绿、macOS/Windows 红而没人看——**推完记得看一眼 `gh run list`**，红了五次和红了一次的修复成本差很多
