@@ -126,14 +126,14 @@ export const GROK: ProviderDescriptor = {
   // can only be resolved by a person. Its conversation history merges by
   // prefix like any Tier A file.
   tier: "R",
-  // The lifecycle probe (2026-08-24, both platforms) settled every blocking
-  // question — discovery is a directory scan, relocation across machines
-  // works, G1 holds. What it could not reach is rewind: grok 1.0.5 has no
-  // headless entry point for it, and the pty could not drive the TUI. The
-  // worst case is bounded — a truncation reads as a prefix violation, which
-  // means a conflict with both versions kept, not lost bytes — but "we have
-  // not seen this operation" is what the flag is for.
-  experimental: true,
+  // Earned the same way Codex did, and in the same order: the lifecycle probe
+  // (2026-08-24, both platforms) said the merge is safe, and the two-machine
+  // acceptance run (2026-08-26) said the product works — resume-by-id on the
+  // other machine with full history, in both directions, plus the refusal to
+  // assemble a session whose commit point has not arrived. The flag came off
+  // with the second, because only an acceptance run answers the second
+  // question. Still off by default, which is ADR-39 and has nothing to do
+  // with tier.
   rootDescription:
     "Where the CLI keeps its per-project session directories, normally " +
     "<GROK_HOME>/sessions or ~/.grok/sessions. Override this if GROK_HOME points elsewhere " +

@@ -324,16 +324,46 @@ export class PluginRuntime {
     await this.refresh();
   }
 
-  async setProvider(providerId: string, patch: Partial<ProviderBinding>): Promise<void> {
+  /**
+   * Turns a provider on or off, or points it at a different storage root.
+   *
+   * Returns `firstEnable` when this switched a provider on for the first time
+   * — in which case a dry run has already been performed and its report is
+   * waiting. §6.1 keeps that gate as long-term behaviour, and not because the
+   * Tier might be unproven: enabling a provider decides which of this
+   * machine's existing conversations begin travelling to another one, and
+   * "we found the CLI's folder" is not consent to copy what is in it. The r4
+   * acceptance run is the measurement — turning Grok on admitted fourteen
+   * historical sessions across two machines, 56 files, with nothing shown
+   * first, because this gate was documented and never built.
+   *
+   * The dry run happens *after* the binding is written, which is safe for the
+   * reason ADR-27 exists: a dry run writes nothing at all. What the user gets
+   * is the scope, before any pass can act on it.
+   */
+  async setProvider(
+    providerId: string,
+    patch: Partial<ProviderBinding>,
+  ): Promise<{ readonly firstEnable: boolean }> {
     const binding = this.binding;
-    if (!binding) return;
+    if (!binding) return { firstEnable: false };
     const previous = binding.providers[providerId] ?? { enabled: false };
+    const firstEnable = patch.enabled === true && previous.introducedAt === undefined;
     const home = await this.homeStore();
     await home.saveBinding({
       ...binding,
-      providers: { ...binding.providers, [providerId]: { ...previous, ...patch } },
+      providers: {
+        ...binding.providers,
+        [providerId]: {
+          ...previous,
+          ...patch,
+          ...(firstEnable ? { introducedAt: this.nowIso() } : {}),
+        },
+      },
     });
     await this.refresh();
+    if (firstEnable) await this.syncNow({ dryRun: true });
+    return { firstEnable };
   }
 
   providerEnabled(providerId: string): boolean {

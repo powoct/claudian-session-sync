@@ -10,10 +10,14 @@
 | **M0 / M1** | ✅ 完成，M1 Exit 达成（2026-08-11 步骤 8 复验通过） |
 | **M2** | ✅ 完成：provider 抽象 + **Codex 接入**（Tier A，2026-08-15 两机验收后已摘 experimental）；OpenCode 判定为结构上不可同步并移出范围 |
 | **M4** | ✅ 完成：README / LICENSE(MIT, 2026, powoct) / release workflow / 仓库转 public / **0.1.0 已发布** |
-| **M3** | 🟡 主体已交付：冲突 UI（M1 即有）、**备份恢复 UI**（ADR-49/50）、`.aiss/prev` **评估后否决**（ADR-51）、`claudian` provider（ADR-48）、**Grok 接入**（ADR-52/53/54，本批）。剩：孤立 aux 清理命令、Pi（无数据） |
+| **M3** | 🟡 主体已交付：冲突 UI（M1 即有）、**备份恢复 UI**（ADR-49/50）、`.aiss/prev` **评估后否决**（ADR-51）、`claudian` provider（ADR-48）、**Grok 接入并通过两机验收**（ADR-52…55）。剩：孤立 aux 清理命令、Pi（无数据） |
 
-**唯一待办的人类动作**：Grok 的真机验收（`tmp/acceptance/AGENTS.md` 末尾的 Grok 九步附录），
-它是 Grok 摘掉 `experimental` 标签的闸门。在那之前 Grok **可写但默认关闭且标实验性**。
+**Grok 已于 2026-08-26 通过两机九步验收，`experimental` 已摘**（默认仍关闭，那是 ADR-39，与 Tier 无关）。
+摘要：[findings/2026-08-26-grok-acceptance.md](docs/zh-CN/findings/2026-08-26-grok-acceptance.md)。
+验收另抓出两条「文档承诺了、代码没做」并已修（ADR-55）：首次启用的 dry-run 闸门、冲突面板认不出是哪个文件。
+
+**唯一待办的人类动作**：装上新构建后，在 B 机打开冲突面板确认那条**有意留着没解**的
+`chat_history.jsonl` 冲突现在能认出来、一次点击能收敛（详见 findings 结尾）。然后就可以发 0.2.0。
 
 ## 历史状态：步骤 8 复验通过，M1 Exit 达成
 
@@ -353,12 +357,11 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **1** | **Grok 真机验收(九步,两个方向)** —— 剧本在 `tmp/acceptance/AGENTS.md` 末尾的 Grok 附录,规范在 testing.md §9.6 | **用户动作**。它是摘 `experimental` 的闸门;G3/G4 不过 ⇒ Grok 改回只读;**G8 不过是数据安全缺陷,优先级最高** |
-| 2 | **重跑 `evidence.mjs init`** 再开始验收 | 本批把快照改成覆盖**每个已启用 provider** 的本机 root(`providerRoots` + `local:<id>` 树);旧的 `out/config.json` 没有这个字段 |
-| 3 | **发 0.2.0**(claudian provider + Grok):bump 三处版本 → tag | 用户动作;建议等 Grok 验收结果再发 |
-| 4 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 5 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
-| 6 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口) | 不阻塞,顺手 |
+| **1** | **复验 F-4 的修复** —— B 机装新构建后打开冲突面板,确认那条留着没解的 `chat_history.jsonl` 冲突显示为 `Session 01a03d22 · chat_history.jsonl (grok)` 且一次点击收敛 | **用户动作**,两分钟。不必重跑九步 |
+| 2 | **发 0.2.0**(claudian provider + Grok):bump 三处版本 → tag | 用户动作 |
+| 3 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
+| 4 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
+| 5 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
 
 **旧的发布动作清单(已全部完成)**
 
@@ -504,7 +507,8 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 
 | 项 | 性质 | 说明 |
 |---|---|---|
-| **OQ-15 Grok 两机往返 + G1 充分性** | ⛔ **挡 Grok 摘 experimental**（不挡接入） | 两次「跨 cwd」实验都在同一台机器上做，两机之间没有一个字节真的走过。列表这一半已在开发机关掉 |
+| ~~OQ-15 Grok 两机往返 + G1 充分性~~ | ✅ **关闭（2026-08-26）** | 两机九步验收，G4/G7 双向 resume 历史完整 |
+| **OQ-17 Grok 流式期间是否就地改写末行** | 非阻塞 | 验收 F-5：单机也判了 CONFLICT。已排除 Claudian 改写（源码零命中）；表现安全（两分支入隔离、一次点击解决），但说明稳定窗口对「正在出字的会话」偏短 |
 | OQ-14 Grok rewind / `/compact` | 非阻塞 | grok 1.0.5 无 headless 入口。风险已封顶：若是截断 ⇒ 判 `CONFLICT`、两侧都留、不丢字节 |
 | OQ-16 Grok 稳定窗口实测值 | 非阻塞 | 现有设计按观察判定；要精确值需 5 秒粒度专项探测 |
 | ~~OQ-7 规模性能基准~~ | ✅ 关闭（2026-08-13） | 百文件/百 MiB 级：全量 hash 亚秒 |

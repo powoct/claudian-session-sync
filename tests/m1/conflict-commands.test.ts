@@ -10,6 +10,8 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { describeConflict } from "../../src/ui/conflict-modal";
+import type { ConflictEntry } from "../../src/orchestration/conflict-commands";
 import { RuntimeHarness, sha256 } from "../helpers/runtime-harness";
 
 const SID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
@@ -300,4 +302,53 @@ describe("the acceptance-run deadlock (D-3): the second machine can always take 
     expect(outcome).toMatchObject({ ok: true, action: "PULL_OVERWRITE" });
     expect(sha256(await read(b.sessionPath(SID)))).toBe(sha256(new Uint8Array(alpha)));
   }, SLOW);
+});
+
+describe("the heading that has to identify a conflict (acceptance r4, F-4)", () => {
+  const view = (over: Partial<ConflictEntry>): ConflictEntry =>
+    ({
+      conflictId: "c",
+      providerId: "claude-code",
+      logicalId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+      logicalIdPrefix: "3f2504e0",
+      detectedAt: "",
+      directory: "/q",
+      neutralRel: "claude-code/3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl",
+      branches: [],
+      superseded: false,
+      ...over,
+    }) as ConflictEntry;
+
+  it("stays as it was for a provider whose file name is its session id", () => {
+    // Adding the file name here would print the id twice and say nothing new.
+    expect(describeConflict(view({}))).toBe("Session 3f2504e0 (claude-code)");
+    expect(
+      describeConflict(
+        view({
+          providerId: "codex",
+          neutralRel:
+            "codex/sessions/2026/08/06/rollout-2026-08-06T12-43-59-3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl",
+        }),
+      ),
+    ).toBe("Session 3f2504e0 (codex)");
+  });
+
+  it("names the file when the file name does not identify the session", () => {
+    const members = ["chat_history.jsonl", "updates.jsonl", "summary.json"].map((name) =>
+      describeConflict(
+        view({
+          providerId: "grok",
+          neutralRel: `grok/3f2504e0-4f89-41d3-9a0c-0305e82c3301/${name}`,
+        }),
+      ),
+    );
+    expect(members).toEqual([
+      "Session 3f2504e0 · chat_history.jsonl (grok)",
+      "Session 3f2504e0 · updates.jsonl (grok)",
+      "Session 3f2504e0 · summary.json (grok)",
+    ]);
+    // The property that actually matters: three conflicts of one session are
+    // three different sentences.
+    expect(new Set(members).size).toBe(3);
+  });
 });

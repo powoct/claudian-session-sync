@@ -328,6 +328,20 @@ export class RuntimeHarness {
     await fsp.writeFile(path.join(dir, "chat_history.jsonl.lock"), "");
   }
 
+  /**
+   * Appends exact bytes to a Grok session's history.
+   *
+   * `writeGrokSession` numbers its turns from the file's length, so two
+   * machines appending to the same base produce identical lines and stay in a
+   * prefix relationship — a fork that never conflicts. Divergence has to be
+   * spelled out.
+   */
+  async appendGrokRaw(sessionId: string, text: string): Promise<void> {
+    for (const member of ["chat_history.jsonl", "updates.jsonl"]) {
+      await fsp.appendFile(this.grokPath(sessionId, member), text);
+    }
+  }
+
   grokPath(sessionId: string, member: string): string {
     return path.join(this.grokProjectDir, sessionId, member);
   }
