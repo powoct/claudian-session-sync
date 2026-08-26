@@ -48,11 +48,18 @@ export class ConflictModal extends Modal {
     }
 
     contentEl.createEl("p", {
+      // Deliberately not "both machines did this". The acceptance run (r4,
+      // F-5) produced a conflict with only one machine involved: a pass copied
+      // an intermediate state of a file the CLI was still writing, and the
+      // finished version was not an extension of it. Telling that user the
+      // other machine had edited the session sends them looking for something
+      // that never happened.
       text:
-        "Both machines added to these sessions separately, so neither version contains the " +
-        "other. Both are kept whichever you choose — the one you do not pick stays in the " +
-        "quarantine folder and in your backups. A conflict is settled per machine: if the " +
-        "other machine also extended this session, it will ask once there too.",
+        "These sessions have two versions that are not continuations of each other, so there " +
+        "is no way to merge them. Usually that means both machines added to the session " +
+        "separately. Both versions are kept whichever you choose — the one you do not pick " +
+        "stays in the quarantine folder and in your backups. A conflict is settled per " +
+        "machine: if the other machine has it too, it will ask once there as well.",
     });
 
     for (const conflict of conflicts) {
@@ -62,7 +69,7 @@ export class ConflictModal extends Modal {
 
   private renderOne(container: HTMLElement, conflict: ConflictEntry): void {
     const block = container.createDiv();
-    block.createEl("h3", { text: `Session ${conflict.logicalIdPrefix} (${conflict.providerId})` });
+    block.createEl("h3", { text: describeConflict(conflict) });
     for (const branch of conflict.branches) {
       block.createEl("p", { text: describeBranch(branch) });
     }
@@ -206,4 +213,26 @@ export function describeOutcome(
     default:
       return `Could not resolve it: ${outcome.reason}.`;
   }
+}
+
+/**
+ * The heading, which has to tell two conflicts of one session apart.
+ *
+ * It did not, and the acceptance run (r4, F-4) is what that costs. A Grok
+ * session is a folder, so one fork produces a conflict per member — and every
+ * provider before it had one file per session, which made "session id plus
+ * provider" a complete identity. Three conflicts then rendered as three blocks
+ * reading `Session 01a03d22 (grok)`, identical down to the buttons: the
+ * operator resolved two without being able to tell which two, and reported the
+ * third as missing from the panel. It was there.
+ *
+ * The file name is added only when it does not already identify the session.
+ * Claude Code's `<uuid>.jsonl`, Codex's `rollout-<ts>-<uuid>.jsonl` and
+ * Claudian's `conv-<id>.meta.json` all carry the id, so for them this is the
+ * sentence it always was; Grok's `chat_history.jsonl` does not, so it says so.
+ */
+export function describeConflict(conflict: ConflictEntry): string {
+  const file = conflict.neutralRel.slice(conflict.neutralRel.lastIndexOf("/") + 1);
+  const named = file.includes(conflict.logicalId) ? "" : ` · ${file}`;
+  return `Session ${conflict.logicalIdPrefix}${named} (${conflict.providerId})`;
 }

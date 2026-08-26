@@ -939,7 +939,7 @@ Grok provider 已启用(首次启用会强制 dry-run 确认)。
 | G6 | **A 机**:手动同步,然后 resume | `chat_history.jsonl` `PULL_OVERWRITE`;`summary.json` 快进;A 机 resume 看得到 B 机那 2 轮 | PassReport + CLI 输出 |
 | G7 | **反向重跑 G2–G4**(win → mac 与 mac → win 都要过一遍) | 同上 | 同上 |
 | G8 | **半落地演练**:手动把 replica 里某个会话的 `summary.json` 移走,B 机同步 | 三个文件**一个都不落**;报告里是 `DEFER` + `primary-not-in-replica`;B 机的 `<sid>/` 目录不被创建 | PassReport + 目录 `ls` |
-| G9 | **分叉**:断开同步,两机各聊 1 轮,恢复 | `summary.json` `CONFLICT` 且两分支都在隔离区;`chat_history.jsonl` 也判 `CONFLICT`(双侧都追加过 ⇒ 互不为前缀);**两侧原始文件字节未变** | §9.3 的两张表 |
+| G9 | **分叉**:断开同步,两机各聊 1 轮,恢复 | 三个 append 成员判 `CONFLICT`、每组两分支都在隔离区、**两侧原始文件字节未变**;冲突面板里每条都能**认出是哪个文件**(标题形如 `Session <id8> · chat_history.jsonl (grok)`),逐条解决后计数归零。⚠️ **`summary.json` 未必判 CONFLICT**:同步工具若用「保留一方 + 冲突副本」化解了文件级冲突,落败那台看到的就是「本机没动、远端动了」,§7.2b 按收敛基点快进——设计内,非缺陷(2026-08-26 实测) | §9.3 的两张表 |
 
 **任何一步不过 ⇒ `experimental` 不摘。** G3/G4 不过则回到只读(说明同步集不够);
 G8 不过是数据安全缺陷,优先级高于一切功能项——它防的是「turn 落进别人的对话」
@@ -955,7 +955,7 @@ Esc Esc 选点)与 `/compact`,各看一次 `chat_history.jsonl` 是变短还是�
 | **M0** | §12 交付清单 G-01…G-11 全绿 |
 | **M1** | §9.4 十步**全部**通过；§15 门禁全绿；`EXPECTED_UNVERIFIED === 0`。~~OQ-1/3/5/8/9 有结论~~ ✅ **已全部完成**（2026-08-06，见 §10 与 findings），Claude Code 已标 Tier A ✅ |
 | **M2** | M1 剧本回归仍通过；OQ-2 有结论；Codex 或 OpenCode 至少一个达成 Tier B 双机 resume；S-22…S-27、R-14、X-01、X-02 落地；OQ-7 基准达标 |
-| **M3** | 冲突解决 UI 走通 §9.4 步骤 8 的完整闭环；备份恢复 UI 可用；孤立 aux 清理命令可用；**Grok 接入**(逐文件分级 + 多文件 group)自动化测试全绿。**Grok 摘 `experimental` 另需 §9.6 全过**——那是发布闸门,不是 M3 闸门 |
+| **M3** | 冲突解决 UI 走通 §9.4 步骤 8 的完整闭环；备份恢复 UI 可用；孤立 aux 清理命令可用；**Grok 接入**(逐文件分级 + 多文件 group)自动化测试全绿。**Grok 已于 2026-08-26 通过 §9.6 并摘掉 `experimental`**([findings](./findings/2026-08-26-grok-acceptance.md)) |
 | **M4** | 干净机器按 README 从零配置成功；BRAT 安装验证；验收记录已归档 |
 
 ---

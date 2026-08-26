@@ -64,6 +64,17 @@ export interface ProviderBinding {
   readonly enabled: boolean;
   /** Set when the user overrode the detected CLI storage root. */
   readonly rootOverride?: string;
+  /**
+   * Set once, the first time this provider is switched on (§6.1).
+   *
+   * Enabling a provider decides which of this machine's conversations start
+   * travelling, and the answer is rarely "the one I just had": the r4
+   * acceptance run turned Grok on and admitted fourteen historical sessions
+   * across two machines — 56 files — with nothing shown first. So the first
+   * enable runs a dry run before anything can be copied, and this flag is how
+   * "first" is known across restarts.
+   */
+  readonly introducedAt?: string;
 }
 
 /** `remote.json` (§9.6.2) — this machine's view of one sync directory. */
@@ -294,9 +305,11 @@ function parseProviders(raw: unknown): Record<string, ProviderBinding> {
     // Absent means disabled. A provider is enabled by the user saying so, not
     // by a malformed record failing to say otherwise.
     const override = typeof v.rootOverride === "string" ? v.rootOverride : undefined;
+    const introduced = typeof v.introducedAt === "string" ? v.introducedAt : undefined;
     out[id] = {
       enabled: v.enabled === true,
       ...(override === undefined ? {} : { rootOverride: override }),
+      ...(introduced === undefined ? {} : { introducedAt: introduced }),
     };
   }
   return out;

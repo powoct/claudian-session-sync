@@ -21,6 +21,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionEntry } from "../../src/orchestration/pass-report";
+import { describeConflict } from "../../src/ui/conflict-modal";
 import { RuntimeHarness } from "../helpers/runtime-harness";
 
 const SID = "01a02f27-c1aa-7aa1-9580-e4188952ef3b";
@@ -430,4 +431,85 @@ describe("backups of a provider whose file names repeat across sessions", () => 
       "restoring another session's backup must not touch this session",
     ).toBe(untouched);
   }, 60_000);
+});
+
+describe("a session with several conflicting members (acceptance r4, F-4)", () => {
+  it("lists one conflict per member and names the file in each", async () => {
+    // Real-machine finding. A fork of one Grok session produces a conflict per
+    // member, and every provider before this one had exactly one file per
+    // session — so the conflict screen headed each entry with the session id
+    // and the provider, and nothing else. Three conflicts of one session
+    // therefore rendered as three blocks reading `Session 01a03d22 (grok)`,
+    // identical down to the buttons. The acceptance operator resolved two,
+    // could not tell which two, and reported the third as "missing from the
+    // panel" — it was there, and indistinguishable.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 2 });
+    await a.settle();
+
+    const b = await peerWithGrok(a);
+    await b.settle();
+
+    // Both machines continue the same session, differently: every append-only
+    // member diverges, which is exactly what a fork looks like.
+    await a.appendGrokRaw(SID, '{"type":"user","content":"from A"}\n');
+    await a.settle();
+    await b.appendGrokRaw(SID, '{"type":"user","content":"from B, longer"}\n');
+    await b.settle();
+    await b.settle();
+
+    const conflicts = await b.runtime.conflicts();
+    const mine = conflicts.filter((c) => c.providerId === "grok");
+    expect(mine.length, "one conflict per diverged member").toBeGreaterThan(1);
+
+    // Each entry must say which file it is about — the session id alone is
+    // shared by all of them.
+    const headings = mine.map((c) => describeConflict(c));
+    expect(new Set(headings).size, `headings must be distinct: ${headings.join(" | ")}`).toBe(
+      headings.length,
+    );
+    for (const conflict of mine) {
+      const member = conflict.neutralRel.slice(conflict.neutralRel.lastIndexOf("/") + 1);
+      expect(describeConflict(conflict)).toContain(member);
+    }
+  }, 60_000);
+});
+
+describe("switching a provider on for the first time (acceptance r4, F-1)", () => {
+  it("runs a dry run first, and says it was the first time", async () => {
+    // §6.1 documents this gate and the r4 acceptance found it had never been
+    // built: enabling Grok admitted fourteen historical sessions across two
+    // machines — 56 files — with nothing shown beforehand. What the switch
+    // decides is which of this machine's *existing* conversations start
+    // travelling, and that set is rarely the one the user has in mind.
+    const machine = await RuntimeHarness.create();
+    machines.push(machine);
+    await machine.configure();
+    await machine.writeGrokSession(SID, { turns: 2 });
+
+    const first = await machine.runtime.setProvider("grok", { enabled: true });
+
+    expect(first.firstEnable).toBe(true);
+    expect(machine.runtime.lastPassReport()?.dryRun).toBe(true);
+    // ADR-27: a dry run writes nothing at all, so the scope was shown without
+    // any of it having happened.
+    const status = await machine.runtime.refresh();
+    await expect(
+      fsp.readdir(path.join(machine.syncDir, status.workspaceId as string, "grok")),
+    ).rejects.toThrow();
+  }, 30_000);
+
+  it("does not do it again when the provider is switched off and back on", async () => {
+    // The gate is about the introduction, not about every toggle — repeating
+    // it would train people to click past it.
+    const machine = await RuntimeHarness.create();
+    machines.push(machine);
+    await machine.configure();
+    await machine.runtime.setProvider("grok", { enabled: true });
+
+    await machine.runtime.setProvider("grok", { enabled: false });
+    const again = await machine.runtime.setProvider("grok", { enabled: true });
+
+    expect(again.firstEnable).toBe(false);
+  }, 30_000);
 });

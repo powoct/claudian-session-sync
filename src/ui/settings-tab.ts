@@ -176,7 +176,19 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
         .setDesc(describeProvider(provider))
         .addToggle((toggle) =>
           toggle.setValue(this.isEnabled(provider.id)).onChange(async (value) => {
-            await this.runtime.setProvider(provider.id, { enabled: value });
+            const outcome = await this.runtime.setProvider(provider.id, { enabled: value });
+            if (outcome.firstEnable) {
+              // §6.1's first-enable gate. The report is the point: what this
+              // switch decides is which of this machine's existing
+              // conversations start travelling, and that set is usually much
+              // larger than the one the user has in mind.
+              new Notice(
+                `A dry run just listed what enabling ${provider.label} would copy. ` +
+                  "Nothing has been copied yet — open “Show last sync report” to read it, " +
+                  "and switch this back off if it is more than you meant.",
+                12_000,
+              );
+            }
             this.redraw();
           }),
         );
