@@ -16,8 +16,11 @@
 摘要：[findings/2026-08-26-grok-acceptance.md](docs/zh-CN/findings/2026-08-26-grok-acceptance.md)。
 验收另抓出两条「文档承诺了、代码没做」并已修（ADR-55）：首次启用的 dry-run 闸门、冲突面板认不出是哪个文件。
 
-**唯一待办的人类动作**：装上新构建后，在 B 机打开冲突面板确认那条**有意留着没解**的
-`chat_history.jsonl` 冲突现在能认出来、一次点击能收敛（详见 findings 结尾）。然后就可以发 0.2.0。
+**F-4 的修复已在 B 机真机复验通过**（2026-08-26 21:15，六项全 ✓；F-5 遗留的那条也一并清掉，
+B 机冲突计数归零，两个会话 8 个文件三方一致，I1 两区间均 ✓）。**Grok 的验收到此完全结束。**
+
+**唯一待办的人类动作**：发 0.2.0 —— bump 三处版本（`manifest.json` / `package.json` / `versions.json`）
+后打 tag，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀），release workflow 会自动 verify + 构建 + 挂产物。
 
 ## 历史状态：步骤 8 复验通过，M1 Exit 达成
 
@@ -357,11 +360,10 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **1** | **复验 F-4 的修复** —— B 机装新构建后打开冲突面板,确认那条留着没解的 `chat_history.jsonl` 冲突显示为 `Session 01a03d22 · chat_history.jsonl (grok)` 且一次点击收敛 | **用户动作**,两分钟。不必重跑九步 |
-| 2 | **发 0.2.0**(claudian provider + Grok):bump 三处版本 → tag | 用户动作 |
-| 3 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 4 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
-| 5 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
+| **1** | **发 0.2.0**(claudian provider + Grok + 两机验收):bump 三处版本 → tag | **用户动作**。Grok 验收已完全结束,没有别的前置 |
+| 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
+| 3 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
+| 4 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
 
 **旧的发布动作清单(已全部完成)**
 
