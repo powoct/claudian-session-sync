@@ -570,14 +570,16 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 
 ### 待做的杂项（非阻塞，顺手时处理）
 
-- ⚠️ **2026-08-27：一次 `pull_request` 事件没有触发 CI**（PR #9，纯文档）。排查结论：不是仓库
-  配置——`ci.yml` 的 `on: pull_request` **没有路径过滤**、workflow `state=active`、repo Actions
-  `enabled=true`、仓库 public、GitHub 状态页 Actions/Webhooks/Pull Requests 全 operational，
-  PR head SHA 与本地一致。该 commit 的 `check-runs` 里只有第三方的 Mermaid app，**`ci` 这个
-  workflow run 压根没被创建**。关掉再重开 PR 不产生新 SHA，也没能重发事件；推一个新 commit
-  才恢复。**教训**：`gh pr checks` 在「没跑」和「跑过了」两种情况下输出长得很像——PR #8 那次是
-  三行 pass，这次是一行 skipping。**判据要看 run 是否存在，不是看有没有红**：
-  `gh api repos/<o>/<r>/commits/<sha>/check-runs -q .total_count`，或 `gh run list --branch <b>`
+- ⚠️ **2026-08-27：CI run 在队列里堵了十几分钟，看起来像「没跑」**。现象：PR #9 的
+  `gh pr checks` 只有第三方的 Mermaid app 一行，三平台一个都没有；`gh api …/check-runs`
+  也只有 1 项。**排队中的 run 还没创建 check-runs**，所以这两个命令都看不到它。
+  真正能看见的是 `gh run list --branch <b>` —— 那里有三个 `ci` run，全是 `queued`，
+  最老的排了 6 分钟以上（触发是正常的，包括最初那次 push；是 GitHub 的 runner 没取走任务）。
+  **教训**：`gh pr checks` 在「排队中」和「跑完了」两种情况下都给一个很短的列表，
+  一眼看去很像通过。**判据是 run 的存在与状态，不是有没有红**：
+  `gh run list --branch <b>`，或 `gh api repos/<o>/<r>/actions/runs?head_sha=<sha>`。
+  （我第一次判成「没触发」也是因为只查了 check-runs；`gh run list --branch` 在 run 刚入队时
+  也可能短暂返回空。）
 
 - macOS 侧 OQ-1 Round 2（Windows 包落到 mac 再验一次反方向）——Windows→mac 方向已验过，此项只是对称补全，优先级低
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
