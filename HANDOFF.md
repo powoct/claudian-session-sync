@@ -1,15 +1,15 @@
 # HANDOFF — 交接说明
 
-> 更新时间：**2026-08-24**（M1/M2/M4 已完成并发布 0.1.0；M3 主体交付：备份恢复 UI、`.aiss/prev` 否决、**Grok 接入**）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：**2026-08-27**（**0.2.0 已发布**；M1/M2/M4 完成；M3 主体交付并通过 Grok 两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态（2026-08-24）
+## 当前状态（2026-08-27）
 
 | 里程碑 | 状态 |
 |---|---|
 | **M0 / M1** | ✅ 完成，M1 Exit 达成（2026-08-11 步骤 8 复验通过） |
 | **M2** | ✅ 完成：provider 抽象 + **Codex 接入**（Tier A，2026-08-15 两机验收后已摘 experimental）；OpenCode 判定为结构上不可同步并移出范围 |
-| **M4** | ✅ 完成：README / LICENSE(MIT, 2026, powoct) / release workflow / 仓库转 public / **0.1.0 已发布** |
+| **M4** | ✅ 完成：README / LICENSE(MIT, 2026, powoct) / release workflow / 仓库转 public / **0.1.0 与 0.2.0 均已发布** |
 | **M3** | 🟡 主体已交付：冲突 UI（M1 即有）、**备份恢复 UI**（ADR-49/50）、`.aiss/prev` **评估后否决**（ADR-51）、`claudian` provider（ADR-48）、**Grok 接入并通过两机验收**（ADR-52…55）。剩：孤立 aux 清理命令、Pi（无数据） |
 
 **Grok 已于 2026-08-26 通过两机九步验收，`experimental` 已摘**（默认仍关闭，那是 ADR-39，与 Tier 无关）。
@@ -19,8 +19,23 @@
 **F-4 的修复已在 B 机真机复验通过**（2026-08-26 21:15，六项全 ✓；F-5 遗留的那条也一并清掉，
 B 机冲突计数归零，两个会话 8 个文件三方一致，I1 两区间均 ✓）。**Grok 的验收到此完全结束。**
 
-**唯一待办的人类动作**：发 0.2.0 —— bump 三处版本（`manifest.json` / `package.json` / `versions.json`）
-后打 tag，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀），release workflow 会自动 verify + 构建 + 挂产物。
+**0.2.0 已于 2026-08-27 发布**（tag `0.2.0` → `1d365c5`，release workflow success 56s，
+产物 `main.js` 218223 B + `manifest.json`；产物字节数与本地构建一致）。
+版本内容 = 全部 M3：备份恢复 UI、点击路径的两道闸门、opaque 表 + `claudian` provider、
+`.aiss/prev` 否决、**Grok**，以及验收抓出的两条修复。
+Release notes 已手写（面向使用者，重点写「会被误判成 bug 的三件事」+ 未测项）。
+
+**没有待办的人类动作。** 下一步做什么见下面的「下一步」表，都不紧急。
+
+### 发布记录
+
+| 版本 | 日期 | 内容 | 验收 |
+|---|---|---|---|
+| **0.1.0** | 2026-08-15 | M1 + M2：Claude Code、Codex（两机验收后摘 experimental） | M1 十步 ✅ / M4 ✅ |
+| **0.2.0** | 2026-08-27 | 全部 M3：备份恢复 UI、点击路径的两道闸门、opaque 表 + `claudian` provider、`.aiss/prev` 否决、**Grok** | Grok 九步 ✅（双向）；**`claudian` provider 尚未两机验收** |
+
+打 tag 的方式：`git tag <版本> && git push origin <版本>`，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀）。
+**确认发布是否真的跑了要用 `gh run list --workflow=release`**，不是 `gh pr checks`（理由见「待做的杂项」里 2026-08-27 那条）。
 
 ## 历史状态：步骤 8 复验通过，M1 Exit 达成
 
@@ -360,10 +375,11 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **1** | **发 0.2.0**(claudian provider + Grok + 两机验收):bump 三处版本 → tag | **用户动作**。Grok 验收已完全结束,没有别的前置 |
-| 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 3 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
-| 4 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
+| 1 | M3 剩余:**孤立 aux 清理命令**(现在真的有多文件 group 了,这条才有对象) | 唯一还欠着的 M3 交付项 |
+| 2 | **补测 OQ-17**(Grok 在流式出字期间是否就地改写 `chat_history.jsonl` 末行) | 三个未测项里**最值得先做的**:它决定稳定窗口该不该覆盖一整个 turn 而不只是一个瞬间。验收 F-5 是它的第一个真实样本 |
+| 3 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口实测值) | 不阻塞。风险已封顶:若就地重写,表现是一次冲突、两版都留、不丢字节 |
+| 4 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机;它是 0.2.0 里唯一**没经过两机验收**的新东西 |
+| 5 | `release.yml` 的 release notes 现在写死一句「Install via BRAT…」,每次发版都会覆盖 | 想改成「有 `RELEASE_NOTES.md` 就用它」的话,注意**那条路径只有打 tag 时才执行**——单独开 PR,并先在一个测试 tag 上验过再合。0.2.0 的 notes 是发完用 `gh release edit` 补的 |
 
 **旧的发布动作清单(已全部完成)**
 
@@ -373,7 +389,7 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 | 2 | **LICENSE** | 仓库还没有 LICENSE 文件;Obsidian 社区惯例 MIT,由用户定 |
 | 3 | **打 tag 发布**:`git tag 0.1.0 && git push origin 0.1.0` | release workflow 自动 verify + 构建 + 挂产物;tag 名必须恰好等于 manifest 版本(无 v 前缀) |
 | 4 | ~~M4 验收~~ ✅ 已完成并归档(2026-08-15);experimental 已摘 | — |
-| 5 | M3 候选：`.claudian/sessions` 同步（§7.2b opaque 模式）+ replica 侧删除传播设计 + Grok group 原子性（含 review/5 M2-5：mode 守卫从逐 primary 提为逐 group——aux 与 primary 的 mode 可能不同,整组 DEFER 而非逐文件跳过） | M3 |
+| 5 | ~~M3 候选：`.claudian/sessions` 同步 + Grok group 原子性~~ ✅ **均已交付**(ADR-48 / ADR-52…55);review/5 M2-5 的「mode 守卫逐 group」也已落地为 §6.6.1 的三条规则 | 已完成 |
 
 **本机烟测已经顺带回答的两件事**（开发机 Linux，Codex 0.146.0-alpha.9.2）：
 
