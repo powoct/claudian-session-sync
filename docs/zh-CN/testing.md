@@ -948,6 +948,34 @@ G8 不过是数据安全缺陷,优先级高于一切功能项——它防的是�
 顺带补测(不阻塞,回填 OQ-14):在沙箱 `GROK_HOME` 里对一个会话执行 rewind(TUI,
 Esc Esc 选点)与 `/compact`,各看一次 `chat_history.jsonl` 是变短还是变长。
 
+### 9.7 `claudian` provider 验收(七步)
+
+0.2.0 里唯一没经过两机验收的 provider。它走的是 §7.2b 的 opaque 表 + 收敛基点快进
+(ADR-48),与其余 provider 的前缀合并是**两条不同的代码路径**,而这一条至今只有单元测试。
+逐步剧本在验收套件 `tmp/acceptance/AGENTS.md` 的 claudian 附录,这里只记判定与两条闸门。
+
+**核心断言(C4)**:本机改了记录、对端还停在本机上次推的版本 ⇒ 必须是 `PUSH_OVERWRITE`
++ reason `remote-at-converged-base`。**这里出现 CONFLICT 就是不可用**——Claudian 每聊一句
+都会重写 `meta.json`,那样它就是个冲突生成器。
+
+**真分叉(C7)**:双机各改一次同一条记录 ⇒ `CONFLICT` + `opaque-divergent-both-moved`,
+**两侧原文件字节都不变**,两个分支都进隔离区。**有一侧被改了就是数据安全缺陷**——
+这是整份重写型 provider 唯一可能吞掉用户对话标题/会话绑定的路径。
+
+⚠️ **在哪里跑,是这条验收最要紧的选择。** 该 provider 的设置文案明确说「vault 同步已经
+带着 `.claudian/` 就别开」。若在这样的 vault 上跑(即便冻结 git):
+
+- **首次接触会在真实记录上产生一批 `opaque-divergent-no-base` 冲突**(§7.2b #4c)——
+  两台的 `.claudian/` 本来就由 vault 同步互通、conv id 重合,而 Claudian 打开记录时会把
+  `providerState.sessionDirectory` 改写成本机路径,于是同一条记录两台字节不同。
+  **这不是缺陷**,但它出现在用户真实的对话记录上,不该顺手在冲突面板里替他二选一。
+- **收尾必须先关 provider 再解冻 vault 同步**,顺序反了就长期停在双传输配置里:
+  此后任何一次把记录换回旧版本的操作(git restore / 网盘回滚)都会被按收敛基点**快进**
+  推给对端,对端那条记录被静默改回旧版。
+
+因此**默认建议在一个独立的测试 vault 上跑**;真实 vault 只在「就是要验自己的真实配置」
+时才用,且必须照附录的额外要求执行。
+
 ### 9.5 各里程碑 Exit Criteria
 
 | 里程碑 | 通过标准 |
