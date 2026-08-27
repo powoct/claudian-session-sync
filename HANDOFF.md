@@ -570,16 +570,21 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 
 ### 待做的杂项（非阻塞，顺手时处理）
 
-- ⚠️ **2026-08-27：CI run 在队列里堵了十几分钟，看起来像「没跑」**。现象：PR #9 的
+- ⚠️ **2026-08-27：CI run 在队列里堵了 13 个多小时，看起来像「没跑」**（PR #9）。现象：
   `gh pr checks` 只有第三方的 Mermaid app 一行，三平台一个都没有；`gh api …/check-runs`
   也只有 1 项。**排队中的 run 还没创建 check-runs**，所以这两个命令都看不到它。
-  真正能看见的是 `gh run list --branch <b>` —— 那里有三个 `ci` run，全是 `queued`，
-  最老的排了 6 分钟以上（触发是正常的，包括最初那次 push；是 GitHub 的 runner 没取走任务）。
-  **教训**：`gh pr checks` 在「排队中」和「跑完了」两种情况下都给一个很短的列表，
-  一眼看去很像通过。**判据是 run 的存在与状态，不是有没有红**：
+  能看见的是 `gh run list --branch <b>` —— 那里有三个 `ci` run 全是 `queued`，最老的排了
+  13h40m，一个 job 都没创建；`gh run cancel` 报「已完成」、`DELETE` 报 403（后端自相矛盾）。
+  ruleset **Protect main** 要求三个 `check (os)` 上下文且 `bypass_actors` 为空 ⇒ **PR 无法合并**。
+  **解法**：从同一个 commit 另开一个 PR（#10）。它的 run **20 秒内就被调度**并跑完；
+  随后 **#9 那三个僵尸 run 也自己续跑好了** —— 所以「新 PR 号换了并发组」这个解释**不完整**：
+  更像是该仓库的调度被卡住，新 run 把它踢活之后把旧队列一起排掉了。真正的机理未确认。
+  GitHub 状态页当时挂着「Disruption with GitHub Billing」，但**那条事件比卡死晚 8.5 小时开始**，
+  时间线对不上，不作为原因。
+  **教训（这条是确定的）**：`gh pr checks` 在「排队中」和「跑完了」两种情况下都给一个很短的
+  列表，一眼看去很像通过。**判据是 run 的存在与状态，不是有没有红**：
   `gh run list --branch <b>`，或 `gh api repos/<o>/<r>/actions/runs?head_sha=<sha>`。
-  （我第一次判成「没触发」也是因为只查了 check-runs；`gh run list --branch` 在 run 刚入队时
-  也可能短暂返回空。）
+  卡住时的可用手段：从同一 commit 另开一个 PR。
 
 - macOS 侧 OQ-1 Round 2（Windows 包落到 mac 再验一次反方向）——Windows→mac 方向已验过，此项只是对称补全，优先级低
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
