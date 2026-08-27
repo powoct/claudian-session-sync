@@ -30,7 +30,7 @@
 | G6 | A 拉回、快进、备份齐全,resume 看得到 B 那两轮 | ✅ |
 | **G7** | **反方向(B 起 → A 落地 → A resume)整套重跑** | ✅ |
 | **G8** | 半落地:`primary-not-in-replica`,**零文件落地、目录未创建** | ✅ |
-| G9 | 分叉 → CONFLICT → 隔离 → 解决收敛 | 🟡 引擎侧全成立;**面板侧有缺陷(F-4)**,已修 |
+| G9 | 分叉 → CONFLICT → 隔离 → 解决收敛 | ✅ **修复后真机复验通过**(见文末) |
 
 **核心断言(G4/G7)双向通过 ⇒ OQ-15 关闭:Grok 跨机 resume 成立。**
 **G8 通过 ⇒ 最危险的那条路径(半落地 → turn 落进别的会话)被挡住了。**
@@ -114,15 +114,34 @@ P6 的 38 张快照**全部取在 turn 之间**,这个面从未被测过。记�
 
 **OQ-14(rewind / `/compact`)本轮未跑**,时间未及,不阻塞。
 
-## 结论:摘掉 `experimental`
+## F-4 修复的真机复验(2026-08-26 21:09–21:32,B 机)——**通过**
 
-闸门是 §9.6 九步。G1–G8 全部通过且 **G4/G7 双向成立**;G9 的**引擎侧**全部成立
-(三个成员正确判 CONFLICT、每组双分支入隔离、两侧原始字节未变、A 侧一次点击解决成功),
-唯一的失败面是**面板认不出哪条是哪条**——UI 缺陷,已修并有会红的测试。
+验收人有意把那条冲突留着没解,所以复验不必重跑九步,只需装上新构建
+(`main.js` LF 归一化 sha256 `16e8b226…`,旧版 `8e4295cc…`)打开面板:
 
-据此:**Grok 摘掉 `experimental`,保持默认关闭**(默认关闭是 ADR-39 的长期行为,与 Tier 无关)。
+| 项 | 结果 |
+|---|---|
+| 条目出现,且标题带文件名 | ✅ **`Session 01a03d22 · chat_history.jsonl (grok)`** |
+| 两版信息完整 | ✅ `bcf70031` 29 行 22877 B(in the sync folder) / `dd99708b` 29 行 22895 B(on this machine) |
+| 按钮可用 | ✅ 且同一面板里的历史条目正确呈禁用灰 + 「Neither of these versions is on either side any more … Kept for reference」 |
+| 一次点击收敛 | ✅ `2 conflicts → 1 conflict`;该 session 四个文件全部 local == replica |
+| 落败侧字节留底 | ✅ 备份区新增 22895 B `dd99708b`;隔离目录三个文件原样保留 |
+| I1 | ✅ `check f4-before f4-after` 与 `check s0-preinstall f4-after` 均 `✓ I1 holds` |
 
-复验只需一件事,不必重跑九步:验收人**有意把 B 机那条 `chat_history.jsonl` 冲突留着没解**
-(local `dd99708b` / replica `bcf70031`,两分支都在 `.quarantine/…/c6ee29a2a0866727/`)。
-装上新构建后打开冲突面板,应当看到 **`Session 01a03d22 · chat_history.jsonl (grok)`**,
-按钮可用,一次点击收敛、计数归零。
+**F-5 遗留的那条也一并清掉**(21:32):`Session 01a03d3b · chat_history.jsonl (grok)`,
+一次点击保留 A 的完整版(18 行 20410 B)、弃掉本机的中间态(15 行 19418 B),
+落败侧同样进了备份与隔离区。**B 机冲突计数归零**;两个会话共 8 个文件,
+**A.local == replica == B.local 全部一致**。
+
+验收人另记了一条:新版面板文案改成「… **Usually** that means both machines added to the
+session separately」,对 F-5 那种单机场景的误导性有所缓解。
+
+## 结论:九步全过,`experimental` 已摘
+
+G1–G8 通过且 **G4/G7 双向成立**;G9 在修复后真机复验通过——三个成员正确判 CONFLICT、
+每组双分支入隔离、两侧原始字节未变、**面板认得出每一条且一次点击收敛**。
+
+**Grok 摘掉 `experimental`,保持默认关闭**(默认关闭是 ADR-39 的长期行为,与 Tier 无关)。
+
+遗留的三条都不阻塞,已各自记为 OQ:F-3 是设计内行为(已写进 §9.6 与架构文档的同步工具
+交互一节);OQ-14(rewind / `/compact`)与 **OQ-17**(流式期间是否就地改写末行)待补测。

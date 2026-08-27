@@ -16,8 +16,11 @@
 摘要：[findings/2026-08-26-grok-acceptance.md](docs/zh-CN/findings/2026-08-26-grok-acceptance.md)。
 验收另抓出两条「文档承诺了、代码没做」并已修（ADR-55）：首次启用的 dry-run 闸门、冲突面板认不出是哪个文件。
 
-**唯一待办的人类动作**：装上新构建后，在 B 机打开冲突面板确认那条**有意留着没解**的
-`chat_history.jsonl` 冲突现在能认出来、一次点击能收敛（详见 findings 结尾）。然后就可以发 0.2.0。
+**F-4 的修复已在 B 机真机复验通过**（2026-08-26 21:15，六项全 ✓；F-5 遗留的那条也一并清掉，
+B 机冲突计数归零，两个会话 8 个文件三方一致，I1 两区间均 ✓）。**Grok 的验收到此完全结束。**
+
+**唯一待办的人类动作**：发 0.2.0 —— bump 三处版本（`manifest.json` / `package.json` / `versions.json`）
+后打 tag，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀），release workflow 会自动 verify + 构建 + 挂产物。
 
 ## 历史状态：步骤 8 复验通过，M1 Exit 达成
 
@@ -357,11 +360,10 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **1** | **复验 F-4 的修复** —— B 机装新构建后打开冲突面板,确认那条留着没解的 `chat_history.jsonl` 冲突显示为 `Session 01a03d22 · chat_history.jsonl (grok)` 且一次点击收敛 | **用户动作**,两分钟。不必重跑九步 |
-| 2 | **发 0.2.0**(claudian provider + Grok):bump 三处版本 → tag | 用户动作 |
-| 3 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
-| 4 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
-| 5 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
+| **1** | **发 0.2.0**(claudian provider + Grok + 两机验收):bump 三处版本 → tag | **用户动作**。Grok 验收已完全结束,没有别的前置 |
+| 2 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机 |
+| 3 | M3 剩余:孤立 aux 清理命令(现在真的有多文件 group 了,这条才有对象) | 依次 |
+| 4 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口)、**OQ-17(流式期间末行是否就地改写)** | 不阻塞,顺手。OQ-17 是验收 F-5 引出的:P6 的快照全取在 turn 之间,这个面从未测过 |
 
 **旧的发布动作清单(已全部完成)**
 
@@ -567,6 +569,17 @@ M0 新增的几条（违反了会在 CI 上以很难懂的方式炸掉）：
 - 加/删命令要同步改 `tests/build/artifact-smoke.test.ts` 的 `EXPECTED_COMMAND_IDS`
 
 ### 待做的杂项（非阻塞，顺手时处理）
+
+- ⚠️ **2026-08-27：CI run 在队列里堵了十几分钟，看起来像「没跑」**。现象：PR #9 的
+  `gh pr checks` 只有第三方的 Mermaid app 一行，三平台一个都没有；`gh api …/check-runs`
+  也只有 1 项。**排队中的 run 还没创建 check-runs**，所以这两个命令都看不到它。
+  真正能看见的是 `gh run list --branch <b>` —— 那里有三个 `ci` run，全是 `queued`，
+  最老的排了 6 分钟以上（触发是正常的，包括最初那次 push；是 GitHub 的 runner 没取走任务）。
+  **教训**：`gh pr checks` 在「排队中」和「跑完了」两种情况下都给一个很短的列表，
+  一眼看去很像通过。**判据是 run 的存在与状态，不是有没有红**：
+  `gh run list --branch <b>`，或 `gh api repos/<o>/<r>/actions/runs?head_sha=<sha>`。
+  （我第一次判成「没触发」也是因为只查了 check-runs；`gh run list --branch` 在 run 刚入队时
+  也可能短暂返回空。）
 
 - macOS 侧 OQ-1 Round 2（Windows 包落到 mac 再验一次反方向）——Windows→mac 方向已验过，此项只是对称补全，优先级低
 - 探测套件的三个 F-8 修复（脱敏）已完成并验证；套件如再派发，直接用当前版本
