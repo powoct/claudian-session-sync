@@ -376,10 +376,11 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 | # | 事项 | 说明 |
 |---|---|---|
 | 1 | M3 剩余:**孤立 aux 清理命令**(现在真的有多文件 group 了,这条才有对象) | 唯一还欠着的 M3 交付项 |
-| 2 | **补测 OQ-17**(Grok 在流式出字期间是否就地改写 `chat_history.jsonl` 末行) | 三个未测项里**最值得先做的**:它决定稳定窗口该不该覆盖一整个 turn 而不只是一个瞬间。验收 F-5 是它的第一个真实样本 |
+| **2** | ⭐ **实现「按 group 判稳定性」**(§9.1 的待改标记) | ~~OQ-17 补测~~ ✅ **已测(2026-08-27)**,答案是最坏的那个:Grok 在 turn 中途**就地重写** `chat_history.jsonl`,差异点在文件中部、已完成的行也被改;而且它会在中途**静止 23 秒**,默认 `localQuietMs=3000` 会在那段静默里把中间态推走 ⇒ **每次对话都可能产生一次冲突**([findings](docs/zh-CN/findings/2026-08-27-oq17-grok-streaming.md))。安全性无缺口(判 CONFLICT、两分支入隔离、可一键解决),但这是当前**最影响体验**的缺陷 |
 | 3 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口实测值) | 不阻塞。风险已封顶:若就地重写,表现是一次冲突、两版都留、不丢字节 |
-| 4 | claudian provider 真机验收(两台都开,验证快进循环与 UI 入口;你的 vault 用 git 带 `.claudian/` 的话**别开**,或先在测试 vault 验) | 下轮真机;它是 0.2.0 里唯一**没经过两机验收**的新东西 |
-| 5 | `release.yml` 的 release notes 现在写死一句「Install via BRAT…」,每次发版都会覆盖 | 想改成「有 `RELEASE_NOTES.md` 就用它」的话,注意**那条路径只有打 tag 时才执行**——单独开 PR,并先在一个测试 tag 上验过再合。0.2.0 的 notes 是发完用 `gh release edit` 补的 |
+| 4 | **`claudian` provider 两机验收**(剧本已就位:`tmp/acceptance/AGENTS.md` 的 claudian 附录,**七步**;判定与闸门另见 testing.md §9.7) | 它是 0.2.0 里唯一**没经过两机验收**的新东西。⚠️ **推荐在独立的测试 vault 上跑**——评审(2026-08-28)发现在真实 vault 上跑会在**你真实的对话记录**上产生一批 `opaque-divergent-no-base` 冲突(两台 `.claudian/` 本就互通、conv id 重合,而 Claudian 打开记录会改写里面的本机路径),且收尾必须**先关 provider 再解冻 git**,否则长期停在双传输配置里 |
+| 5 | **发布到 Obsidian 社区插件市场**(向 `obsidianmd/obsidian-releases` 提 PR 加进 `community-plugins.json`) | 目前只能靠 BRAT 安装。开工前先确认市场校验读的是 release 产物而不是仓库里的 `main.js`——本仓库**不提交** `main.js`(见 `.gitignore`),这条如果搞错会在审核时才发现 |
+| 6 | `release.yml` 的 release notes 现在写死一句「Install via BRAT…」,每次发版都会覆盖 | 想改成「有 `RELEASE_NOTES.md` 就用它」的话,注意**那条路径只有打 tag 时才执行**——单独开 PR,并先在一个测试 tag 上验过再合。0.2.0 的 notes 是发完用 `gh release edit` 补的 |
 
 **旧的发布动作清单(已全部完成)**
 

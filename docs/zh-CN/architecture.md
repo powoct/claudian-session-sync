@@ -1174,6 +1174,17 @@ meta 的 `detectedAt` 保持首次检出值。
 
 **核心转变：从"文件有多老"改为"本机连续观察到它没变化多久"。**
 
+> ⚠️ **待改(2026-08-27,OQ-17 实测):对多文件 provider,这个判定要按 group 算,不能按单文件算。**
+> 实测 Grok 在一次 turn 中途把 `chat_history.jsonl` 静置了 **23 秒**(而同期 `events.jsonl`
+> 每 100 ms 就在动),默认 `localQuietMs=3000` 会在那段静默里判它稳定并把**中间态**推上去;
+> turn 结束后落定的版本与中间态互不为前缀 ⇒ 每次对话都可能产生一次冲突。
+> 正确判据是**整组的 `max(mtime)`**(排除 `*.lock`,它们恒为 0 字节且是 flock 载体),
+> 即「这个会话此刻还有没有人在写」。`events.jsonl` 是最灵敏的活跃信号,而它是 `derived`、
+> 本来就不同步 —— 拿它做判据零传输成本。
+> 详见 [findings/2026-08-27-oq17-grok-streaming.md](./findings/2026-08-27-oq17-grok-streaming.md)。
+> **安全性没有缺口**(中间态被推走之后判 CONFLICT、两分支入隔离、可一键解决),
+> 这是噪声与体验缺陷 —— 但对一个「同步不该打扰你」的插件而言不可接受。
+
 #### 9.1.1 E0 签名
 
 ```
@@ -2029,7 +2040,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **OQ-10** | 漫游 profile | ⏳ 未做 | M2 |
 | **OQ-14** | **Grok 的 rewind 与 `/compact` 是否就地重写 `chat_history.jsonl`** | ⏳ 未测(不阻塞接入) | grok 1.0.5 无任何 headless rewind 入口,TUI 不接受 pty 注入的按键(双平台各两次尝试均挂起);`/compact` 同样未跑过,而真实库里 3 个会话有 `compaction*` 条目,它是**正常使用中**唯一可能就地重写历史的操作。**风险已封顶**:若是截断,对本插件表现为一次前缀违反 ⇒ 判 `CONFLICT`、两侧进 `.quarantine/`、不丢字节(I1)。待人工在沙箱内补测 |
 | **OQ-15** | **Grok 的真两机往返 + G1 充分性** | ✅ **关闭(2026-08-26)** | 6b.2 的两个实验都在同一台机器上换 cwd(同 `GROK_HOME`/同 OS/同构建/同登录态),Windows 的"跨机模拟"用的是它自己的基线副本——**两机之间没有一个字节真的走过**。**已由两机验收关闭**:G4/G7 双向 `--resume` 历史完整(模型准确复述对端聊过的暗号),G3 证明对端只有同步集时 CLI 仍认得该会话。剧本见 [testing.md §9.6](./testing.md) |
-| **OQ-17** | **Grok 的 `chat_history.jsonl` 在一条消息流式生成期间是否就地改写末行** | ⏳ 未测(不阻塞) | 2026-08-26 验收的 F-5:**单机**场景下一轮 pass 推了个中间态(19418 B/15 行),随后落定的版本(20410 B/18 行)与它**互不为前缀** ⇒ 判 CONFLICT。已排除「Claudian 改写」这个解释(源码里 `chat_history` 零命中、grok provider 下无任何写操作),指向 CLI 本身。P6 的 38 张快照**全部取在 turn 之间**,这个面从未被测。表现安全(两分支入隔离、一次点击解决、零字节丢失),但说明稳定窗口对「正在出字的会话」偏短 |
+| **OQ-17** | **Grok 的 `chat_history.jsonl` 在一条消息流式生成期间是否就地改写** | ✅ **已测,答案是「会」(2026-08-27)** | 开发机 100 ms 高频采样实测([findings](./findings/2026-08-27-oq17-grok-streaming.md)):**流式期间就地重写,首个差异偏移在文件中部**(14306 B 的文件里偏移 5919),**且被改的是已完成的行**——§7.4.1 的「末尾无换行」机制覆盖不到。`updates.jsonl` 与 `events.jsonl` 全程严格追加(后者单轮采到 96 个版本、零违反)。**真正的问题是时间线**:`chat_history.jsonl` 在一次 turn 中途静止了 **23 秒**,而同期 `events.jsonl` 走了约 90 个版本 ⇒ 默认 `localQuietMs=3000` 会判它稳定并推走中间态,turn 结束后落定的版本不是它的延伸 ⇒ CONFLICT。**F-5 的成因至此闭合,且与「两台机器」无关。** ⇒ **待改:稳定性判定按 group 的 `max(mtime)` 算,不按单文件**(§9.1);安全性无缺口(判 CONFLICT、两分支入隔离、可一键解决) |
 | **OQ-16** | **Grok 的稳定窗口实测值** | ⏳ 未测(不阻塞) | 两次静置都发生在无活跃写入者时;唯一尾部观测是 Windows 孤儿进程的 165.9 秒,且它在 resume 写过 `summary.json` **之后**又重写了一遍——一轮 pass 可能抓到 CLI 随后丢弃的 primary。缓解手段是既有的覆盖前备份 + 下一轮再收敛 |
 | **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ✅ **已决（ADR-46）** | 用 vault 内 Claudian 的会话记录做归属源——它在 vault 里，所以"属于这个 vault"是它的构造性质，不需要读 rollout 内容也不需要猜 `cwd`。已实现并有回归（`tests/m1/codex-adapter.test.ts`）。**遗留**：真机确认 `.claudian/sessions/` 的实际文件名与字段在你的版本上与样本一致（探测套件 P3） |
 | **OQ-13** | **Codex compact 是否 append-only** | ✅ **PASS**(2026-08-13 人工 TUI 补测) | `/compact` 使 rollout +4654B **严格前缀追加**(103093→107747B,0 违规)——compacted 历史以新条目落盘,与 Claude Code 的 compact 同构。Codex 发布阻塞解除 |
