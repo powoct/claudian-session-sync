@@ -45,6 +45,7 @@ import {
   restoreBackup,
 } from "./restore-commands";
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
+import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
 import type { PassReport } from "./pass-report";
@@ -432,6 +433,37 @@ export class PluginRuntime {
   async backupCount(): Promise<number> {
     const deps = await this.conflictDeps();
     return deps ? countBackups(deps) : 0;
+  }
+
+  /** Sessions this machine holds without their commit point (§6.6). */
+  async orphans(): Promise<OrphanGroup[]> {
+    const deps = await this.conflictDeps();
+    return deps ? listOrphans({ ...deps, nowMs: () => this.host.clock.nowMs() }) : [];
+  }
+
+  /**
+   * Deletes one half-copied session, after keeping a copy of it.
+   *
+   * Takes the same lock a pass does (ADR-50): this writes into the CLI's own
+   * directory, and it is the one command whose purpose is to destroy bytes, so
+   * doing it while a pass is mid-apply is the last thing anyone wants. It does
+   * not need the sync folder to be ready — nothing here touches it.
+   */
+  async removeOrphan(
+    providerId: string,
+    logicalId: string,
+    expected: ReadonlyArray<{ readonly neutralRel: string; readonly sizeBytes: number }>,
+  ): Promise<RemoveOutcome> {
+    const deps = await this.conflictDeps();
+    if (!deps) return { ok: false, reason: "not-listed" };
+    return this.withWriteGate<RemoveOutcome>({ ok: false, reason: "sync-in-progress" }, () =>
+      removeOrphan(
+        { ...deps, nowMs: () => this.host.clock.nowMs() },
+        providerId,
+        logicalId,
+        expected,
+      ),
+    );
   }
 
   async restore(

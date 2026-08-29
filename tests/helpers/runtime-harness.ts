@@ -233,6 +233,18 @@ export class RuntimeHarness {
   }
 
   /**
+   * What the runtime thinks the time is.
+   *
+   * Needed whenever a fixture has to age a file: the clock is injected and
+   * starts well before the wall clock, so `utimes(Date.now() - an hour)` makes
+   * a file look like it was written in the *future* to anything reading the
+   * runtime's clock.
+   */
+  nowMs(): number {
+    return this.clock.nowMs();
+  }
+
+  /**
    * Runs passes until the plugin is willing to act, then one more.
    *
    * Three passes and two clock jumps, because two separate waits have to

@@ -197,6 +197,44 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
       return groups;
     },
 
+    async listIncompleteSessions() {
+      // The same walk as `listSessions`, kept to the sessions it drops: a
+      // directory this vault's records admit, holding members, with no
+      // `summary.json`. Admission still applies — a session this vault has no
+      // Claudian record for is none of this plugin's business, even to clean.
+      const scope = await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid);
+      const groups: SessionGroup[] = [];
+      for (const entry of await deps.listDir(projectDir).catch(() => [])) {
+        if (entry.isFile) continue;
+        if (!GROK_SESSION_DIR.test(entry.name)) continue;
+        if (!scope.sessionIds.has(entry.name)) continue;
+
+        const sessionDir = deps.joinPath(projectDir, entry.name);
+        const files: SessionFileRef[] = [];
+        let lastModifiedMs = 0;
+        let hasPrimary = false;
+        for (const member of await deps.listDir(sessionDir).catch(() => [])) {
+          if (!member.isFile) continue;
+          const known = MEMBERS.get(member.name);
+          if (known === undefined) continue;
+          if (known.role === "primary") hasPrimary = true;
+          const absPath = deps.joinPath(sessionDir, member.name);
+          const stat = await deps.statFile(absPath);
+          if (stat === null) continue;
+          files.push({
+            role: known.role,
+            absPath,
+            neutralRel: `${GROK_PROVIDER_ID}/${entry.name}/${member.name}`,
+            mode: known.mode,
+          });
+          lastModifiedMs = Math.max(lastModifiedMs, stat.mtimeMs);
+        }
+        if (hasPrimary || files.length === 0) continue;
+        groups.push({ logicalId: entry.name as LogicalId, files, lastModifiedMs });
+      }
+      return groups;
+    },
+
     classifyNeutral(neutralRel) {
       const parts = neutralRel.split("/");
       if (parts.length !== 3 || parts[0] !== GROK_PROVIDER_ID) return null;

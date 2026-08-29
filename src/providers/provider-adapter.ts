@@ -110,6 +110,21 @@ export interface ProviderAdapter {
   classifyNeutral(neutralRel: string): NeutralClassification | null;
   /** Where a neutral-relative file lands locally. Must realpath before escaping. */
   targetPathFor(neutralRel: string): Promise<string>;
+  /**
+   * Sessions on this machine that are missing their commit point (§6.6).
+   *
+   * Separate from `listSessions` on purpose: that one deliberately drops a
+   * group with no primary, because a session the engine cannot commit is a
+   * session it must not assemble or push. But the cleanup command has to see
+   * exactly those, and asking a provider "what do you hold that is
+   * incomplete" keeps the answer where the layout knowledge is — the
+   * alternative is a directory walk in generic code, which is how a file the
+   * CLI wrote ends up being offered for deletion.
+   *
+   * Optional: a provider whose session is a single file has no such state.
+   */
+  listIncompleteSessions?(): Promise<SessionGroup[]>;
+
   /** Tier B only; a no-op elsewhere. */
   reconcileLocalIndex(desired: readonly SessionGroup[]): Promise<void>;
 }
