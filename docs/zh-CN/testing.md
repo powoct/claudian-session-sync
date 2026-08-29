@@ -1262,6 +1262,13 @@ jobs:
 - CI **不跑**真实 CLI、不跑真实网盘——那是 §9 人工验收的事。
 - 三平台的 job 名必须进 branch protection 的 required checks，否则门禁不生效。
 - nightly 失败时把 `regressionSnippet` 转成 `tests/m1/regression/` 里的固定用例。
+- **驱动真实 pass 的用例必须自带显式超时**（约定 `const SLOW = 30_000` + `}, SLOW)`），
+  vitest 的 5 s 默认值保持全局不动。一次 `settle()` 是三次真实 pass、真实文件系统、
+  外加覆盖率插桩;windows-latest 是双核 runner,这类用例在**通过**的那些 run 里就已经
+  跑到 3–4.9 s。到那个份上默认值报的不再是缺陷,而是机器有多忙——2026-08-29 的
+  `plugin-runtime.test.ts > dry run > produces a report and changes nothing` 就是这么红的
+  (6617 ms,同一用例上一次 run 只要 632 ms,代码没有任何相关改动)。
+  判据很简单:用例里出现 `settle()` 或 `syncNow(` 就给它 `SLOW`,没有就说明它确实快。
 
 ---
 

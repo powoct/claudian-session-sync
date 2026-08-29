@@ -147,7 +147,7 @@ describe("the settings pane explains every refusal", () => {
     // Gone once it has been answered: a button that stays put after doing its
     // job invites a second press nobody knows the meaning of.
     expect(named("Initialise this sync folder")).toBeUndefined();
-  });
+  }, SLOW);
 
   it("writes the sync folder to the machine-local binding", async () => {
     const h = await newHarness();
@@ -201,7 +201,7 @@ describe("the settings pane explains every refusal", () => {
 
     expect(named("Status")?.desc).toContain("cannot be reached");
     expect(named("Status")?.desc).not.toContain("NR-9");
-  });
+  }, SLOW);
 
   it("mentions outstanding conflicts where the user is already looking", async () => {
     const h = await newHarness();
@@ -212,7 +212,7 @@ describe("the settings pane explains every refusal", () => {
     resetStubSettings();
     makeTab(h).display();
     expect(containing("unresolved conflict")).toBeUndefined();
-  });
+  }, SLOW);
 });
 
 describe("the report view", () => {
@@ -237,7 +237,7 @@ describe("the report view", () => {
     // The four facts behind the decision, and no fifth one carrying content.
     expect(text).toContain("evidence");
     expect(text).not.toContain('"text"');
-  });
+  }, SLOW);
 
   it("says so plainly when nothing has run", () => {
     const modal = new ReportModal(makeStubApp() as unknown as App, null);
@@ -351,7 +351,7 @@ describe("nothing on screen carries a conversation", () => {
     ].join("\n");
     expect(everything).not.toContain(sentinel);
     expect(everything).not.toContain(path.join(h.projectDir, `${SID}.jsonl`));
-  });
+  }, SLOW);
 });
 
 describe("every refusal has a sentence, not a code", () => {
