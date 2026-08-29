@@ -46,7 +46,9 @@ export type PlanFlag =
   /** Same, and it has stayed that way long enough that a human should see it. */
   | "malformedTail"
   /** A new remote session landed without waiting out the quiet window (§9.1.3). */
-  | "pullNewFastPath";
+  | "pullNewFastPath"
+  /** A side has dropped below the last convergence this machine witnessed. */
+  | "shrankBelowConverged";
 
 /**
  * What one side looks like right now.
@@ -91,6 +93,55 @@ export interface DeferOnlyHints {
 export interface LocalHistory {
   /** Consecutive passes in which a side's tail failed to parse. */
   readonly truncatedTailPasses: number;
+  /**
+   * This side is now shorter than the last convergence this machine witnessed,
+   * and the other side still contains that convergence (OQ-14, ADR-61).
+   *
+   * Booleans rather than the base size itself, deliberately. A number named
+   * `convergedSize` sitting in `PlanInput` is one careless edit away from
+   * `if (local.size > convergedSize) PUSH_OVERWRITE` — a remembered quantity
+   * authorising a write, which is the whole of what EV-1 forbids. A flag named
+   * for the veto it feeds cannot be read that way.
+   */
+  readonly localShrankBelowConverged: boolean;
+  readonly remoteShrankBelowConverged: boolean;
+}
+
+/**
+ * Has a side fallen below the point both sides last agreed on?
+ *
+ * The prefix relation proves *containment of bytes* and is read as "the
+ * shorter side is behind". For a file the user deliberately shortened — a Grok
+ * rewind, a `/compact`, a restored backup — that reading is exactly wrong: the
+ * short side is not behind, it is where the user chose to be, and
+ * fast-forwarding undoes the choice silently (OQ-14, reproduced end to end).
+ *
+ * Three conjuncts, none decorative:
+ *
+ * - `sideSize < convergedSize` — this side has gone backwards past a point it
+ *   once held. Nothing about *when*; a size compared against a base, never
+ *   against the other side.
+ * - `convergedSize <= otherSize` — the base still sits inside the side that
+ *   would win. This is what makes the sentence "dropped below something the
+ *   other side still contains" true rather than merely arithmetic, and it
+ *   bounds a corrupt base to a no-op instead of a permanent conflict.
+ * - `sideSize > 0` — a zero-byte side is damage or a half-finished transfer,
+ *   never a rewind, and the table's standing rule is that it never produces a
+ *   CONFLICT. It has no branch to quarantine either.
+ *
+ * Only ever narrows what may overwrite: every input that fails leaves the
+ * existing decision untouched. A missing base costs a manual conflict where a
+ * fast-forward would have done — §5.5's "losing the ledger is slow, never
+ * wrong", the same degradation ADR-48 already accepts for the base's hash.
+ */
+export function shrankBelowConvergedBase(input: {
+  readonly sideSize: number;
+  readonly otherSize: number;
+  readonly convergedSize: number | null;
+}): boolean {
+  const { sideSize, otherSize, convergedSize } = input;
+  if (convergedSize === null) return false;
+  return sideSize > 0 && sideSize < convergedSize && convergedSize <= otherSize;
 }
 
 export interface PlanInput {
@@ -207,9 +258,27 @@ export function plan(input: PlanInput): PlanResult {
       flags.push("remoteRegression");
       return result("DEFER", "remote-regressed-to-empty", flags);
     }
+    // The peer shortened it on purpose. Pushing this machine's longer copy
+    // would republish the turns they just removed — the same silent undo as
+    // below, one machine over, and the reason the guard is not one-sided:
+    // without it a rewind resolved on A is resurrected by an idle B.
+    if (history.remoteShrankBelowConverged) {
+      flags.push("shrankBelowConverged");
+      return result("CONFLICT", "remote-shrank-below-converged", flags);
+    }
     return result("PUSH_OVERWRITE", "local-extends-remote", flags);
   }
   if (relation === "r-extends-l") {
+    // OQ-14. "Shorter and contained" normally means "behind", and pulling is
+    // right. It is not right when this machine's own copy has dropped below a
+    // point both sides once held: that is a deliberate truncation, and the
+    // fast-forward would undo it without a word. Neither side may win on
+    // containment alone, so the human decides — which is what §16 always
+    // claimed happened here, and did not.
+    if (history.localShrankBelowConverged) {
+      flags.push("shrankBelowConverged");
+      return result("CONFLICT", "local-shrank-below-converged", flags);
+    }
     return result("PULL_OVERWRITE", "remote-extends-local", flags);
   }
 

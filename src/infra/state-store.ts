@@ -96,6 +96,29 @@ export interface LedgerEntryRecord {
    * slow (or in this case, ask the human), never wrong.
    */
   readonly lastConvergedHash: string | null;
+  /**
+   * Size of those same converged bytes, or null.
+   *
+   * Travels with `lastConvergedHash` and exists for one question the hash
+   * cannot answer: *has this side fallen below the point both sides once
+   * agreed on?* A rewind, a `/compact` or a restored backup shortens a file
+   * deliberately, and the append table reads "shorter, and contained by the
+   * other side" as "behind" — so it fast-forwards, and the deliberate act is
+   * undone (OQ-14).
+   *
+   * The per-pass ledger signature cannot answer it. `size` is part of
+   * `signaturesEqual`, so the pass that first sees the shrink calls the side
+   * unstable and defers — and rewrites `sig` to the new, smaller value on its
+   * way out. By the pass that can act, "it used to be longer" is gone. A base
+   * that only moves when a convergence is witnessed is the shortest-lived
+   * memory that still outlives that gap.
+   *
+   * Only ever narrows what may overwrite. A missing or stale base costs a
+   * manual conflict where a fast-forward would have done — §5.5's "losing the
+   * ledger is slow, never wrong", and the same failure mode ADR-48 already
+   * accepts for the hash.
+   */
+  readonly lastConvergedSize: number | null;
 }
 
 export interface ObservationsFile {
@@ -236,6 +259,15 @@ function asLedgerEntry(value: unknown): LedgerEntryRecord | null {
       typeof v.skippedForBudgetPasses === "number" ? v.skippedForBudgetPasses : 0,
     truncatedTailPasses: typeof v.truncatedTailPasses === "number" ? v.truncatedTailPasses : 0,
     lastConvergedHash: typeof v.lastConvergedHash === "string" ? v.lastConvergedHash : null,
+    // Finite and non-negative or nothing: a NaN or a negative from a
+    // hand-edited file would make the shrink comparison nonsense, and the
+    // honest degradation is "no base", which only ever costs a conflict.
+    lastConvergedSize:
+      typeof v.lastConvergedSize === "number" &&
+      Number.isFinite(v.lastConvergedSize) &&
+      v.lastConvergedSize >= 0
+        ? v.lastConvergedSize
+        : null,
   };
 }
 

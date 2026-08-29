@@ -433,6 +433,97 @@ describe("backups of a provider whose file names repeat across sessions", () => 
   }, 60_000);
 });
 
+describe("a rewind, which shortens the history on purpose (OQ-14)", () => {
+  /** What a Grok rewind does to the file: keep the first `keep` records. */
+  async function rewind(machine: RuntimeHarness, keep: number): Promise<number> {
+    const history = machine.grokPath(SID, "chat_history.jsonl");
+    const lines = (await fsp.readFile(history, "utf8")).split("\n").filter(Boolean);
+    const kept = `${lines.slice(0, keep).join("\n")}\n`;
+    await fsp.writeFile(history, kept);
+    // The CLI rewrites the record too — measured: `summary.json` changes on a
+    // rewind, and on a bare resume for that matter.
+    const summaryPath = machine.grokPath(SID, "summary.json");
+    const summary = JSON.parse(await fsp.readFile(summaryPath, "utf8")) as Record<string, unknown>;
+    await fsp.writeFile(summaryPath, JSON.stringify({ ...summary, rewound: true }));
+    return kept.length;
+  }
+
+  it("survives the next pass instead of being silently pulled back", async () => {
+    // Reproduced end to end before the fix: 210 B / 6 lines -> rewind to
+    // 140 B / 4 lines -> one settle -> 210 B / 6 lines again, with an empty
+    // notices list. One machine is enough; what undid the rewind was this
+    // machine's own earlier push sitting in the sync folder.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 6 });
+    await a.settle();
+
+    const rewoundSize = await rewind(a, 4);
+    await a.settle();
+
+    const after = await fsp.stat(a.grokPath(SID, "chat_history.jsonl"));
+    expect(after.size, "the rewind was undone").toBe(rewoundSize);
+
+    const actions = a.runtime.lastPassReport()?.actions ?? [];
+    const history = actions.find((entry) => entry.neutralRel?.endsWith("chat_history.jsonl"));
+    expect(history?.action).toBe("CONFLICT");
+    expect(history?.reason).toBe("local-shrank-below-converged");
+  }, 60_000);
+
+  it("holds the record back rather than publishing it beside the old history", async () => {
+    // The group's two tables disagree about direction: the history conflicts
+    // while `summary.json` reads as `remote-at-converged-base` and would push.
+    // Landing that pushes the post-rewind record into the sync folder next to
+    // the pre-rewind history — a pairing neither machine ever held.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 6 });
+    await a.settle();
+
+    await rewind(a, 4);
+    await a.settle();
+
+    const replicaSummary = path.join(await replicaDir(a, SID), "summary.json");
+    const published = JSON.parse(await fsp.readFile(replicaSummary, "utf8")) as { rewound?: boolean };
+    expect(published.rewound, "the post-rewind record was published anyway").toBeUndefined();
+
+    const actions = a.runtime.lastPassReport()?.actions ?? [];
+    const summary = actions.find((entry) => entry.neutralRel?.endsWith("summary.json"));
+    expect(summary?.reason).toBe("group-member-in-conflict");
+  }, 60_000);
+
+  it("names the session when a peer's history really does replace this machine's", async () => {
+    // §9.1.6 mitigation 2, "M1 必做": the hazard is that the CLI has this
+    // session open right now and its state has gone stale underneath. That is
+    // true whatever the merge mode, and until now only whole-file records said
+    // anything at all.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 2 });
+    await a.settle();
+
+    // Both machines start from the same two turns — `writeGrokSession` numbers
+    // turns from the file's length, so the bytes are identical and the pair is
+    // converged, which is what makes the next step a plain fast-forward.
+    const b = await peerWithGrok(a);
+    await b.writeGrokSession(SID, { turns: 2 });
+    await b.settle();
+
+    await a.appendGrokRaw(SID, '{"type":"user","content":"from A"}\n');
+    await a.settle();
+
+    // One pass at a time, not `settle()`: a settle is three passes and only
+    // the last one's report survives, while the pull lands in whichever pass
+    // first sees both sides quiet.
+    const notices: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      await b.runtime.syncNow();
+      notices.push(...(b.runtime.lastPassReport()?.notices ?? []));
+      b.advanceClock(95_000);
+    }
+    const spoken = notices.join(" ");
+    expect(spoken, `notices were: ${JSON.stringify(notices)}`).toContain(SID.slice(0, 8));
+    expect(spoken).toContain("quit and resume it again");
+  }, 60_000);
+});
+
 describe("a session with several conflicting members (acceptance r4, F-4)", () => {
   it("lists one conflict per member and names the file in each", async () => {
     // Real-machine finding. A fork of one Grok session produces a conflict per

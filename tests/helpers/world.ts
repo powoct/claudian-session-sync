@@ -750,13 +750,19 @@ class MemoryLedger implements LedgerView {
   }
 
   private readonly convergedByRel = new Map<string, string>();
+  private readonly convergedSizeByRel = new Map<string, number>();
 
   converged(rel: string): string | null {
     return this.convergedByRel.get(rel) ?? null;
   }
 
-  recordConverged(rel: string, hash: string): void {
+  convergedSize(rel: string): number | null {
+    return this.convergedSizeByRel.get(rel) ?? null;
+  }
+
+  recordConverged(rel: string, hash: string, size: number): void {
     this.convergedByRel.set(rel, hash);
+    this.convergedSizeByRel.set(rel, size);
   }
 
   record(rel: string, side: "local" | "remote", entry: LedgerEntryView): void {
