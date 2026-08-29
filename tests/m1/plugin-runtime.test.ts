@@ -450,3 +450,77 @@ describe("what the status bar says", () => {
     expect(status.detail).toContain("cannot be reached");
   });
 });
+
+describe("a machine with more than one vault (OQ-19, ADR-59)", () => {
+  const extra: RuntimeHarness[] = [];
+  afterEach(async () => {
+    while (extra.length) await extra.pop()?.dispose();
+  });
+
+  it("picks the binding that belongs to the vault that is open", async () => {
+    // The bound workspace used to be whichever sorted first, which is only
+    // ever right with one vault. With two, the panel showed the other
+    // workspace's configuration, the folder field was disabled, and the
+    // identity check called this vault CHANGED and stopped syncing — a
+    // fail-closed guard firing on a configuration that is not an anomaly.
+    const first = await RuntimeHarness.create();
+    extra.push(first);
+    await first.configure();
+    const firstStatus = await first.runtime.refresh();
+
+    // A second vault on the same machine, sharing its home directory — which
+    // is where bindings live, and therefore the whole point.
+    const second = await RuntimeHarness.create();
+    extra.push(second);
+    Object.assign(second, { homedir: first.homedir });
+    // Its identity is written directly so the two vaults genuinely differ: the
+    // harness's id generator is per-instance and would hand both the same one.
+    const OTHER = "00000000-0000-4000-8000-0000000000ff";
+    await fsp.mkdir(path.join(second.vaultRoot, ".claudian-session-sync"), { recursive: true });
+    await fsp.writeFile(
+      path.join(second.vaultRoot, ".claudian-session-sync", "workspace.json"),
+      JSON.stringify({ schemaVersion: 1, workspaceId: OTHER, label: "the other vault", createdAt: "" }, null, 2),
+    );
+    await second.runtime.refresh();
+    await second.runtime.setSyncDir(second.syncDir);
+
+    const secondStatus = await second.runtime.refresh();
+    expect(secondStatus.workspaceId).toBe(OTHER);
+    // The binding, not just what the vault claims: the visible symptom was a
+    // panel showing the *other* workspace's folder and provider switches, so
+    // that is what has to be asserted.
+    expect(secondStatus.syncDirPath).toBe(second.syncDir);
+    expect(secondStatus.syncDirPath).not.toBe(firstStatus.syncDirPath);
+    expect(secondStatus.phase).not.toBe("identity-blocked");
+
+    // And the first vault still resolves to its own binding, not to whichever
+    // sorts first now that there are two.
+    const firstAgain = await first.runtime.refresh();
+    expect(firstAgain.workspaceId).toBe(firstStatus.workspaceId);
+    expect(firstAgain.syncDirPath).toBe(first.syncDir);
+  }, 30_000);
+
+  it("still stops when a vault's identity really did change", async () => {
+    // The guard this must not loosen (ADR-21). Selecting by vault path makes
+    // it sharper, not weaker: the binding that claims *this* vault is the one
+    // its identity is compared against, so a replaced identity file is still
+    // an anomaly — and must not be answered by offering to mint a second id
+    // for a vault that already has one (ADR-20).
+    const machine = await RuntimeHarness.create();
+    extra.push(machine);
+    await machine.configure();
+
+    await fsp.writeFile(
+      path.join(machine.vaultRoot, ".claudian-session-sync", "workspace.json"),
+      JSON.stringify(
+        { schemaVersion: 1, workspaceId: "00000000-0000-4000-8000-0000000000ee", label: "x", createdAt: "" },
+        null,
+        2,
+      ),
+    );
+
+    const status = await machine.runtime.refresh();
+    expect(status.phase).toBe("identity-blocked");
+    expect(status.detail.toLowerCase()).toContain("identity");
+  }, 30_000);
+});

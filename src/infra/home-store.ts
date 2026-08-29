@@ -58,6 +58,20 @@ export interface WorkspaceBinding {
   readonly syncDirPath: string;
   readonly providers: Readonly<Record<string, ProviderBinding>>;
   readonly createdAt: string;
+  /**
+   * Which vault this binding is for (realpath'd), when it is known.
+   *
+   * Without it, "is this machine bound to this vault" is not a question the
+   * state can answer — it could only ask "is this machine bound to anything",
+   * and the answer was whichever binding sorted first. On a machine with two
+   * vaults that picks the wrong one, and the identity check then reports the
+   * vault as CHANGED and stops syncing (OQ-19, ADR-59).
+   *
+   * Optional because bindings written before this field exist; they are
+   * stamped the first time their own vault is opened, which is what keeps the
+   * migration to a single ordinary pass.
+   */
+  readonly vaultPath?: string;
 }
 
 export interface ProviderBinding {
@@ -292,6 +306,9 @@ function parseBinding(raw: unknown, expected: WorkspaceId): LoadOutcome<Workspac
       syncDirPath: c.syncDirPath,
       providers: parseProviders(c.providers),
       createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
+      ...(typeof c.vaultPath === "string" && c.vaultPath.length > 0
+        ? { vaultPath: c.vaultPath }
+        : {}),
     },
   };
 }
