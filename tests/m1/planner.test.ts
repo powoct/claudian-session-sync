@@ -305,6 +305,67 @@ describe("§5.2.6 a side that fell below the last convergence (OQ-14, ADR-61)", 
   });
 });
 
+describe("§5.2.6 the rewind as it was actually measured (2026-08-30)", () => {
+  // Not a shape, the numbers. macOS, grok 1.0.5, sandboxed GROK_HOME: a rewind
+  // took chat_history.jsonl from 44,968 B / 41 lines to 39,790 B / 25 lines,
+  // and `prefix-check` confirmed byte-for-byte that the short version IS the
+  // long one with its tail cut off. That is the severe branch — a strict
+  // prefix is exactly what the append table fast-forwards.
+  const CONVERGED = 44_968;
+  const REWOUND = 39_790;
+  const AFTER_ONE_MORE_TURN = 41_711;
+
+  it("refuses the fast-forward at the measured sizes", () => {
+    expect(
+      shrankBelowConvergedBase({
+        sideSize: REWOUND,
+        otherSize: CONVERGED,
+        convergedSize: CONVERGED,
+      }),
+    ).toBe(true);
+  });
+
+  it("still refuses once the user has typed again", () => {
+    // The probe found the window is narrow: one more message and the two
+    // versions diverge outright, so rule #8 reaches the same answer first.
+    // But `rewind_points.jsonl` grows back by whole records (515 -> 206 -> 309)
+    // and may well still be a prefix of the pre-rewind file, which would put
+    // it back on the fast-forward path. Being below the base catches it either
+    // way, which is why the guard is not written in terms of the relation.
+    expect(
+      shrankBelowConvergedBase({
+        sideSize: AFTER_ONE_MORE_TURN,
+        otherSize: CONVERGED,
+        convergedSize: CONVERGED,
+      }),
+    ).toBe(true);
+  });
+
+  it("also covers /compact, though divergence reaches the same answer first", () => {
+    // Measured: compact took 41,711 -> 19,818 B, and `prefix-check` said NOT A
+    // PREFIX — so the relation is `divergent` and rule #8 conflicts before #9a
+    // is consulted at all. The guard would have fired anyway, which is the
+    // useful property: it does not depend on which way the bytes happen to
+    // relate. Asserted at the sizes the two sides really hold, not at a
+    // combination picked to make the predicate say no.
+    expect(
+      shrankBelowConvergedBase({
+        sideSize: 19_818,
+        otherSize: AFTER_ONE_MORE_TURN,
+        convergedSize: AFTER_ONE_MORE_TURN,
+      }),
+    ).toBe(true);
+    // And rule #8 is what actually decides it, because the bytes diverge.
+    expect(
+      actionOf({
+        local: L({ size: 19_818 }),
+        remoteSide: R({ size: AFTER_ONE_MORE_TURN }),
+        relation: "divergent",
+      }),
+    ).toBe("CONFLICT");
+  });
+});
+
 describe("§5.2.6 the shrink predicate itself", () => {
   const base = { sideSize: 140, otherSize: 210, convergedSize: 210 };
 
