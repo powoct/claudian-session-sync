@@ -34,7 +34,7 @@ import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/confl
 import { type CachedContentFacts, type ScrubTrigger, evidenceFor } from "../domain/manifest";
 import type { LogicalId, PathViolation, SafeAbsolutePath } from "../domain/types";
 import { MAX_DEPTH } from "../domain/path-safety";
-import { classifyExternalArtifact } from "../domain/external-artifacts";
+import { classifyExternalArtifact, insertionBetween } from "../domain/external-artifacts";
 import type { FsGateway } from "../infra/fs-gateway";
 import { isDenylisted, isTransferArtifact } from "../infra/path-guard";
 import type { Clock, IdGen } from "../infra/clock";
@@ -220,6 +220,17 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const unknownFiles: UnknownFileEntry[] = [];
   /** Providers whose backup retention did not bind this pass (§9.3.3). */
   const rotationDeferredFor = new Set<string>();
+  /**
+   * Whole-file records this pass replaced with the other machine's version.
+   *
+   * Counted, not listed. For a two-machine Claudian user this is the ordinary
+   * steady state — every conversation turn rewrites a record — so a line per
+   * file would be the noise ADR-48 rejected its alternative (a) for. But it is
+   * also the path where a transport that leaves no readable copy can take this
+   * machine's version without ADR-57's witness noticing (§9.4.3), and silence
+   * there is the half of OQ-18 that no mechanism closes.
+   */
+  const replacedByPeer = new Map<string, number>();
   const notices: string[] = [];
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
@@ -273,7 +284,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const byLogicalId = new Map<string, { adapter: ProviderAdapter; group: SessionGroup }>();
   for (const held of groups) byLogicalId.set(`${held.adapter.id}\u0000${held.group.logicalId}`, held);
 
+  // Kept rather than discarded after the discovery loop: OQ-18's witness needs
+  // to know what else lives beside a replica file, and this walk already has it.
+  const replicaSiblings = new Map<string, readonly string[]>();
   for (const { adapter, rel, siblings } of await listReplicaFiles(deps)) {
+    replicaSiblings.set(rel.slice(0, rel.lastIndexOf("/")), siblings);
     if (seen.has(rel)) continue;
     const classified = adapter.classifyNeutral(rel);
     if (classified === null) {
@@ -477,6 +492,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           ),
         },
       };
+      let witness: WitnessOutcome = { found: false, copyRel: null, unreadable: null };
+      if (file.mode === "opaque-file") {
+        const base = deps.ledger.converged(file.neutralRel);
+        // Entered only in the exact shape the witness can speak to, so the
+        // extra reads are paid at most once per #4b event and never in steady
+        // state. Deliberately not computed for #4a: the push is what set the
+        // base, so after a discard the loser is here or in #4c — and the copy
+        // reaches the machine that *won* as well, where testing it would make
+        // every subsequent edit a conflict (the acceptance run's C4/G5).
+        const shape =
+          localFacts.exists && remoteFacts.exists &&
+          base !== null &&
+          localFacts.observedHash === base &&
+          remoteFacts.observedHash !== base;
+        if (shape) witness = await findDisplacedPush(deps, file.neutralRel, replicaSiblings, localFacts.observedHash);
+      }
+
       const decision =
         file.mode === "opaque-file"
           ? planOpaque({
@@ -486,8 +518,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
               conflictKnown: false,
               maxFileSizeBytes: deps.settings.maxFileSizeBytes,
               lastConvergedHash: deps.ledger.converged(file.neutralRel),
+              displacedPushWitness: witness.found,
             })
           : plan(input);
+      if (witness.unreadable !== null) {
+        // Fail-open, and say so out loud. An unreadable candidate never stops
+        // matching, and ADR-34 forbids deleting it, so failing closed would
+        // freeze this record in permanent conflict — ADR-48's conflict
+        // generator reached from the other side. Rare enough to be worth a
+        // sentence, which tier-1 replacements below deliberately do not get.
+        notices.push(
+          `${file.neutralRel}: a file beside it in the sync folder could not be read (${witness.unreadable}), ` +
+            "so it could not be checked before this machine's version was replaced — the previous " +
+            "contents are in the backups folder",
+        );
+      }
       await barrier("P4:planned", { neutralRel: file.neutralRel });
 
       // U-11d. A truncated tail defers, and deferring is correct — but a file
@@ -534,6 +579,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           localHash: localFacts.observedHash,
           remoteHash: remoteFacts.observedHash,
           extension: extensionOf(file.neutralRel),
+          reason: decision.reason,
+          externalCopy: witness.copyRel,
         });
       }
 
@@ -579,6 +626,13 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // A primary that is already on this machine is deliberately excluded: a
       // stale one is the mixed-age case, which the CLI was measured to heal by
       // regenerating it. What cannot heal is its absence.
+      if (
+        file.mode === "opaque-file" &&
+        decision.action === "PULL_OVERWRITE" &&
+        applied.result === "APPLIED"
+      ) {
+        replacedByPeer.set(adapter.id, (replacedByPeer.get(adapter.id) ?? 0) + 1);
+      }
       if (file.role !== "primary") {
         if (WRITE_ACTIONS.has(decision.action) && applied.result === "APPLIED") auxLanded = true;
       } else if (!localO2.exists && applied.result !== "APPLIED") {
@@ -657,6 +711,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     }
   }
 
+  for (const [providerId, count] of replacedByPeer) {
+    notices.push(
+      `${providerId}: ${count} record(s) were replaced with the other machine's version; ` +
+        "the previous contents are in the backups folder",
+    );
+  }
   await barrier("P7:reconciled", {});
 
   // Said once per pass rather than once per file: for a whole-file provider
@@ -876,6 +936,8 @@ async function quarantineConflict(
     localHash: string;
     remoteHash: string;
     extension: string;
+    reason: string;
+    externalCopy: string | null;
   },
 ): Promise<string | undefined> {
   const id = conflictId(
@@ -904,6 +966,8 @@ async function quarantineConflict(
     remoteLineCount: countLines(input.remoteBytes),
     machineIdPrefix: deps.machineIdPrefix,
     detectedAtIso: deps.nowIso(),
+    reason: input.reason,
+    externalCopy: input.externalCopy,
   });
 
   const bytesFor = (hash: string): Uint8Array =>
@@ -1207,4 +1271,72 @@ function orderedForCommit(group: SessionGroup): SessionFileRef[] {
     ...syncable.filter((file) => file.role !== "primary"),
     ...syncable.filter((file) => file.role === "primary"),
   ];
+}
+
+interface WitnessOutcome {
+  /** A sibling in the replica holds exactly this machine's current bytes. */
+  readonly found: boolean;
+  /** Where that sibling is, so the conflict can name it. */
+  readonly copyRel: string | null;
+  /** A candidate existed and could not be read; the errno, or null. */
+  readonly unreadable: string | null;
+}
+
+/**
+ * Looks for this machine's own bytes set aside under another name (OQ-18).
+ *
+ * The question this answers is the one `planOpaque` cannot: inside #4b the
+ * local side still holds the converged base, and a remote that has moved off
+ * it is produced *identically* by a peer editing after receiving our version
+ * and by the sync tool discarding our push. The two executions leave the same
+ * bytes and the same observation history, so no function of them is right in
+ * both (ADR-57). What differs is what the transport left in the folder: when
+ * it had to choose, it renamed the loser aside, and if those bytes are ours
+ * then ours is what was discarded.
+ *
+ * Candidates come from the *insertion relation*, not from
+ * `classifyExternalArtifact`'s confidence ladder — the only artifact ever seen
+ * in the field lands on that ladder's medium rung, and a `high`-only gate
+ * would have missed the exact case this exists for. The classifier stays an
+ * explainer; the bytes are the boundary.
+ */
+async function findDisplacedPush(
+  deps: EngineDeps,
+  neutralRel: string,
+  siblingsByDir: Map<string, readonly string[]>,
+  localHash: string | null,
+): Promise<WitnessOutcome> {
+  if (localHash === null) return { found: false, copyRel: null, unreadable: null };
+  const cut = neutralRel.lastIndexOf("/");
+  const dirRel = neutralRel.slice(0, cut);
+  const bareName = neutralRel.slice(cut + 1);
+  const siblings = siblingsByDir.get(dirRel) ?? [];
+
+  const candidates = siblings
+    .filter(
+      (name) =>
+        name !== bareName &&
+        insertionBetween(bareName, name) !== null &&
+        !isTransferArtifact(name) &&
+        !isDenylisted(name),
+    )
+    .sort()
+    // Capped: a folder full of copies is a folder to tell the user about, not
+    // one to read exhaustively on every #4b.
+    .slice(0, 4);
+
+  let unreadable: string | null = null;
+  for (const name of candidates) {
+    const path = deps.joinPath(deps.replicaRoot, deps.workspaceId, dirRel, name);
+    const stat = await deps.fs.lstat(path);
+    if (stat === null || !stat.isFile) continue;
+    if (stat.size === 0 || stat.size > deps.settings.maxFileSizeBytes) continue;
+    const bytes = await readBytes(deps, path);
+    if (bytes === null) {
+      unreadable ??= "unreadable";
+      continue;
+    }
+    if (deps.hashBytes(bytes) === localHash) return { found: true, copyRel: `${dirRel}/${name}`, unreadable: null };
+  }
+  return { found: false, copyRel: null, unreadable };
 }

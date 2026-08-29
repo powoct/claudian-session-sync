@@ -284,6 +284,17 @@ export interface OpaquePlanInput {
    * which degrades fast-forwards to conflicts, never picks a side).
    */
   readonly lastConvergedHash: string | null;
+  /**
+   * A file beside this one in the replica holds exactly this machine's current
+   * bytes (OQ-18, ADR-57).
+   *
+   * Computed outside the planner, from bytes read this pass, in the #4b shape
+   * only. Remote-written and therefore untrusted, which is why it is permitted
+   * to do exactly one thing: withhold a write that would otherwise happen. It
+   * can never authorise one, so EV-1 and §5.6 rule 3 stay literally true and
+   * the change is safer than its absence by construction.
+   */
+  readonly displacedPushWitness: boolean;
 }
 
 export function planOpaque(input: OpaquePlanInput): PlanResult {
@@ -331,6 +342,18 @@ export function planOpaque(input: OpaquePlanInput): PlanResult {
       return result("PUSH_OVERWRITE", "remote-at-converged-base", flags);
     }
     if (base !== null && local.observedHash === base) {
+      // OQ-18. Inside this branch `local === base`, so "a sibling in the
+      // replica holds my local bytes" and "it holds the base" are the same
+      // test — and it is positive evidence that the bytes the sync tool set
+      // aside are *mine*. Without it this branch cannot tell a peer's
+      // legitimate edit from the transport discarding this machine's push:
+      // both present as local == base, remote != base, with identical
+      // observation histories (the proof is in ADR-57). The witness is false
+      // on the machine whose version won, false on an idle third machine, and
+      // it clears itself the moment the local record is rewritten.
+      if (input.displacedPushWitness) {
+        return result("CONFLICT", "opaque-push-set-aside-by-sync-tool", flags);
+      }
       return result("PULL_OVERWRITE", "local-at-converged-base", flags);
     }
     // #4c — both moved, or no base to reason from.

@@ -199,3 +199,103 @@ describe("a provider whose root lives inside the vault", () => {
     expect(action?.reason).toBe("opaque-divergent-no-base");
   }, 30_000);
 });
+
+describe("when the sync tool sets this machine's push aside (OQ-18, acceptance r5 C7-v1)", () => {
+  /**
+   * The real trace, on a real filesystem.
+   *
+   * Two machines edit the same record while the sync tool is stopped, and
+   * passes keep running — which is the default, so this is the ordinary case
+   * rather than a contrived one. Each machine pushes into its own view of the
+   * shared folder, so each records its own bytes as the converged base. The
+   * tool then restarts, keeps one side's file, and renames the other aside.
+   *
+   * The loser's next pass sees `local == base, remote != base` and used to
+   * fast-forward — replacing its own work with the winner's, silently. That is
+   * indistinguishable from a peer editing normally, from content alone; what
+   * separates them is that the file the tool renamed holds *this machine's*
+   * bytes.
+   */
+  it("conflicts instead of quietly replacing this machine's version", async () => {
+    const machine = await harnessWithClaudian();
+    await writeRecord(machine, META, { id: CONV, providerId: "codex", sessionId: null, rev: "mine" });
+    await machine.settle();
+
+    const status = await machine.runtime.refresh();
+    const dir = path.join(machine.syncDir, status.workspaceId as string, "claudian");
+    const mine = await fsp.readFile(path.join(dir, META));
+
+    // What the sync tool does when it has to choose: the peer's version takes
+    // the name, ours is renamed beside it. Both are its doing, not ours.
+    await fsp.writeFile(
+      path.join(dir, `${CONV}.meta (conflicted copy 2026-08-30).json`),
+      mine,
+    );
+    await fsp.writeFile(
+      path.join(dir, META),
+      JSON.stringify({ id: CONV, providerId: "codex", sessionId: null, rev: "theirs" }, null, 2),
+    );
+
+    const seen = [];
+    for (let i = 0; i < 3; i++) {
+      await machine.runtime.syncNow();
+      machine.advanceClock(95_000);
+      seen.push(...(machine.runtime.lastPassReport()?.actions.filter((a) => a.neutralRel === `claudian/${META}`) ?? []));
+    }
+
+    const decided = seen.find((a) => a.action !== "DEFER" && a.action !== "NOOP");
+    expect(decided?.action).toBe("CONFLICT");
+    expect(decided?.reason).toBe("opaque-push-set-aside-by-sync-tool");
+    // Our version is still ours. That is the whole point.
+    expect(JSON.parse(await fsp.readFile(path.join(storeDir(machine), META), "utf8")).rev).toBe("mine");
+  }, 60_000);
+
+  it("says out loud how many records the other machine replaced", async () => {
+    // The residual OQ-18 does not close: a transport that leaves no readable
+    // copy can still take this machine's version, and the witness has nothing
+    // to see. One aggregated line per provider per pass — a line per file is
+    // the steady state for a two-machine Claudian user, and therefore noise.
+    const machine = await harnessWithClaudian();
+    await writeRecord(machine, META, { id: CONV, providerId: "codex", sessionId: null, rev: "mine" });
+    await machine.settle();
+
+    const status = await machine.runtime.refresh();
+    await fsp.writeFile(
+      path.join(machine.syncDir, status.workspaceId as string, "claudian", META),
+      JSON.stringify({ id: CONV, providerId: "codex", sessionId: null, rev: "theirs" }, null, 2),
+    );
+
+    const notices: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      await machine.runtime.syncNow();
+      machine.advanceClock(95_000);
+      notices.push(...(machine.runtime.lastPassReport()?.notices ?? []));
+    }
+
+    expect(notices.join(" ")).toContain("replaced with the other machine's version");
+    expect(notices.join(" ")).toContain("backups folder");
+  }, 60_000);
+
+  it("still pulls a peer's ordinary edit — the witness must not fire on its own", async () => {
+    // The same shape without the renamed copy: this is how a machine receives
+    // the other one's work, and it has to keep working or the provider becomes
+    // the conflict generator ADR-48 exists to avoid.
+    const machine = await harnessWithClaudian();
+    await writeRecord(machine, META, { id: CONV, providerId: "codex", sessionId: null, rev: "mine" });
+    await machine.settle();
+
+    const status = await machine.runtime.refresh();
+    const dir = path.join(machine.syncDir, status.workspaceId as string, "claudian");
+    await fsp.writeFile(
+      path.join(dir, META),
+      JSON.stringify({ id: CONV, providerId: "codex", sessionId: null, rev: "theirs" }, null, 2),
+    );
+
+    for (let i = 0; i < 3; i++) {
+      await machine.runtime.syncNow();
+      machine.advanceClock(95_000);
+    }
+
+    expect(JSON.parse(await fsp.readFile(path.join(storeDir(machine), META), "utf8")).rev).toBe("theirs");
+  }, 60_000);
+});

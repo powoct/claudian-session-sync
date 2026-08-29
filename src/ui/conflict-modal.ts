@@ -76,6 +76,8 @@ export class ConflictModal extends Modal {
     if (conflict.detectedAt) {
       block.createEl("p", { text: `Detected ${conflict.detectedAt}.` });
     }
+    const cause = describeCause(conflict);
+    if (cause) block.createEl("p", { text: cause });
     if (conflict.superseded) {
       block.createEl("p", {
         text:
@@ -246,3 +248,28 @@ export function describeConflict(conflict: ConflictEntry): string {
 
 /** The one id shape short enough to read and long enough to stay unique at 8. */
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The sentence for a conflict the standing paragraph would describe wrongly.
+ *
+ * `opaque-push-set-aside-by-sync-tool` is the one case where "both machines
+ * added to this session separately" is the conclusion the user must *not*
+ * draw: only one machine wrote, and the second version exists because the sync
+ * tool had two files and picked one (ADR-57). It also says where the tool's own
+ * copy is, because that copy is already listed under "Files left alone" in the
+ * same report and two mentions with no stated relation is the bewildering
+ * version.
+ *
+ * Deliberately does not say "your push was discarded": what the bytes
+ * establish is that the tool chose, not why.
+ */
+export function describeCause(conflict: ConflictEntry): string | null {
+  if (conflict.reason !== "opaque-push-set-aside-by-sync-tool") return null;
+  const where = conflict.externalCopy
+    ? ` Its own copy of it is at ${conflict.externalCopy}, left exactly where it is.`
+    : "";
+  return (
+    "Your sync tool had two versions of this file and set this machine's aside." +
+    `${where} Nothing here was overwritten — both versions are still on disk.`
+  );
+}

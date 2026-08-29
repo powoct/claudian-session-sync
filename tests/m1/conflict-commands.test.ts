@@ -10,7 +10,7 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { describeConflict } from "../../src/ui/conflict-modal";
+import { describeCause, describeConflict } from "../../src/ui/conflict-modal";
 import type { ConflictEntry } from "../../src/orchestration/conflict-commands";
 import { RuntimeHarness, sha256 } from "../helpers/runtime-harness";
 
@@ -316,6 +316,8 @@ describe("the heading that has to identify a conflict (acceptance r4, F-4)", () 
       neutralRel: "claude-code/3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl",
       branches: [],
       superseded: false,
+      reason: null,
+      externalCopy: null,
       ...over,
     }) as ConflictEntry;
 
@@ -365,6 +367,8 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
       neutralRel: `claudian/conv-1787925819663-qj5gp9vhq.${kind}.json`,
       branches: [],
       superseded: false,
+      reason: null,
+      externalCopy: null,
     }) as ConflictEntry;
 
   it("tells the two records of one conversation apart", () => {
@@ -381,7 +385,7 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
   it("still abbreviates a uuid, and still names the file when the name needs it", () => {
     // The three providers whose ids are uuids must read exactly as before.
     const uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], superseded: false };
+    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], superseded: false, reason: null, externalCopy: null };
     expect(
       describeConflict({
         ...base, providerId: "claude-code", logicalId: uuid, logicalIdPrefix: "3f2504e0",
@@ -394,5 +398,37 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
         neutralRel: `grok/${uuid}/chat_history.jsonl`,
       } as ConflictEntry),
     ).toBe("Session 3f2504e0 · chat_history.jsonl (grok)");
+  });
+});
+
+describe("the sentence for a conflict the standing paragraph would describe wrongly (ADR-57)", () => {
+  const entry = (over: Partial<ConflictEntry>): ConflictEntry =>
+    ({
+      conflictId: "c", providerId: "claudian", logicalId: "conv-1-a.meta",
+      logicalIdPrefix: "conv-1-a", detectedAt: "", directory: "/q",
+      neutralRel: "claudian/conv-1-a.meta.json", branches: [], superseded: false,
+      reason: null, externalCopy: null, ...over,
+    }) as ConflictEntry;
+
+  it("says nothing for an ordinary fork — the standing paragraph is right there", () => {
+    expect(describeCause(entry({ reason: "opaque-divergent-both-moved" }))).toBeNull();
+    expect(describeCause(entry({ reason: null }))).toBeNull();
+  });
+
+  it("corrects the record when only one machine wrote", () => {
+    // "Both machines added to this session separately" is the one conclusion
+    // the user must not draw here: the second version exists because the sync
+    // tool had two files and picked one.
+    const text = describeCause(
+      entry({
+        reason: "opaque-push-set-aside-by-sync-tool",
+        externalCopy: "claudian/conv-1-a.meta (conflicted copy 2026-08-30).json",
+      }),
+    );
+    expect(text).toContain("set this machine's aside");
+    expect(text).toContain("conflicted copy 2026-08-30");
+    expect(text).toContain("Nothing here was overwritten");
+    // What the bytes establish is that the tool chose, not why.
+    expect(text).not.toContain("discarded");
   });
 });

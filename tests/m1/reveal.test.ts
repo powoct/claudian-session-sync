@@ -68,6 +68,8 @@ const conflictEntry = {
     },
   ],
   superseded: false,
+    reason: null,
+    externalCopy: null,
 } as ConflictEntry;
 
 function stubRuntime(opened: string[], succeeds: boolean) {

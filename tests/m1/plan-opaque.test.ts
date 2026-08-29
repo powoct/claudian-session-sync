@@ -30,6 +30,7 @@ const input = (over: Partial<OpaquePlanInput> = {}): OpaquePlanInput => ({
   conflictKnown: false,
   maxFileSizeBytes: 64 * 1024 * 1024,
   lastConvergedHash: null,
+  displacedPushWitness: false,
   ...over,
 });
 
@@ -130,5 +131,58 @@ describe("the converged-base fast-forward (ADR-48)", () => {
 
   it("never fast-forwards on a stale base that matches neither side", () => {
     expect(planOpaque(diverged("sha256:ancient")).action).toBe("CONFLICT");
+  });
+});
+
+describe("§7.2b #4b, when the sync tool set this machine's version aside (OQ-18)", () => {
+  // The two executions this distinguishes are byte-identical from the planner's
+  // seat: a peer that edited after receiving our version, and a transport that
+  // discarded our push, both leave `local == base, remote != base` with the
+  // same observation history. The witness is the only input that separates
+  // them, and it is computed outside from bytes read this pass.
+  const BASE = "sha256:base";
+  const forked = { local: side({ observedHash: BASE }), remoteSide: side({ observedHash: "sha256:theirs" }), lastConvergedHash: BASE };
+
+  it("pulls when nothing beside it holds our bytes", () => {
+    const out = planOpaque(input({ ...forked, displacedPushWitness: false }));
+    expect(out).toMatchObject({ action: "PULL_OVERWRITE", reason: "local-at-converged-base" });
+  });
+
+  it("conflicts when something beside it does", () => {
+    const out = planOpaque(input({ ...forked, displacedPushWitness: true }));
+    expect(out).toMatchObject({ action: "CONFLICT", reason: "opaque-push-set-aside-by-sync-tool" });
+  });
+
+  it("never turns a push into anything else — #4a is not gated", () => {
+    // The push is what set the base, so a discarded push always presents as
+    // #4b or #4c. #4a means our push survived; and the copy reaches the
+    // machine that won too, where testing it would conflict on every edit —
+    // which is the claudian acceptance's one hard blocker (C4) and Grok's G5.
+    const out = planOpaque(
+      input({
+        local: side({ observedHash: "sha256:mine-newer" }),
+        remoteSide: side({ observedHash: BASE }),
+        lastConvergedHash: BASE,
+        displacedPushWitness: true,
+      }),
+    );
+    expect(out).toMatchObject({ action: "PUSH_OVERWRITE", reason: "remote-at-converged-base" });
+  });
+
+  it("cannot turn a conflict into a write", () => {
+    // The witness may only withhold. With both sides moved this is #4c either
+    // way, which is what keeps EV-1 and §5.6 rule 3 literally true.
+    for (const w of [false, true]) {
+      expect(
+        planOpaque(
+          input({
+            local: side({ observedHash: "sha256:mine" }),
+            remoteSide: side({ observedHash: "sha256:theirs" }),
+            lastConvergedHash: BASE,
+            displacedPushWitness: w,
+          }),
+        ),
+      ).toMatchObject({ action: "CONFLICT", reason: "opaque-divergent-both-moved" });
+    }
   });
 });
