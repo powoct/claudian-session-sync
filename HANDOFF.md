@@ -32,7 +32,7 @@ Release notes 已手写（面向使用者，重点写「会被误判成 bug 的�
 | 版本 | 日期 | 内容 | 验收 |
 |---|---|---|---|
 | **0.1.0** | 2026-08-15 | M1 + M2：Claude Code、Codex（两机验收后摘 experimental） | M1 十步 ✅ / M4 ✅ |
-| **0.2.0** | 2026-08-27 | 全部 M3：备份恢复 UI、点击路径的两道闸门、opaque 表 + `claudian` provider、`.aiss/prev` 否决、**Grok** | Grok 九步 ✅（双向）；**`claudian` provider 尚未两机验收** |
+| **0.2.0** | 2026-08-27 | 全部 M3：备份恢复 UI、点击路径的两道闸门、opaque 表 + `claudian` provider、`.aiss/prev` 否决、**Grok** | Grok 九步 ✅（双向）；**`claudian` 七步 ✅（2026-08-29，含真分叉）** —— 0.2.0 的每个 provider 都有两机验收背书 |
 
 打 tag 的方式：`git tag <版本> && git push origin <版本>`，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀）。
 **确认发布是否真的跑了要用 `gh run list --workflow=release`**，不是 `gh pr checks`（理由见「待做的杂项」里 2026-08-27 那条）。
@@ -375,12 +375,13 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | M3 剩余:**孤立 aux 清理命令**(现在真的有多文件 group 了,这条才有对象) | 唯一还欠着的 M3 交付项 |
-| **2** | ⭐ **实现「按 group 判稳定性」**(§9.1 的待改标记) | ~~OQ-17 补测~~ ✅ **已测(2026-08-27)**,答案是最坏的那个:Grok 在 turn 中途**就地重写** `chat_history.jsonl`,差异点在文件中部、已完成的行也被改;而且它会在中途**静止 23 秒**,默认 `localQuietMs=3000` 会在那段静默里把中间态推走 ⇒ **每次对话都可能产生一次冲突**([findings](docs/zh-CN/findings/2026-08-27-oq17-grok-streaming.md))。安全性无缺口(判 CONFLICT、两分支入隔离、可一键解决),但这是当前**最影响体验**的缺陷 |
-| 3 | 补测 OQ-14(rewind / `/compact`)、OQ-16(稳定窗口实测值) | 不阻塞。风险已封顶:若就地重写,表现是一次冲突、两版都留、不丢字节 |
-| 4 | **`claudian` provider 两机验收**(剧本已就位:`tmp/acceptance/AGENTS.md` 的 claudian 附录,**七步**;判定与闸门另见 testing.md §9.7) | 它是 0.2.0 里唯一**没经过两机验收**的新东西。⚠️ **推荐在独立的测试 vault 上跑**——评审(2026-08-28)发现在真实 vault 上跑会在**你真实的对话记录**上产生一批 `opaque-divergent-no-base` 冲突(两台 `.claudian/` 本就互通、conv id 重合,而 Claudian 打开记录会改写里面的本机路径),且收尾必须**先关 provider 再解冻 git**,否则长期停在双传输配置里 |
-| 5 | **发布到 Obsidian 社区插件市场**(向 `obsidianmd/obsidian-releases` 提 PR 加进 `community-plugins.json`) | 目前只能靠 BRAT 安装。开工前先确认市场校验读的是 release 产物而不是仓库里的 `main.js`——本仓库**不提交** `main.js`(见 `.gitignore`),这条如果搞错会在审核时才发现 |
-| 6 | `release.yml` 的 release notes 现在写死一句「Install via BRAT…」,每次发版都会覆盖 | 想改成「有 `RELEASE_NOTES.md` 就用它」的话,注意**那条路径只有打 tag 时才执行**——单独开 PR,并先在一个测试 tag 上验过再合。0.2.0 的 notes 是发完用 `gh release edit` 补的 |
+| **1** | ⭐ **OQ-18:Tier R 的收敛基点在推送被同步工具丢弃时会快进覆盖** | **两次真机复现,而且是现实路径**:断网期间跑过 pass(默认 5 分钟一轮,必然发生)⇒ 本机把自己的推送记成收敛基点 ⇒ 同步工具丢弃该推送后,本机看到「我没改、远端改了」⇒ 快进覆盖对端版本。claudian(2026-08-29 C7-v1)与 Grok(2026-08-26 F-3)共性。字节不丢(备份区 + 冲突副本),但用户不会想到去看 |
+| **2** | ⭐ **实现「按 group 判稳定性」**(§9.1 的待改标记) | OQ-17 已测(2026-08-27):Grok 在 turn 中途**就地重写** `chat_history.jsonl`,且中途**静止 23 秒**——默认 `localQuietMs=3000` 会把中间态推走 ⇒ 每次对话都可能产生一次冲突。安全无缺口,但这是当前最影响体验的缺陷 |
+| 3 | **OQ-19:多 vault 时 binding 选错** | `boundWorkspaceId()` 取 `listBoundWorkspaces()[0]`,而 binding 里没有 vault 路径。要动 schema,且必须小心不要放宽 `WORKSPACE_IDENTITY_CHANGED` 这道 fail-closed 护栏(ADR-21) |
+| 4 | M3 剩余:**孤立 aux 清理命令** | 唯一还欠着的 M3 交付项(现在真的有多文件 group 了,这条才有对象) |
+| 5 | 补测 OQ-14(Grok rewind / `/compact`)、OQ-16(稳定窗口实测值);另有一条观察项:**插件在网盘按需占位文件上的实际行为从未被测**(2026-08-29 的 F-2 测的是套件,不是插件) | 不阻塞 |
+| 6 | **发布到 Obsidian 社区插件市场**(向 `obsidianmd/obsidian-releases` 提 PR 加进 `community-plugins.json`) | 目前只能靠 BRAT 安装。开工前先确认市场校验读的是 release 产物而不是仓库里的 `main.js`——本仓库**不提交** `main.js`,搞错会在审核时才发现 |
+| 7 | `release.yml` 的 release notes 现在写死一句「Install via BRAT…」,每次发版都会覆盖 | 想改成「有 `RELEASE_NOTES.md` 就用它」的话,注意**那条路径只有打 tag 时才执行**——单独开 PR,并先在一个测试 tag 上验过再合。0.2.0 的 notes 是发完用 `gh release edit` 补的 |
 
 **旧的发布动作清单(已全部完成)**
 

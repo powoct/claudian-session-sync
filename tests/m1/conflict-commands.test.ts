@@ -352,3 +352,47 @@ describe("the heading that has to identify a conflict (acceptance r4, F-4)", () 
     expect(new Set(members).size).toBe(3);
   });
 });
+
+describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3)", () => {
+  const claudian = (kind: "meta" | "inputs"): ConflictEntry =>
+    ({
+      conflictId: `c-${kind}`,
+      providerId: "claudian",
+      logicalId: `conv-1787925819663-qj5gp9vhq.${kind}`,
+      logicalIdPrefix: "conv-178",
+      detectedAt: "",
+      directory: "/q",
+      neutralRel: `claudian/conv-1787925819663-qj5gp9vhq.${kind}.json`,
+      branches: [],
+      superseded: false,
+    }) as ConflictEntry;
+
+  it("tells the two records of one conversation apart", () => {
+    // One fork of one conversation produces a conflict per record file, and
+    // both of them abbreviate to `conv-178` — the eight-character prefix is
+    // the epoch millisecond, and the half that says which file is at the end.
+    // The panel showed two identical headings on the real machines.
+    const headings = [describeConflict(claudian("meta")), describeConflict(claudian("inputs"))];
+    expect(new Set(headings).size, headings.join(" | ")).toBe(2);
+    expect(headings[0]).toContain(".meta");
+    expect(headings[1]).toContain(".inputs");
+  });
+
+  it("still abbreviates a uuid, and still names the file when the name needs it", () => {
+    // The three providers whose ids are uuids must read exactly as before.
+    const uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], superseded: false };
+    expect(
+      describeConflict({
+        ...base, providerId: "claude-code", logicalId: uuid, logicalIdPrefix: "3f2504e0",
+        neutralRel: `claude-code/${uuid}.jsonl`,
+      } as ConflictEntry),
+    ).toBe("Session 3f2504e0 (claude-code)");
+    expect(
+      describeConflict({
+        ...base, providerId: "grok", logicalId: uuid, logicalIdPrefix: "3f2504e0",
+        neutralRel: `grok/${uuid}/chat_history.jsonl`,
+      } as ConflictEntry),
+    ).toBe("Session 3f2504e0 · chat_history.jsonl (grok)");
+  });
+});

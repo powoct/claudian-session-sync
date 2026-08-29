@@ -232,7 +232,17 @@ export function describeOutcome(
  * sentence it always was; Grok's `chat_history.jsonl` does not, so it says so.
  */
 export function describeConflict(conflict: ConflictEntry): string {
+  // Eight characters is a friendly abbreviation of a uuid and a destructive one
+  // of anything else. Claudian's ids are `conv-<epochMs>-<rand>.<kind>`, where
+  // the half that says *which file* is at the end — truncating to `conv-178`
+  // threw it away and put two conflicts of one conversation under one heading,
+  // which is the same failure this function was written to fix, on a different
+  // provider (acceptance r5, F-3). So abbreviate only what abbreviates safely.
+  const id = SESSION_UUID.test(conflict.logicalId) ? conflict.logicalIdPrefix : conflict.logicalId;
   const file = conflict.neutralRel.slice(conflict.neutralRel.lastIndexOf("/") + 1);
-  const named = file.includes(conflict.logicalId) ? "" : ` · ${file}`;
-  return `Session ${conflict.logicalIdPrefix}${named} (${conflict.providerId})`;
+  const named = file.includes(id) ? "" : ` · ${file}`;
+  return `Session ${id}${named} (${conflict.providerId})`;
 }
+
+/** The one id shape short enough to read and long enough to stay unique at 8. */
+const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
