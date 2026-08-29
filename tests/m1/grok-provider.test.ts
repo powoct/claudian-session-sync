@@ -513,3 +513,65 @@ describe("switching a provider on for the first time (acceptance r4, F-1)", () =
     expect(again.firstEnable).toBe(false);
   }, 30_000);
 });
+
+describe("a session that is still being written (OQ-17, §9.1)", () => {
+  it("waits while a sibling is moving, even when the synced files hold still", async () => {
+    // The measurement this exists for: mid-turn, Grok left `chat_history.jsonl`
+    // untouched for 23 seconds while `events.jsonl` advanced about ninety
+    // times. Per-file quiescence therefore calls the file settled at precisely
+    // the moment the conversation is in flight, and what it copies is a
+    // version the finished turn does not extend — one machine, one ordinary
+    // conversation, one conflict (acceptance r4, F-5).
+    const machine = await withGrok();
+    await machine.writeGrokSession(SID, { turns: 2 });
+
+    // The turn is still running: nothing the plugin syncs changes, but the
+    // event log does, on every pass.
+    for (let i = 0; i < 3; i++) {
+      await fsp.appendFile(machine.grokPath(SID, "events.jsonl"), `{"e":${i}}\n`);
+      await machine.runtime.syncNow();
+      machine.advanceClock(95_000);
+    }
+
+    const status = await machine.runtime.refresh();
+    await expect(
+      fsp.readdir(path.join(machine.syncDir, status.workspaceId as string, "grok", SID)),
+    ).rejects.toThrow();
+    const rows = (machine.runtime.lastPassReport()?.actions ?? []).filter((a) =>
+      a.neutralRel.startsWith(`grok/${SID}/`),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((a) => a.reason === "session-being-written")).toBe(true);
+  }, 30_000);
+
+  it("goes through once the session stops moving", async () => {
+    // The other half: the gate must open, or it is just a longer outage.
+    const machine = await withGrok();
+    await machine.writeGrokSession(SID, { turns: 2 });
+    await fsp.appendFile(machine.grokPath(SID, "events.jsonl"), '{"e":"last"}\n');
+
+    await machine.settle();
+
+    expect((await fsp.readdir(await replicaDir(machine, SID))).sort()).toEqual([
+      "chat_history.jsonl",
+      "summary.json",
+      "updates.jsonl",
+    ]);
+  }, 30_000);
+
+  it("leaves single-file providers judged exactly as before", async () => {
+    // Only Grok declares witnesses. A provider whose session is one file must
+    // not start waiting on a group gate that has nothing to look at.
+    const machine = await RuntimeHarness.create();
+    machines.push(machine);
+    await machine.appendSession("3f2504e0-4f89-41d3-9a0c-0305e82c3301", 4);
+    await machine.configure();
+
+    await machine.settle();
+
+    const status = await machine.runtime.refresh();
+    expect(
+      await fsp.readdir(path.join(machine.syncDir, status.workspaceId as string, "claude-code")),
+    ).toContain("3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl");
+  }, 30_000);
+});

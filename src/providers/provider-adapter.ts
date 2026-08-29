@@ -39,6 +39,23 @@ export interface SessionGroup {
   readonly logicalId: LogicalId;
   readonly files: readonly SessionFileRef[];
   readonly lastModifiedMs: number;
+  /**
+   * Local paths that say whether this session is *being written right now*
+   * (§9.1, OQ-17). Stat-only: never read, never written, never synced.
+   *
+   * Per-file quiescence asks "has this file held still", and for a provider
+   * that spreads one turn across several files that is the wrong question.
+   * Grok was measured leaving `chat_history.jsonl` untouched for 23 seconds in
+   * the middle of a turn while `events.jsonl` advanced about ninety times — so
+   * the file looks settled precisely while the conversation is in flight, and
+   * a pass that believes it copies a version the finished turn does not
+   * extend. The cheapest honest answer is to ask the whole session instead,
+   * which is what these paths are for.
+   *
+   * Empty (the default) means "judge my files individually", which is correct
+   * for every provider whose session is one file.
+   */
+  readonly witnessPaths?: readonly string[];
 }
 
 /**
