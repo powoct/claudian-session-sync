@@ -201,7 +201,11 @@ export class PluginRuntime {
 
     // The vault answers "which workspace is this" (§5.2.3); this machine's
     // binding answers "and where does it sync to". Both, or nothing happens.
-    const bound = await this.boundWorkspaceId(home);
+    // Read once with no bound id so the vault's own claim is available: with a
+    // bound id supplied, a mismatch returns CHANGED and withholds the file,
+    // which is the very thing that made the selection below impossible.
+    const vaultClaimsId = (await readWorkspaceIdentity(await this.identityDeps(), null)).file?.workspaceId ?? null;
+    const bound = await this.boundWorkspaceId(home, vaultClaimsId);
     this.identity = await readWorkspaceIdentity(await this.identityDeps(), bound);
     const workspaceId = this.identity.file?.workspaceId ?? bound;
     this.binding = workspaceId ? await this.loadBinding(home, workspaceId) : null;
@@ -320,6 +324,11 @@ export class PluginRuntime {
       ...(previous ?? emptyBinding({ workspaceId, syncDirPath, createdAt: this.nowIso() })),
       workspaceId,
       syncDirPath,
+      // Stamped where the binding is first written. Redundant with the heal
+      // in `boundWorkspaceId` — which stamps any binding whose id the open
+      // vault claims — and kept anyway, because a field that is correct from
+      // the moment of creation needs no migration reasoning to trust.
+      vaultPath: this.host.vaultRoot,
     });
     await this.refresh();
   }
@@ -575,9 +584,54 @@ export class PluginRuntime {
     return rotated;
   }
 
-  private async boundWorkspaceId(home: HomeStore): Promise<WorkspaceId | null> {
-    const bound = await home.listBoundWorkspaces();
-    return (bound[0] as WorkspaceId | undefined) ?? null;
+  /**
+   * Which workspace this machine is bound to **for the vault that is open**.
+   *
+   * It used to be "whichever sorted first", which is only ever right on a
+   * machine with one vault. With two, the panel showed the other workspace's
+   * configuration, the folder field was disabled, and the identity check
+   * declared the open vault CHANGED and stopped syncing — a fail-closed guard
+   * (ADR-21) firing on a configuration that is not an anomaly at all. It
+   * blocked a real acceptance run until the operator moved a binding aside
+   * (OQ-19, ADR-59).
+   *
+   * The order matters, and the last branch is the one that keeps the guard:
+   *
+   *  1. a binding that names this vault — unambiguous, and how it works once
+   *     every binding has been stamped;
+   *  2. a binding whose id equals what this vault claims — the same answer by
+   *     a different route, used to stamp legacy bindings on first sight;
+   *  3. otherwise, if any binding predates the field, fall back to the old
+   *     behaviour. That deliberately keeps failing closed: an unstamped
+   *     binding might be this vault's, so "no binding claims this vault"
+   *     cannot yet be read as "this vault is new";
+   *  4. all bindings stamped and none claims this vault ⇒ genuinely a vault
+   *     this machine has not bound yet. Null, so the settings pane offers to
+   *     create an identity instead of reporting an anomaly.
+   */
+  private async boundWorkspaceId(home: HomeStore, vaultClaimsId: WorkspaceId | null): Promise<WorkspaceId | null> {
+    const ids = await home.listBoundWorkspaces();
+    if (ids.length === 0) return null;
+
+    const loaded = await Promise.all(ids.map((id) => home.loadBinding(id as WorkspaceId)));
+    const known: WorkspaceBinding[] = [];
+    for (const outcome of loaded) if (outcome.status === "loaded") known.push(outcome.value);
+
+    const claimsThisVault = known.find((b) => b.vaultPath === this.host.vaultRoot);
+    if (claimsThisVault) return claimsThisVault.workspaceId;
+
+    if (vaultClaimsId !== null) {
+      const byId = known.find((b) => b.workspaceId === vaultClaimsId);
+      if (byId) {
+        if (byId.vaultPath === undefined) {
+          await home.saveBinding({ ...byId, vaultPath: this.host.vaultRoot });
+        }
+        return byId.workspaceId;
+      }
+    }
+
+    const anyUnstamped = known.some((b) => b.vaultPath === undefined);
+    return anyUnstamped ? ((ids[0] as WorkspaceId | undefined) ?? null) : null;
   }
 
   private async loadBinding(home: HomeStore, workspaceId: WorkspaceId): Promise<WorkspaceBinding | null> {
