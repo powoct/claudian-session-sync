@@ -119,7 +119,19 @@ export interface ConflictBranchMeta {
 }
 
 export interface ConflictMeta {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
+  /**
+   * Why the pass called this a conflict (ADR-57).
+   *
+   * Written here because a reason that lives only in `PassReport` reaches
+   * nobody: the report keeps one pass, and the next automatic one clobbers it —
+   * the acceptance run lost a reason string to exactly that three times. A
+   * conflict directory outlives every pass, so the explanation belongs beside
+   * the branches it explains.
+   */
+  readonly reason?: string;
+  /** The sync tool's own copy of this file, when one was the evidence. */
+  readonly externalCopy?: string | null;
   readonly logicalId: string;
   /**
    * The path the two branches disagree about, relative to the workspace
@@ -153,6 +165,8 @@ export function buildConflictMeta(input: {
   readonly remoteLineCount: number;
   readonly machineIdPrefix: string;
   readonly detectedAtIso: string;
+  readonly reason?: string;
+  readonly externalCopy?: string | null;
 }): ConflictMeta {
   const local: ConflictBranchMeta = {
     hashPrefix: shortHash(input.localHash),
@@ -167,13 +181,15 @@ export function buildConflictMeta(input: {
   const branches =
     stripPrefix(input.localHash) <= stripPrefix(input.remoteHash) ? [local, remote] : [remote, local];
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     logicalId: input.logicalId,
     neutralRel: input.neutralRel,
     conflictId: input.conflictId,
     branches,
     detectedBy: input.machineIdPrefix,
     detectedAt: input.detectedAtIso,
+    ...(input.reason === undefined ? {} : { reason: input.reason }),
+    ...(input.externalCopy == null ? {} : { externalCopy: input.externalCopy }),
   };
 }
 

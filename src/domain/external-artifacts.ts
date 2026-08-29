@@ -121,8 +121,17 @@ export function classifyExternalArtifact(
 /**
  * The text `name` has that `sibling` does not, when `name` is `sibling` with
  * something inserted just before its extension. `null` when it is not.
+ *
+ * Exported because OQ-18 needs the *relation* without the confidence ladder
+ * above it. The only conflict copy ever seen in the field was a Chinese
+ * Dropbox client's `… (柴添 的冲突副本 2026-08-29).json`, which misses
+ * `DROPBOX_EN` and lands on the medium-confidence dated-parenthesis fallback;
+ * and the suite's planted Syncthing name yields `copyOf: null` while being a
+ * perfectly good insertion. Gating a data-safety decision on the ladder would
+ * therefore have missed the exact case it exists for. This function names
+ * candidates; the bytes decide (ADR-57).
  */
-function insertionBetween(sibling: string, name: string): string | null {
+export function insertionBetween(sibling: string, name: string): string | null {
   const dot = sibling.lastIndexOf(".");
   const stem = dot <= 0 ? sibling : sibling.slice(0, dot);
   const ext = dot <= 0 ? "" : sibling.slice(dot);

@@ -357,6 +357,8 @@ describe("every refusal has a sentence, not a code", () => {
       },
     ],
     superseded: false,
+    reason: null,
+    externalCopy: null,
   } as const;
 
   it.each([

@@ -61,6 +61,10 @@ export interface ConflictEntry {
   readonly neutralRel: string;
   /** Ordered by hash, like the copy files. */
   readonly branches: readonly ConflictBranchView[];
+  /** Why the pass called it a conflict, when the directory records it (ADR-57). */
+  readonly reason: string | null;
+  /** The sync tool's own copy of this file, when that was the evidence. */
+  readonly externalCopy: string | null;
   /**
    * Neither live side matches any branch — the disagreement this directory
    * froze is over (resolved, or superseded by a fresh pair the next pass will
@@ -284,6 +288,8 @@ async function readEntry(
     conflictId,
     providerId,
     logicalId,
+    reason: typeof meta.reason === "string" ? meta.reason : null,
+    externalCopy: typeof meta.externalCopy === "string" ? meta.externalCopy : null,
     logicalIdPrefix: logicalId.slice(0, 8),
     detectedAt,
     directory,
