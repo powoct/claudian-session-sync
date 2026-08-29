@@ -36,6 +36,7 @@ const EXPECTED_COMMAND_IDS = [
   "verify-all",
   "show-last-report",
   "restore-backup",
+  "clean-half-copied",
   "open-backups-folder",
   "show-conflicts",
   "conflict-keep-local",

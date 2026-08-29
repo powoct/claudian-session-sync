@@ -10,6 +10,7 @@ import type { ConflictResolution } from "./domain/conflict";
 import { AiSessionSyncSettingTab } from "./ui/settings-tab";
 import { ConflictModal, describeOutcome } from "./ui/conflict-modal";
 import { ReportModal } from "./ui/report-modal";
+import { OrphanModal } from "./ui/orphan-modal";
 import { RestoreModal } from "./ui/restore-modal";
 
 /**
@@ -69,6 +70,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       id: "restore-backup",
       name: "Restore an earlier version",
       callback: () => this.openRestore(),
+    });
+    this.addCommand({
+      id: "clean-half-copied",
+      name: "Clean up half-copied sessions",
+      callback: () => this.openOrphans(),
     });
     this.addCommand({
       id: "open-backups-folder",
@@ -216,6 +222,11 @@ export default class AiSessionSyncPlugin extends Plugin {
   private openRestore(): void {
     const runtime = this.getRuntime();
     new RestoreModal(this.app, runtime, () => void runtime.refresh()).open();
+  }
+
+  /** §6.6's promise: a way to clear a half-copied session, never automatic. */
+  private openOrphans(): void {
+    new OrphanModal(this.getRuntime(), this.app).open();
   }
 
   /**
