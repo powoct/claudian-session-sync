@@ -352,6 +352,43 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // the few milliseconds one pass needs.
     const planned = orderedForCommit(group);
 
+    // §9.1 / OQ-17: is this session being written *right now*? Asked of the
+    // whole group, because its members go quiet out of step — measured, on
+    // Grok: `chat_history.jsonl` held still for 23 seconds mid-turn while
+    // `events.jsonl` advanced about ninety times, so the file a pass most
+    // wants to copy looks settled exactly while the turn is in flight, and
+    // what it copies is a version the finished turn does not extend.
+    //
+    // Checked before the budget so an active session costs a stat sweep and
+    // nothing else. Providers whose session is one file declare no witnesses
+    // and are unaffected.
+    if (planned.length > 0 && (group.witnessPaths?.length ?? 0) > 0) {
+      const activity = await observeGroupActivity(deps, group);
+      const key = `${adapter.id}/${group.logicalId}`;
+      const verdict = judgeStability({
+        o1: activity,
+        o2: activity,
+        ledger: deps.ledger.local(key),
+        nowMs: deps.clock.nowMs(),
+        quietMs: deps.settings.localQuietMs,
+        clockSkewToleranceMs: deps.settings.clockSkewToleranceMs,
+      });
+      deps.ledger.record(key, "local", {
+        sig: activity,
+        firstSeenMs: verdict.firstSeenMs,
+        truncatedTailPasses: 0,
+        remoteHadNonZeroSize: false,
+      });
+      if (!verdict.stable) {
+        for (const file of planned) {
+          actions.push(
+            entry(group, file.neutralRel, adapter.id, "DEFER", "session-being-written", "SKIPPED_POLICY"),
+          );
+        }
+        continue;
+      }
+    }
+
     // No commit point, no assembly. A group reaching here without a primary
     // can only have come from the replica, and only because the machine that
     // pushed it has not finished: landing its history alone would leave a
@@ -1339,4 +1376,43 @@ async function findDisplacedPush(
     if (deps.hashBytes(bytes) === localHash) return { found: true, copyRel: `${dirRel}/${name}`, unreadable: null };
   }
   return { found: false, copyRel: null, unreadable };
+}
+
+/**
+ * One signature for a whole session's liveness (§9.1, OQ-17).
+ *
+ * `lstat` only — no tail read. A session that is being written changes size
+ * every fraction of a second (Grok's `events.jsonl` grew by hundreds of bytes
+ * roughly ten times a second in the measurement), so size and the two
+ * timestamps decide it, and reading a tail from a dozen files per session per
+ * pass would buy nothing. The per-file check keeps its tail hash: this is the
+ * belt, that is the braces.
+ *
+ * Composed rather than compared pairwise so `judgeStability` can be reused
+ * unchanged: any member appearing, vanishing, growing or being replaced moves
+ * the composite, and the quiet window then measures how long the *session* has
+ * been still rather than how long one of its files has.
+ */
+async function observeGroupActivity(deps: EngineDeps, group: SessionGroup): Promise<E0Signature> {
+  const parts: string[] = [];
+  let size = 0;
+  let mtimeMs = 0;
+  let ctimeMs = 0;
+  for (const path of [...(group.witnessPaths ?? [])].sort()) {
+    const st = await deps.fs.lstat(path);
+    if (st === null || !st.isFile) continue;
+    size += st.size;
+    mtimeMs = Math.max(mtimeMs, st.mtimeMs);
+    ctimeMs = Math.max(ctimeMs, st.ctimeMs);
+    parts.push(`${path}:${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino ?? 0}`);
+  }
+  return {
+    size,
+    mtimeMs,
+    ctimeMs,
+    // Not a real inode: the composite has no single file behind it. Held
+    // constant so `signaturesEqual` is decided by the parts digest below.
+    ino: 0,
+    tailHash: deps.hashBytes(new TextEncoder().encode(parts.join("\n"))),
+  };
 }

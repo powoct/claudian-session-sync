@@ -375,9 +375,9 @@ experimental 标签保留到 M4 验收跑通一轮 Codex 跨机 resume(M1 步骤
 
 | # | 事项 | 说明 |
 |---|---|---|
-| **1** | ⭐ **OQ-18:Tier R 的收敛基点在推送被同步工具丢弃时会快进覆盖** | **两次真机复现,而且是现实路径**:断网期间跑过 pass(默认 5 分钟一轮,必然发生)⇒ 本机把自己的推送记成收敛基点 ⇒ 同步工具丢弃该推送后,本机看到「我没改、远端改了」⇒ 快进覆盖对端版本。claudian(2026-08-29 C7-v1)与 Grok(2026-08-26 F-3)共性。字节不丢(备份区 + 冲突副本),但用户不会想到去看 |
-| **2** | ⭐ **实现「按 group 判稳定性」**(§9.1 的待改标记) | OQ-17 已测(2026-08-27):Grok 在 turn 中途**就地重写** `chat_history.jsonl`,且中途**静止 23 秒**——默认 `localQuietMs=3000` 会把中间态推走 ⇒ 每次对话都可能产生一次冲突。安全无缺口,但这是当前最影响体验的缺陷 |
-| 3 | **OQ-19:多 vault 时 binding 选错** | `boundWorkspaceId()` 取 `listBoundWorkspaces()[0]`,而 binding 里没有 vault 路径。要动 schema,且必须小心不要放宽 `WORKSPACE_IDENTITY_CHANGED` 这道 fail-closed 护栏(ADR-21) |
+| 1 | ~~OQ-18~~ ✅ **部分关闭(ADR-57)**:留得下冲突副本的传输已挡住(比对内容,不比对名字新旧);留不下的仍会静默覆盖,现在每轮报条数。长期解是 replica 里的 lineage 记录 | 先证明了「仅凭内容 + 本机 ledger」无解(ADR-57 的 E1/E2 构造) |
+| 2 | ~~按 group 判稳定性~~ ✅ **已实装(ADR-58)**:`SessionGroup.witnessPaths` + 合成签名走同一套判定,不稳定整组 DEFER。爆炸半径只有 Grok(其余 provider 不声明 witnesses) | 顺带确认 **OQ-20**:`probeDelayMs` 配了但从未生效,观测路径里没有 sleep |
+| **1** | ⭐ **OQ-19:多 vault 时 binding 选错** | `boundWorkspaceId()` 取 `listBoundWorkspaces()[0]`,而 binding 里没有 vault 路径。要动 schema,且必须小心不要放宽 `WORKSPACE_IDENTITY_CHANGED` 这道 fail-closed 护栏(ADR-21) |
 | 4 | M3 剩余:**孤立 aux 清理命令** | 唯一还欠着的 M3 交付项(现在真的有多文件 group 了,这条才有对象) |
 | 5 | 补测 OQ-14(Grok rewind / `/compact`)、OQ-16(稳定窗口实测值);另有一条观察项:**插件在网盘按需占位文件上的实际行为从未被测**(2026-08-29 的 F-2 测的是套件,不是插件) | 不阻塞 |
 | 6 | **发布到 Obsidian 社区插件市场**(向 `obsidianmd/obsidian-releases` 提 PR 加进 `community-plugins.json`) | 目前只能靠 BRAT 安装。开工前先确认市场校验读的是 release 产物而不是仓库里的 `main.js`——本仓库**不提交** `main.js`,搞错会在审核时才发现 |

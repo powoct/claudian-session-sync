@@ -76,6 +76,28 @@ const SLOW = 30_000;
 
 const asFake = (element: HTMLElement): FakeElement => element as unknown as FakeElement;
 
+/**
+ * Waits for an async modal render, rather than guessing how long it takes.
+ *
+ * `open()` kicks off `onOpen()` without awaiting it, and for the conflict view
+ * that render walks the quarantine directory and hashes files — real I/O whose
+ * duration depends on what else the machine is doing. A fixed sleep therefore
+ * passes alone and fails under a loaded suite, which is the one kind of test
+ * this project refuses to keep: it reports load as a defect. Twice now that is
+ * exactly what happened, in this describe block both times.
+ */
+async function rendered(modal: { contentEl: HTMLElement }, marker: string, budgetMs = 5_000) {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (asFake(modal.contentEl).allText().includes(marker)) return;
+    if (Date.now() > deadline) {
+      throw new Error(`modal never rendered ${JSON.stringify(marker)} within ${budgetMs} ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+
 const named = (name: string) => settingsCreated.find((setting) => setting.name === name);
 const containing = (fragment: string) =>
   settingsCreated.find((setting) => setting.name.includes(fragment));
@@ -244,7 +266,11 @@ describe("the conflict view", () => {
       () => undefined,
     );
     modal.open();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Waits for a marker that only exists *after* the async half: the
+    // heading is written synchronously by `render()` before it awaits the
+    // conflict listing, so waiting for it would return before the buttons
+    // exist — which is precisely how the old fixed sleep failed under load.
+    await rendered(modal, "Keep this machine's version");
 
     const text = asFake(modal.contentEl).allText();
     expect(text).toContain("Session conflicts");
@@ -275,7 +301,7 @@ describe("the conflict view", () => {
 
     const modal = new ConflictModal(makeStubApp() as unknown as App, b.runtime, () => undefined);
     modal.open();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await rendered(modal, "Keep this machine's version");
 
     const button = asFake(modal.contentEl)
       .descendants()
@@ -284,6 +310,7 @@ describe("the conflict view", () => {
     // Resolution now runs a full pass before reporting, so give the Notice
     // until it actually appears rather than a fixed beat.
     for (let waited = 0; Notice.instances.length === 0 && waited < 5000; waited += 50) {
+      // A tick, not a guess: the loop condition is what decides.
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 

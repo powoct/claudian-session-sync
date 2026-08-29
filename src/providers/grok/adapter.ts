@@ -154,10 +154,20 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
 
         const sessionDir = deps.joinPath(projectDir, entry.name);
         const files: SessionFileRef[] = [];
+        const witnessPaths: string[] = [];
         let lastModifiedMs = 0;
 
         for (const member of await deps.listDir(sessionDir).catch(() => [])) {
           if (!member.isFile) continue;
+          // Everything the CLI writes counts as a sign of life, whether or not
+          // it travels — `events.jsonl` is the most sensitive of them (roughly
+          // ten writes a second during a turn) and is deliberately not synced,
+          // so using it costs no transfer at all. Locks are excluded: they are
+          // always zero bytes and exist for the whole life of the process, so
+          // they say nothing about whether it is writing (findings 2026-08-24).
+          if (!member.name.endsWith(".lock")) {
+            witnessPaths.push(deps.joinPath(sessionDir, member.name));
+          }
           const known = MEMBERS.get(member.name);
           if (known === undefined) continue;
 
@@ -182,7 +192,7 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
         // pushing its history without its commit point would put a session in
         // the sync folder that no machine can ever show.
         if (!files.some((file) => file.role === "primary")) continue;
-        groups.push({ logicalId: entry.name as LogicalId, files, lastModifiedMs });
+        groups.push({ logicalId: entry.name as LogicalId, files, lastModifiedMs, witnessPaths });
       }
       return groups;
     },
