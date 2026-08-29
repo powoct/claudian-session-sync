@@ -16,6 +16,19 @@ import { RuntimeHarness, sha256 } from "../helpers/runtime-harness";
 
 const SID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
+/**
+ * The exception `conflict-commands.test.ts` states, applied here too.
+ *
+ * A case that drives a pass drives a real one: three passes per `settle()`,
+ * over a real filesystem, under coverage instrumentation. Vitest's 5 s default
+ * is a good default and stays global — but on the two-core Windows runner the
+ * slowest case in a *passing* run finished 105 ms inside it, which is not a
+ * margin, it is luck. Past that point the default no longer reports a bug, it
+ * reports how busy the machine was. So every pass-driving case carries this,
+ * and a case without it is a case that is genuinely quick.
+ */
+const SLOW = 30_000;
+
 let harness: RuntimeHarness | null = null;
 afterEach(async () => {
   await harness?.dispose();
@@ -108,7 +121,7 @@ describe("first run", () => {
 
     expect(status.phase).toBe("await-init");
     expect(await fsp.readdir(h.syncDir), "an uninitialised folder receives nothing").toEqual([]);
-  });
+  }, SLOW);
 
   it("syncs once everything has been said out loud", async () => {
     const h = await makeHarness();
@@ -122,7 +135,7 @@ describe("first run", () => {
     expect(sha256(await read(h.replicaPath(workspaceId, SID)))).toBe(
       sha256(await read(h.sessionPath(SID))),
     );
-  });
+  }, SLOW);
 });
 
 describe("machine identity", () => {
@@ -275,7 +288,7 @@ describe("dry run", () => {
     const after = await fiveTrees(h);
 
     expect(after).toEqual(before);
-  });
+  }, SLOW);
 
   it("still reports what it would have done", async () => {
     const h = await makeHarness();
@@ -296,7 +309,7 @@ describe("dry run", () => {
     expect(report?.actions.map((a) => a.action)).toContain("PUSH_OVERWRITE");
     expect(report?.actions.every((a) => a.result !== "APPLIED")).toBe(true);
     expect(after).toEqual(before);
-  });
+  }, SLOW);
 
   it("produces a report and changes nothing", async () => {
     const h = await makeHarness();
@@ -317,7 +330,7 @@ describe("dry run", () => {
     expect(report?.dryRun).toBe(true);
     expect(report?.actions.length).toBeGreaterThan(0);
     expect([...after].sort()).toEqual([...before].sort());
-  });
+  }, SLOW);
 });
 
 describe("a quiet pass leaves the shared manifest alone (acceptance D-1)", () => {
@@ -338,7 +351,7 @@ describe("a quiet pass leaves the shared manifest alone (acceptance D-1)", () =>
     await h.settle();
 
     expect(sha256(await read(manifestPath))).toBe(sha256(before));
-  });
+  }, SLOW);
 });
 
 describe("what the status bar says", () => {
@@ -359,7 +372,7 @@ describe("what the status bar says", () => {
     expect(acted.short).toBe("Claudian Session Sync: 1 change");
     // And the steady state does not report itself as a count of nothing.
     expect(settled.short).toBe("Claudian Session Sync: up to date");
-  });
+  }, SLOW);
 
   it("says 'conflict' exactly once per conflict, and stops once it is settled", async () => {
     // Acceptance defect D-4: a CONFLICT action's result is APPLIED, so it was
@@ -392,7 +405,7 @@ describe("what the status bar says", () => {
     } finally {
       await b.dispose();
     }
-  }, 30_000);
+  }, SLOW);
 
   it("keeps counting a conflict through a pass that only DEFERred it", async () => {
     // A divergent pair whose side just changed is DEFERred, not judged — and a
@@ -434,7 +447,7 @@ describe("what the status bar says", () => {
     } finally {
       await b.dispose();
     }
-  }, 30_000);
+  }, SLOW);
 
   it("explains a folder that has gone missing rather than reporting a number", async () => {
     const h = await makeHarness();
@@ -448,7 +461,7 @@ describe("what the status bar says", () => {
     expect(status.phase).toBe("not-ready");
     expect(status.notReadyReason).toBe("NR-9-sync-dir-unreachable");
     expect(status.detail).toContain("cannot be reached");
-  });
+  }, SLOW);
 });
 
 describe("a machine with more than one vault (OQ-19, ADR-59)", () => {
@@ -498,7 +511,7 @@ describe("a machine with more than one vault (OQ-19, ADR-59)", () => {
     const firstAgain = await first.runtime.refresh();
     expect(firstAgain.workspaceId).toBe(firstStatus.workspaceId);
     expect(firstAgain.syncDirPath).toBe(first.syncDir);
-  }, 30_000);
+  }, SLOW);
 
   it("still stops when a vault's identity really did change", async () => {
     // The guard this must not loosen (ADR-21). Selecting by vault path makes
@@ -522,5 +535,5 @@ describe("a machine with more than one vault (OQ-19, ADR-59)", () => {
     const status = await machine.runtime.refresh();
     expect(status.phase).toBe("identity-blocked");
     expect(status.detail.toLowerCase()).toContain("identity");
-  }, 30_000);
+  }, SLOW);
 });
