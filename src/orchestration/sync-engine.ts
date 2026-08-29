@@ -27,6 +27,7 @@ import {
   type SideFacts,
   plan,
   planOpaque,
+  shrankBelowConvergedBase,
 } from "../domain/planner";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
 import { type E0Signature, judgeStability, signaturesEqual } from "../domain/stability";
@@ -58,6 +59,9 @@ import {
 } from "./pass-report";
 
 /** The four actions that put bytes on disk; everything else observes. */
+/** Enough to act on; past it a list stops being a list (§9.1.6). */
+const MAX_NAMED_REPLACEMENTS = 3;
+
 const WRITE_ACTIONS = new Set<Action>(["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE"]);
 
 /** Known errno values worth catching per file; anything else propagates. */
@@ -185,7 +189,14 @@ export interface LedgerView {
    * bytes read now, it never substitutes for reading them (ADR-48 vs ADR-12).
    */
   converged(neutralRel: string): string | null;
-  recordConverged(neutralRel: string, hash: string): void;
+  /**
+   * Size of the same converged bytes (§7.2b, OQ-14). Read by every table, not
+   * just the opaque one: it answers "has this side dropped below what both
+   * sides once held", which is the question a deliberate truncation raises and
+   * the prefix relation cannot see.
+   */
+  convergedSize(neutralRel: string): number | null;
+  recordConverged(neutralRel: string, hash: string, size: number): void;
 }
 
 /**
@@ -231,6 +242,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
    * there is the half of OQ-18 that no mechanism closes.
    */
   const replacedByPeer = new Map<string, number>();
+  const historyReplaced: Array<{ logicalIdPrefix: string; backupPath: string | null }> = [];
   const notices: string[] = [];
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
@@ -423,6 +435,17 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // the action rows to be noticed. See the notice below for why it matters.
     let auxLanded = false;
     let primaryPending = false;
+    // §7.1 P5: "group 内任一 required 文件被拦下 → 整个 group DEFER". The engine
+    // already stops a group for the budget, for a missing primary and for a
+    // session being written; a member in conflict was the one way through.
+    //
+    // It matters most for exactly the case that found it. A rewind conflicts
+    // the history and, in the same pass, `summary.json` reads as
+    // `remote-at-converged-base` and pushes — so the group would land the
+    // post-rewind record beside the pre-rewind history, a pairing neither
+    // machine ever held. `orderedForCommit` puts the primary last, so a flag
+    // raised by an aux member is enough to stop it; no two-phase machinery.
+    let memberConflicted = false;
 
     for (const file of planned) {
 
@@ -527,6 +550,19 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
             deps.ledger.local(file.neutralRel)?.truncatedTailPasses ?? 0,
             deps.ledger.remote(file.neutralRel)?.truncatedTailPasses ?? 0,
           ),
+          // OQ-14. Compared against the *base*, never against each other:
+          // this asks "did a side go backwards past what both once held", and
+          // the answer may only ever refuse a fast-forward.
+          localShrankBelowConverged: shrankBelowConvergedBase({
+            sideSize: localFacts.size,
+            otherSize: remoteFacts.size,
+            convergedSize: deps.ledger.convergedSize(file.neutralRel),
+          }),
+          remoteShrankBelowConverged: shrankBelowConvergedBase({
+            sideSize: remoteFacts.size,
+            otherSize: localFacts.size,
+            convergedSize: deps.ledger.convergedSize(file.neutralRel),
+          }),
         },
       };
       let witness: WitnessOutcome = { found: false, copyRel: null, unreadable: null };
@@ -621,6 +657,26 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         });
       }
 
+      // §7.1 P5: a write may not land beside a member already in conflict.
+      //
+      // Narrower than "stop the group", deliberately. A second CONFLICT is
+      // harmless — it writes nothing to either live file — and a fork of a
+      // Grok session legitimately produces one per diverged member (acceptance
+      // F-4), which the user has to see all of. What must not happen is a
+      // *write*: with the history in conflict, pushing `summary.json` would
+      // publish the post-rewind record beside the pre-rewind history, a pairing
+      // neither machine ever held. `orderedForCommit` puts the primary last, so
+      // an aux member's conflict is always seen before the commit point.
+      if (memberConflicted && WRITE_ACTIONS.has(decision.action)) {
+        actions.push(
+          entry(group, file.neutralRel, adapter.id, "DEFER", "group-member-in-conflict", "SKIPPED_POLICY"),
+        );
+        recordLedger(deps, file.neutralRel, "local", localO2, nowMs, tailTruncated(localBytes));
+        recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, tailTruncated(remoteBytes));
+        continue;
+      }
+      if (decision.action === "CONFLICT") memberConflicted = true;
+
       // ── P6 apply ─────────────────────────────────────────────────────────
       const applied = await applyAction(deps, barrier, {
         action: decision.action,
@@ -663,12 +719,25 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // A primary that is already on this machine is deliberately excluded: a
       // stale one is the mixed-age case, which the CLI was measured to heal by
       // regenerating it. What cannot heal is its absence.
-      if (
-        file.mode === "opaque-file" &&
-        decision.action === "PULL_OVERWRITE" &&
-        applied.result === "APPLIED"
-      ) {
-        replacedByPeer.set(adapter.id, (replacedByPeer.get(adapter.id) ?? 0) + 1);
+      // §9.1.6 mitigation 2, marked "M1 必做" and never implemented past the
+      // opaque table: *every* landed PULL_OVERWRITE, whatever the merge mode.
+      // The hazard it exists for has nothing to do with how the file merges —
+      // it is that the local CLI may have this session open right now, and its
+      // in-memory state has just gone stale under it. An append-only history
+      // is if anything the likelier one to be open.
+      //
+      // Opaque records keep the counted per-provider line: they are rewritten
+      // every turn, so naming each one is noise (ADR-48). A conversation
+      // history is named, because it is the one the user might be typing into.
+      if (decision.action === "PULL_OVERWRITE" && applied.result === "APPLIED") {
+        if (file.mode === "opaque-file") {
+          replacedByPeer.set(adapter.id, (replacedByPeer.get(adapter.id) ?? 0) + 1);
+        } else {
+          historyReplaced.push({
+            logicalIdPrefix: idPrefix(group.logicalId),
+            backupPath: applied.backupPath ?? null,
+          });
+        }
       }
       if (file.role !== "primary") {
         if (WRITE_ACTIONS.has(decision.action) && applied.result === "APPLIED") auxLanded = true;
@@ -685,11 +754,18 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         });
       }
 
-      // The opaque base moves only on convergence this pass witnessed with
-      // real bytes (§7.2b, ADR-48): an observed-equal NOOP, or a landed write.
+      // The base moves only on convergence this pass witnessed with real bytes
+      // (§7.2b, ADR-48): an observed-equal NOOP, or a landed write.
       // Deliberately not on the E1 branch above — a remembered hash may say
       // NOOP, it may not arm a future overwrite.
-      if (file.mode === "opaque-file" && !deps.dryRun) {
+      //
+      // Recorded for **every** mode, which is what §7.2b already specified
+      // ("任一 `*_NEW`/`*_OVERWRITE` 落地（含 append-jsonl 表的）") and what the
+      // `opaque-file` gate here quietly withheld. The opaque table is the only
+      // one that reads the *hash*; the size is read by both, because a file
+      // that has fallen below the last agreed point is a fork whatever its
+      // merge mode (ADR-61).
+      if (!deps.dryRun) {
         const convergedHash =
           decision.action === "NOOP" && decision.reason === "content-identical"
             ? localFacts.observedHash
@@ -700,7 +776,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
                   (decision.action === "PULL_NEW" || decision.action === "PULL_OVERWRITE")
                 ? remoteFacts.observedHash
                 : null;
-        if (convergedHash) deps.ledger.recordConverged(file.neutralRel, convergedHash);
+        const convergedSize =
+          decision.action === "NOOP" || decision.action === "PUSH_NEW" || decision.action === "PUSH_OVERWRITE"
+            ? localFacts.size
+            : remoteFacts.size;
+        if (convergedHash) deps.ledger.recordConverged(file.neutralRel, convergedHash, convergedSize);
       }
 
       // P8's ledger write is unconditional, including for skipped and aborted
@@ -746,6 +826,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           "do not open it in the CLI until the next sync finishes it",
       );
     }
+  }
+
+  // Named, capped, and one line each: the point is that the user can tell
+  // *which* conversation to quit and re-resume, which a count cannot say.
+  for (const replaced of historyReplaced.slice(0, MAX_NAMED_REPLACEMENTS)) {
+    notices.push(
+      `session ${replaced.logicalIdPrefix}: this machine's history was replaced with the other ` +
+        "machine's version — if you have it open in the CLI right now, quit and resume it again " +
+        "before typing, or what you type next will not be saved" +
+        (replaced.backupPath ? `; the previous contents are in ${replaced.backupPath}` : ""),
+    );
+  }
+  if (historyReplaced.length > MAX_NAMED_REPLACEMENTS) {
+    notices.push(
+      `and ${historyReplaced.length - MAX_NAMED_REPLACEMENTS} more session(s) whose history was ` +
+        "replaced the same way; the previous contents are in the backups folder",
+    );
   }
 
   for (const [providerId, count] of replacedByPeer) {

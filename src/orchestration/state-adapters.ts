@@ -85,6 +85,7 @@ const EMPTY_ENTRY: Omit<LedgerEntryRecord, "sig" | "firstSeenMs" | "lastSeenMs">
   skippedForBudgetPasses: 0,
   truncatedTailPasses: 0,
   lastConvergedHash: null,
+  lastConvergedSize: null,
 };
 
 /** A record that exists only to carry a converged base until it is observed. */
@@ -130,7 +131,10 @@ export function createPassState(input: PassStateInput): PassState {
     converged(rel) {
       return local.get(rel)?.lastConvergedHash ?? null;
     },
-    recordConverged(rel, hash) {
+    convergedSize(rel) {
+      return local.get(rel)?.lastConvergedSize ?? null;
+    },
+    recordConverged(rel, hash, size) {
       // Lives on the local side's entry. The entry may not exist yet — a
       // PULL_NEW converges before this machine has ever *observed* the landed
       // file — so the upsert plants a placeholder the next observation will
@@ -141,6 +145,7 @@ export function createPassState(input: PassStateInput): PassState {
         ...(previous ?? { ...EMPTY_ENTRY, sig: PLACEHOLDER_SIG, firstSeenMs: input.nowMs }),
         lastSeenMs: input.nowMs,
         lastConvergedHash: hash,
+        lastConvergedSize: size,
       });
     },
   };

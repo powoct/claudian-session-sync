@@ -15,6 +15,7 @@ import {
   type SideFacts,
   plan,
   MALFORMED_TAIL_PASSES,
+  shrankBelowConvergedBase,
 } from "../../src/domain/planner";
 
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -44,7 +45,11 @@ const input = (overrides: Partial<PlanInput> = {}): PlanInput => ({
   maxFileSizeBytes: MAX_BYTES,
   pullNewFastPath: false,
   hints: { remoteHadNonZeroSize: false },
-  history: { truncatedTailPasses: 0 },
+  history: {
+    truncatedTailPasses: 0,
+    localShrankBelowConverged: false,
+    remoteShrankBelowConverged: false,
+  },
   ...overrides,
 });
 
@@ -141,7 +146,7 @@ describe("§5.2.2 tail integrity (U-11)", () => {
     const result = plan(
       input({
         local: L({ tail: "truncated" }),
-        history: { truncatedTailPasses: MALFORMED_TAIL_PASSES },
+        history: { truncatedTailPasses: MALFORMED_TAIL_PASSES , localShrankBelowConverged: false, remoteShrankBelowConverged: false},
       }),
     );
     expect(result.action).toBe("DEFER");
@@ -221,6 +226,109 @@ describe("§5.2.3 zero-byte files (U-12)", () => {
         actionOf({ local: L({ size: 0 }), remoteSide: R({ size: 0 }), relation }),
       ).not.toBe("CONFLICT");
     }
+  });
+});
+
+describe("§5.2.6 a side that fell below the last convergence (OQ-14, ADR-61)", () => {
+  // Measured, not imagined: a Grok rewind truncates chat_history.jsonl in
+  // place (165,566 -> 159,924 B, 69 -> 53 lines) and `/compact` rewrites it
+  // wholesale. The append table reads "shorter, and contained by the other
+  // side" as "behind" and fast-forwards — which undoes the user's rewind, and
+  // did so in an end-to-end repro with no notice at all.
+  const shrunk = (overrides: Partial<PlanInput> = {}): PlanInput =>
+    input({
+      local: L({ size: 140 }),
+      remoteSide: R({ size: 210 }),
+      relation: "r-extends-l",
+      history: {
+        truncatedTailPasses: 0,
+        localShrankBelowConverged: true,
+        remoteShrankBelowConverged: false,
+      },
+      ...overrides,
+    });
+
+  it("refuses the fast-forward that would undo it, and says which", () => {
+    const decision = plan(shrunk());
+    expect(decision.action).toBe("CONFLICT");
+    expect(decision.reason).toBe("local-shrank-below-converged");
+    expect(decision.flags).toContain("shrankBelowConverged");
+  });
+
+  it("still fast-forwards when the local side merely lagged", () => {
+    // The ordinary case, and by far the common one: the peer appended, this
+    // machine is behind. Nothing shrank, so nothing changes.
+    expect(actionOf({ local: L({ size: 140 }), remoteSide: R({ size: 210 }), relation: "r-extends-l" })).toBe(
+      "PULL_OVERWRITE",
+    );
+  });
+
+  it("guards the mirror, so a resolved rewind is not resurrected by an idle peer", () => {
+    // Without this, the fix only relocates the defect: A rewinds, the user
+    // resolves keep-local, A pushes — and B, still holding the pre-rewind
+    // version, pushes it straight back.
+    const decision = plan(
+      input({
+        local: L({ size: 210 }),
+        remoteSide: R({ size: 140 }),
+        relation: "l-extends-r",
+        history: {
+          truncatedTailPasses: 0,
+          localShrankBelowConverged: false,
+          remoteShrankBelowConverged: true,
+        },
+      }),
+    );
+    expect(decision.action).toBe("CONFLICT");
+    expect(decision.reason).toBe("remote-shrank-below-converged");
+  });
+
+  it("leaves the zero-byte remote on DEFER, which is a transport symptom", () => {
+    // A remote that had content and is now empty stays #9's existing guard:
+    // that is the sync tool mid-write, not somebody's rewind, and DEFER is the
+    // answer that waits for it instead of asking the user about it.
+    expect(
+      plan(
+        input({
+          local: L({ size: 210 }),
+          remoteSide: R({ size: 0 }),
+          relation: "l-extends-r",
+          hints: { remoteHadNonZeroSize: true },
+          history: {
+            truncatedTailPasses: 0,
+            localShrankBelowConverged: false,
+            remoteShrankBelowConverged: true,
+          },
+        }),
+      ).reason,
+    ).toBe("remote-regressed-to-empty");
+  });
+});
+
+describe("§5.2.6 the shrink predicate itself", () => {
+  const base = { sideSize: 140, otherSize: 210, convergedSize: 210 };
+
+  it("fires when a side dropped below a base the other side still contains", () => {
+    expect(shrankBelowConvergedBase(base)).toBe(true);
+  });
+
+  it("is silent with no base — losing the ledger is slow, never wrong", () => {
+    expect(shrankBelowConvergedBase({ ...base, convergedSize: null })).toBe(false);
+  });
+
+  it("is silent when the side merely lagged behind the base rather than falling below it", () => {
+    expect(shrankBelowConvergedBase({ ...base, sideSize: 210, convergedSize: 140 })).toBe(false);
+  });
+
+  it("is silent when the other side does not contain the base either", () => {
+    // Both sides moved off the base: that is an ordinary fork, and rule #8
+    // reaches it first with the same answer. Saying yes here would also let a
+    // corrupt base freeze a file in permanent conflict.
+    expect(shrankBelowConvergedBase({ ...base, otherSize: 150, convergedSize: 210 })).toBe(false);
+  });
+
+  it("is silent for a zero-byte side, which is damage and never a rewind", () => {
+    expect(shrankBelowConvergedBase({ ...base, sideSize: 0 })).toBe(false);
   });
 });
 
@@ -410,7 +518,7 @@ describe("§5.2.7 exhaustive combinations", () => {
                           maxFileSizeBytes: MAX_BYTES,
                           pullNewFastPath: fastPath,
                           hints: { remoteHadNonZeroSize: hadContent },
-                          history: { truncatedTailPasses: 0 },
+                          history: { truncatedTailPasses: 0 , localShrankBelowConverged: false, remoteShrankBelowConverged: false},
                         };
                       }
   }
