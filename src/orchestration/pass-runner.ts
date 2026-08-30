@@ -478,6 +478,7 @@ function abortedReport(nowMs: number, deps: PassRunnerDeps, reason: string): Pas
     actions: [],
     violations: [],
     unknownFiles: [],
+    unprovenOmissions: [],
     notices: [],
   };
 }

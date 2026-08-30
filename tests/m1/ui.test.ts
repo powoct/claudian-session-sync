@@ -445,11 +445,20 @@ describe("the report view shows what went wrong, not just what worked", () => {
           copyOf: "3f2504e0.jsonl",
         },
       ],
+      unprovenOmissions: [
+        { providerId: "grok", name: "compaction/", sessions: 2 },
+        { providerId: "grok", name: "signals.json", sessions: 7 },
+      ],
     });
     modal.open();
 
     const text = asFake(modal.contentEl).allText();
     expect(text).toContain("Notices");
+    // Named, with the count, and under a heading that does not claim the
+    // plugin did something to them.
+    expect(text).toContain("Stays on this machine");
+    expect(text).toContain("compaction/");
+    expect(text).toContain("in 7 sessions");
     expect(text).toContain("incomplete");
     expect(text).toContain("Rejected paths");
     expect(text).toContain("SYMLINK");
@@ -472,6 +481,7 @@ describe("the report view shows what went wrong, not just what worked", () => {
       violations: [],
       notices: [],
       unknownFiles: [],
+    unprovenOmissions: [],
     });
     modal.open();
 

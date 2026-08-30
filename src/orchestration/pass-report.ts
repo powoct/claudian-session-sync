@@ -132,6 +132,23 @@ export interface PassReport {
   readonly notices: readonly string[];
   /** Replica files no adapter claimed; §8.2 says list them and leave them. */
   readonly unknownFiles: readonly UnknownFileEntry[];
+  /**
+   * Local member names that do not travel and whose absence nobody measured.
+   *
+   * Distinct from `unknownFiles`, which is about the *sync folder* and about
+   * artifacts some other tool left there. This is about the CLI's own
+   * directory, and about a question only this plugin can answer: what is it
+   * choosing not to carry, on evidence it does not have.
+   */
+  readonly unprovenOmissions: readonly UnprovenOmissionEntry[];
+}
+
+export interface UnprovenOmissionEntry {
+  readonly providerId: string;
+  /** A bare member name (a trailing `/` marks a directory), never a path. */
+  readonly name: string;
+  /** How many of this provider's sessions hold it. */
+  readonly sessions: number;
 }
 
 /**

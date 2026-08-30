@@ -25,6 +25,7 @@ import { describeConflict } from "../../src/ui/conflict-modal";
 import { RuntimeHarness } from "../helpers/runtime-harness";
 
 const SID = "01a02f27-c1aa-7aa1-9580-e4188952ef3b";
+const OTHER_SID = "01a02f3c-9d1b-7c44-8e02-6a5f0c93de71";
 
 // Each case drives at least one `settle()` — three real passes over a real
 // filesystem — so they carry explicit timeouts rather than vitest's 5 s
@@ -431,6 +432,73 @@ describe("backups of a provider whose file names repeat across sessions", () => 
       "restoring another session's backup must not touch this session",
     ).toBe(untouched);
   }, 60_000);
+});
+
+describe("what stays on this machine, and whether anyone measured it", () => {
+  it("names only the members whose absence nobody checked", async () => {
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 2 });
+    await a.settle();
+
+    const omissions = a.runtime.lastPassReport()?.unprovenOmissions ?? [];
+    const names = omissions.map((o) => o.name);
+
+    // `signals.json` is in the fixture and its removal was never tested
+    // (2026-08-24 residual 3), so it is named.
+    expect(names).toContain("signals.json");
+    // These four were each moved away on both platforms and the session stayed
+    // listed and resumed intact, so naming them would be noise, not news.
+    for (const measured of [
+      "prompt_context.json",
+      "system_prompt.txt",
+      "events.jsonl",
+      "title_refresh_idx",
+    ]) {
+      expect(names, `${measured} has removal evidence`).not.toContain(measured);
+    }
+    // Locks are flock handles, measured at zero bytes in every snapshot.
+    expect(names.filter((n) => n.endsWith(".lock"))).toEqual([]);
+    // And nothing that actually travels.
+    for (const carried of ["chat_history.jsonl", "updates.jsonl", "summary.json"]) {
+      expect(names).not.toContain(carried);
+    }
+  }, 30_000);
+
+  it("names the directory /compact moves the conversation into", async () => {
+    // The case this exists for. `compaction/` was already in the 2026-08-24
+    // census and its exclusion was a recorded decision, so a "names we have
+    // never seen" detector would have said nothing while 36,811 B of
+    // conversation stopped travelling. The evidential line catches it.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 2 });
+    await fsp.mkdir(path.join(path.dirname(a.grokPath(SID, "summary.json")), "compaction"), {
+      recursive: true,
+    });
+    await fsp.writeFile(
+      path.join(path.dirname(a.grokPath(SID, "summary.json")), "compaction", "segment_000.md"),
+      "# compacted away\n",
+    );
+    await a.settle();
+
+    const names = (a.runtime.lastPassReport()?.unprovenOmissions ?? []).map((o) => o.name);
+    expect(names, "a directory is named by its own name, not walked").toContain("compaction/");
+  }, 30_000);
+
+  it("counts a name once per provider, however many sessions hold it", async () => {
+    // Twenty sessions all holding `signals.json` is one fact about the
+    // provider, not twenty lines about sessions.
+    const a = await withGrok();
+    await a.writeGrokSession(SID, { turns: 2 });
+    await a.writeGrokSession(OTHER_SID, { turns: 2 });
+    await a.settle();
+
+    const signals = (a.runtime.lastPassReport()?.unprovenOmissions ?? []).filter(
+      (o) => o.name === "signals.json",
+    );
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.sessions).toBe(2);
+    expect(signals[0]?.providerId).toBe("grok");
+  }, 30_000);
 });
 
 describe("a rewind, which shortens the history on purpose (OQ-14)", () => {

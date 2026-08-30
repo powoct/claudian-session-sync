@@ -9,7 +9,7 @@ storage on your disk). Currently in **beta**, distributed via
 [BRAT](https://github.com/TfTHacker/obsidian42-brat).
 
 > **Not affiliated with Claudian.** This is an independent companion plugin for users of
-> the Claudian plugin (fork: YishenTu/claudian). It is not made by, endorsed by, or part
+> the Claudian plugin (YishenTu/claudian). It is not made by, endorsed by, or part
 > of that project.
 
 ## What it does

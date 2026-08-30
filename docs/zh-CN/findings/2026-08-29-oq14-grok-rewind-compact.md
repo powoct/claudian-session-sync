@@ -162,7 +162,7 @@ rewind → `quiet` → `prefix-check --file <拷贝> --bytes <rewind后size> --e
 | 3 | **`append-jsonl` 的 `PULL_OVERWRITE` 也要出提示** | 现在门控在 `opaque-file`,历史被替换是完全静默的 |
 | 4 | 改 Grok adapter 头注释与 §6 表里「严格追加」的说法 | 对 `chat_history.jsonl` 与 `rewind_points.jsonl` 已被证伪(限 rewind/compact;正常使用期间 P6 的结论仍成立) |
 | 5 | 补一个「一侧变短但仍是另一侧前缀」的决策表用例 | 现有用例覆盖了截断末行、不稳定、零字节、发散,唯独没有这一类 |
-| 6 | 记 compact 的 `compaction*` 不同步 + 用户无从知晓 | 第三节;是否要带它们是独立决策,倾向先不动白名单(ADR-33/45 的 fail-closed) |
+| 6 | ~~记 compact 的 `compaction*` 不同步 + 用户无从知晓~~ **已做(2026-08-30,ADR-62)**:报告新增「Stays on this machine」,点名留在本机且**没有实测证据说缺了没事**的成员。判据是证据不是新旧——`compaction*` 早在普查里就有,按「没见过」筛根本筛不出来 | 第三节;是否要带它们是独立决策,倾向先不动白名单(ADR-33/45 的 fail-closed) |
 
 ## 五、探测套件本轮暴露的问题(已修)
 
