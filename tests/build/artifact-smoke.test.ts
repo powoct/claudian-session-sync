@@ -283,8 +283,35 @@ function instantiate(app = makeStubApp({ basePath: sandboxVault })): StubPlugin 
 }
 
 /** Lets queued microtasks and 0 ms timers run, as the host's event loop would. */
+/**
+ * Waits until the bundle has stopped touching the filesystem.
+ *
+ * A fixed sleep here was a guess about how fast the machine is, and on the
+ * two-core Windows runner it guessed wrong: `onload()` defers `start()` to a
+ * timer, and on a slow box that work outlived the 20 ms drain, landed inside
+ * the *next* test's recording window, and was attributed to it. That is the
+ * failure this file already warns about two lines above — "work still in
+ * flight would otherwise land inside the next test".
+ *
+ * So it polls instead of guessing, which is the rule `waitUntil` below already
+ * states in its own comment. Recording is switched on for the drain because
+ * the recorder is the only thing that can see the activity being drained;
+ * `afterEach` clears the log immediately afterwards, so nothing observed here
+ * reaches an assertion.
+ */
 async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const wasRecording = recording;
+  recording = true;
+  try {
+    const deadline = Date.now() + 2000;
+    let previous = -1;
+    while (Date.now() < deadline && fsCalls.length !== previous) {
+      previous = fsCalls.length;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    recording = wasRecording;
+  }
 }
 
 /** Polls until `predicate` holds, so a slow disk does not become a flake. */
@@ -428,7 +455,14 @@ describe("onload does not block Obsidian startup (§12.2c)", () => {
       const patchedFs = requireFromHere("fs") as typeof realFs;
       await patchedFs.promises.readFile(BUNDLE);
     });
-    expect(fsCalls.map((call) => call.method)).toEqual(["promises.readFile"]);
+    // `toContain`, not `toEqual`, and only here. This canary asks one thing —
+    // is the proxy installed on the `fs.promises` path — and the answer is
+    // whether our read shows up. An exact match would additionally assert that
+    // nothing else in the process touched the filesystem across an `await`,
+    // which this test neither controls nor is about; the sibling canary above
+    // can keep its exact match because `existsSync` is synchronous and leaves
+    // no window to interleave in.
+    expect(fsCalls.map((call) => call.method)).toContain("promises.readFile");
   });
 
   it("defers its first pass to layout-ready rather than running it inline", async () => {
