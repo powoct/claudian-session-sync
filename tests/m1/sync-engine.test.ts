@@ -410,6 +410,50 @@ describe("S-05: an externally rewritten file is re-observed before it is trusted
   });
 });
 
+describe("the quiet window, which nothing wired had ever exercised", () => {
+  it("makes a replaced file wait again, however plausible its bytes look", async () => {
+    // Every other test in this file runs with the window at zero, which is
+    // right for them — they are about what a pass decides, not about waiting.
+    // The cost was that §9.1's other half, "have *we* watched it hold still",
+    // had no wired test at all: judgeStability's unit tests cover the rule, and
+    // nothing covered the engine keeping the ledger the rule reads.
+    //
+    // The shape that matters is a sync tool landing a file by rename. The bytes
+    // are whole and identical, so content proves nothing about whether the
+    // delivery is finished; only having watched it does.
+    const QUIET = 30_000;
+    const w = newWorld();
+    const a = w.machine("A");
+
+    await a.cli.session(SID).append(6);
+    await a.pass({ localQuietMs: QUIET });
+    w.advanceClockAll(QUIET + 1_000);
+    await a.pass({ localQuietMs: QUIET });
+
+    const target = a.cli.session(SID).filePath;
+    const bytes = await fsp.readFile(target);
+    await fsp.writeFile(`${target}.tmp`, bytes);
+    await fsp.rename(`${target}.tmp`, target);
+
+    const noticed = await a.pass({ localQuietMs: QUIET });
+    expect(noticed.actions.map((x) => x.reason)).toEqual(["side-unstable"]);
+
+    // A second later it is still waiting: the window restarted at the
+    // replacement, not at the first sighting.
+    w.advanceClockAll(1_000);
+    const stillWaiting = await a.pass({ localQuietMs: QUIET });
+    expect(
+      stillWaiting.actions.map((x) => x.evidence?.stability),
+      "the window did not restart when the file was replaced",
+    ).toEqual(["quiet-window-not-elapsed / stable"]);
+
+    // And once it has held still for the window, it is actionable again.
+    w.advanceClockAll(QUIET);
+    const settled = await a.pass({ localQuietMs: QUIET });
+    expect(settled.actions.map((x) => x.reason)).toEqual(["content-identical"]);
+  });
+});
+
 describe("S-06: the transport is slow", () => {
   it("does nothing at all until the file actually arrives", async () => {
     const w = newWorld();

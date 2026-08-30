@@ -49,7 +49,21 @@ const BOUNDS = {
   // wants headroom over the largest *ordinary* one, not a tight fit.
   maxFileSizeMB: { min: 1, max: 512, fallback: 64 },
   maxFilesPerPass: { min: 1, max: 5000, fallback: 200 },
-  localQuietMs: { min: 0, max: 600_000, fallback: 3_000 },
+  // 15 s, measured, not chosen (OQ-16). Two 100 ms-resolution samplings of a
+  // single Grok turn were re-read for this: merging every non-lock file in the
+  // session — which is exactly the composite the group witness of ADR-58
+  // watches — the whole session held *entirely* still for 3.3 s in one run and
+  // 8.2 s in the other, mid-turn, with the model still emitting. At 3 s the
+  // window called that settled twice in one turn. 15 s clears both with room.
+  //
+  // Not a guarantee, and §9.1.5 already says so: a plateau is as long as the
+  // model takes to think, and two runs is two runs. What the number buys is
+  // that the *measured* plateaus no longer fit inside it.
+  //
+  // It costs almost nothing. At the default 5-minute interval the window never
+  // binds — the next pass is 300 s later either way. It binds on "Sync now"
+  // pressed within 15 s of a turn, and deferring there is the intended answer.
+  localQuietMs: { min: 0, max: 600_000, fallback: 15_000 },
   remoteQuietMs: { min: 0, max: 600_000, fallback: 8_000 },
   clockSkewToleranceMs: { min: 0, max: 24 * 60 * 60 * 1000, fallback: 5_000 },
   scrubMaxAgeHours: { min: 1, max: 30 * 24, fallback: 24 },

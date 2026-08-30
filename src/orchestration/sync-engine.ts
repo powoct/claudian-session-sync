@@ -1326,16 +1326,26 @@ function recordLedger(
 ): void {
   if (!observation.stat) return;
   const previous = side === "local" ? deps.ledger.local(neutralRel) : deps.ledger.remote(neutralRel);
-  const unchanged =
-    previous !== null &&
-    previous.sig.size === observation.stat.size &&
-    previous.sig.tailHash === observation.stat.tailHash &&
-    previous.sig.mtimeMs === observation.stat.mtimeMs;
+  // `signaturesEqual`, not a subset of it (OQ-21). This used to compare size,
+  // tailHash and mtime — three of the five components the stability gate
+  // compares — so a replacement that kept the content and the timestamp, which
+  // is exactly the shape of an atomic rename, was *changed* to one and
+  // *unchanged* to the other. The ledger then kept the old first-sighting and
+  // the next pass credited the file with a quiet window it never waited out.
+  // Two definitions of "the same file" in one module is a bug whichever one is
+  // right.
+  const unchanged = previous !== null && signaturesEqual(previous.sig, observation.stat);
 
+  // The same clamp §9.1.2 applies, for the same reason and now in the place
+  // that persists. `judgeStability` restarts a first-sighting that sits in the
+  // future — "a bounded wait, not a permanent defer" — but its verdict was
+  // recomputed here rather than used, so the future value was written straight
+  // back and the correction never survived the pass that made it.
+  const carried = unchanged ? previous.firstSeenMs : nowMs;
   const streak = previous?.truncatedTailPasses ?? 0;
   deps.ledger.record(neutralRel, side, {
     sig: observation.stat,
-    firstSeenMs: unchanged ? previous.firstSeenMs : nowMs,
+    firstSeenMs: carried > nowMs + deps.settings.clockSkewToleranceMs ? nowMs : carried,
     // Consecutive, so a single good pass clears it — the flag is about a file
     // that stays broken, not one that was caught mid-write once.
     truncatedTailPasses: truncated === null ? streak : truncated ? streak + 1 : 0,
