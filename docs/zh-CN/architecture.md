@@ -882,7 +882,7 @@ flowchart LR
 |---|---|---|
 | P0 preflight | workspace 身份校验（§5.2.3）；sync-dir 可 stat 可写；读 `root.json` 跑就绪状态机（§9.6）；`formatVersion` / `schemaVersion` 分档；四 root 重叠检测（§9.7.5）；清理 > 1 h 的 `*.aiss-tmp-*` 与 `.aiss-stage-*`；读 pending journal；取本地锁 | 整个 pass 中止或降级只读，状态栏红点，**零改动** |
 | P1 discover | 对每个启用且 healthCheck 通过的 adapter 调 `listSessions()`；每个候选取 **O1 快照**（E0） | 单 provider 失败不影响其他 |
-| P2 stability-gate | 等 `probeDelayMs` 后取 **O2 快照**，与 O1 及 ledger 比对 → `stable/unstable`；unstable 直接 `DEFER`，**不进入 P3**（不读字节、不算 hash） | 纯计算 + stat |
+| P2 stability-gate | 取 **O2 快照**，与 ledger 比对并看静默窗口 → `stable/unstable`；unstable 直接 `DEFER`，**不进入 P3**（不读字节、不算 hash）。轮内第二次观察已废除（ADR-63） | 纯计算 + stat |
 | P3 index | 对 stable 候选按 §5.3.2 授权矩阵决定 E1 复用还是 E2 实读；E2 读完取 **O3 快照**复查。**两侧同时 E1 命中且 `contentHash` 相等时，本文件不调用 `plan()`，直接产出 `NOOP`**——EV-1 由此变成控制流事实而非纪律：缓存 hash 唯一能到达的分支本身不产生任何写 | 单文件读失败 → `FAILED_IO`，不影响其他 |
 | P4 plan | 优先级短路 + 决策表（§7.2 / §7.2b）→ Action，每个携带两侧 `precondition` 快照；按 group 合成 | 纯函数，不会失败 |
 | P5 guard | `maxFileSizeMB`、`logicalIdPattern` 白名单、外部产物过滤、`maxFilesPerPass` / scrub 预算 + 轮转游标（§12.2）；**group 内任一 required 文件被拦下 → 整个 group DEFER** | 被过滤项记入报告 |
@@ -1226,13 +1226,13 @@ sig(file) = sha256( size ‖ mtimeMs ‖ ctimeMs ‖ ino ‖ sha256(末 min(size
 #### 9.1.2 本机侧
 
 ```
-localStable(f) := sig(O1) == sig(O2)                            // 同一 pass 内两次观察，间隔 probeDelayMs
+localStable(f) := true                                          // 轮内二次观察已废除（ADR-63）；下面两行才是判据
               AND ledger.local[f].sig == sig(O2)                 // 与上一次 pass 一致
               AND nowLocal - ledger.local[f].firstSeenMs >= localQuietMs
               AND NOT futureMtime(f)
 ```
 
-`futureMtime(f) := f.mtimeMs > nowLocal + clockSkewToleranceMs`。命中时**不**直接判 unstable（否则永久 DEFER），而是从签名中剔除 mtime 分量、只用 `(size, ctime, ino, tailHash)` 继续走 ledger 路径，报告标 `futureMtime`。默认：`probeDelayMs = 1200`、`localQuietMs = 20000`、`clockSkewToleranceMs = 5000`。
+`futureMtime(f) := f.mtimeMs > nowLocal + clockSkewToleranceMs`。命中时**不**直接判 unstable（否则永久 DEFER），而是从签名中剔除 mtime 分量、只用 `(size, ctime, ino, tailHash)` 继续走 ledger 路径，报告标 `futureMtime`。默认（**以代码为准**，2026-08-30 核对）：`localQuietMs = 3000`、`remoteQuietMs = 8000`、`clockSkewToleranceMs = 5000`。`probeDelayMs` 已随 ADR-63 移除。
 
 #### 9.1.3 sync-dir 侧
 
@@ -1255,7 +1255,7 @@ remoteStable(f) := sig(O1) == sig(O2)
 | 观察点 | 时刻 | 复查什么 | 不一致时 |
 |---|---|---|---|
 | **O1** | P1 discover | 首次 stat，建立签名 | —（建立候选） |
-| **O2** | P2（O1 后 `probeDelayMs`） | 重新 stat，与 O1 及 ledger 比 | `DEFER`，**不进 P3**（不读字节） |
+| **O2** | P2 | stat 一次，与 ledger 比并看静默窗口 | `DEFER`，**不进 P3**（不读字节） |
 | **O3** | P3，E2 读完后 | `fstat(fd)` + `stat(path)`，`ino` 必须相同且都 == O2 | 丢弃本次 hash，`DEFER` |
 | **O4** | P6，备份完成后 | `stat(target)` == O3，且备份文件 hash == O3 的 `contentHash` | `ABORTED_PRECONDITION`，不写 |
 | **O5** | P6，rename 前"最后一眼" | `stat(path)` 与 `fstat(fd)` 的 `ino` 一致，且都 == O4 | `ABORTED_PRECONDITION`，删 tmp |
@@ -1746,12 +1746,13 @@ interface PortableSettings {
   workspaceIdFile: string;             // 默认 ".claudian-session-sync/workspace.json"
   providers: Partial<Record<ProviderId, { enabled: boolean }>>;
   auto: { onStartup: boolean; intervalMinutes: number };          // true / 5；intervalMinutes = 0 表示关闭定时
-  stability: {
-    probeDelayMs: number;              // 1200
-    localQuietMs: number;              // 20000
-    remoteQuietMs: number;             // 45000
-    clockSkewToleranceMs: number;      // 5000
-  };
+  // ⚠️ 这一段（含下面的 scrub/readiness/backup/limits）描述的是**启动期草案的嵌套形状**，
+  // 与实现不符：`PortableSettings` 是**扁平**的，且 readiness/retryBudget/starvationPasses
+  // 等根本不是用户设置。以 `src/domain/settings.ts` 为准。2026-08-30 只订正了本节涉及的三个值。
+  localQuietMs: number;                // 3000
+  remoteQuietMs: number;               // 8000
+  clockSkewToleranceMs: number;        // 5000
+  // probeDelayMs 已移除（ADR-63）
   scrub: { maxAgeHours: number; budgetFiles: number; budgetMB: number; samplePerPass: number };
                                        // 24 / 50 / 256 / 20
   readiness: {
@@ -1928,7 +1929,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 
 | 场景 | 目标 |
 |---|---|
-| 1000 文件、无变更、无 scrub | < 2 s 的 **CPU/IO 时间**（不含 `probeDelayMs` 的 1.2 s 探测间隔；口径为 2000 次 stat + 1000 次 ≤4 KiB tail 读） |
+| 1000 文件、无变更、无 scrub | < 2 s 的 **CPU/IO 时间**（口径为 1000 次 stat + 1000 次 ≤4 KiB tail 读；ADR-63 废除轮内二次观察后，stat 次数减半，探测间隔也不再存在） |
 | 1000 文件 + 抽样 scrub 20 个（p95 1 MB） | < 3 s |
 | 100 个文件有变更 | < 5 s |
 | 全量 scrub（1000 × 1 MB） | < 15 s，UI 不卡（分批让出） |
@@ -2044,6 +2045,7 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | 60 | **孤立 aux 清理走命令 + 弹窗,候选由 adapter 的 `listIncompleteSessions()` 提供**,删除前先备份;四条判据缺一不可 | (a) 在通用代码里走 provider 根目录 ／ (b) 复用 `listSessions` ／ (c) 自动清理 ／ (d) 只提示不提供删除 | (c) 被 §6.6 明文禁掉,理由不变:孤立 aux 与**正在新建的会话**形状相同,自动删就是自动毁对话。(b) 走不通——`listSessions` **刻意**丢弃没有 primary 的组(引擎不能组装它),而清理要的正是这些;强行让它返回则引擎每轮都会多出一批 DEFER 行。(a) 是最容易写的也是最危险的:在通用代码里走目录,迟早会把 CLI 自己写的、本插件无权碰的文件列进删除候选——**什么算成员是 provider 的白名单**(§8.2)。所以加一个**可选**方法,布局知识留在 provider 里,单文件 provider 不实现即可。(d) 不够:§6.6 承诺的是清理,而这些文件因为缺提交点**在 CLI 里根本看不见**,用户无法自己判断,所以弹窗把「打开文件夹」放在删除旁边。四条判据里第 3 条(sync 目录也没有提交点)防的是跟一次注定发生的修复赛跑,第 4 条(安静 10 分钟)防的是删掉正在进行的对话;**删除前备份**则是把 I1 套到唯一一个以销毁为目的的命令上——四条各有一个会红的注入 |
 | 61 | **一侧跌破收敛基点时不许快进,改判 `CONFLICT`**(§7.2 #9a);同时补齐两条早已写进规范却没实现的:**收敛基点对 append-jsonl 也记**(§7.2b 原文「含 append-jsonl 表的」)、**group 内有成员冲突时其余成员不许写**(§7.1 P5);以及 §9.1.6「M1 必做」的 `PULL_OVERWRITE` 提示扩到全部合并模式 | (a) 用账本 `sig.size` 判「比上次观察短」 ／ (b) 改判 `DEFER` ／ (c) 不动决策,只加提示 ／ (d) 只在 group 层否决方向相反的写 | **(a) 是死码**:`size` 在 `signaturesEqual` 里,文件一变短就判 `changed-since-last-pass` ⇒ 该轮 `DEFER / side-unstable` 并把 `sig` 刷成新的短值;等下一轮能走到 #9 时 `local.stable` 已蕴含 `ledger.sig.size === local.size`,「变短过」必然消失。信号必须活过那一轮 ⇒ 只能挂在**不随每次观察移动**的收敛基点上。(b) 永不收敛:rewind 后的文件不会自己长回去,`local < base <= remote` 每轮都成立 ⇒ 永久 `DEFER`,而 `summarise()` 只数落地与失败 ⇒ 状态栏每 5 分钟报一次「已是最新」,通知只进报告弹窗——用户永远不会知道。`CONFLICT` 才是本项目唯一「可见、可解决、两侧都留底」的终态,§7.2b 也早就把「基点缺失 ⇒ 判 CONFLICT」写成可接受的退化。(c) 违背 §5.5「只慢不错」:插件做错了事(撤销用户的 rewind)再告诉用户,而此处**已经握有**可用判据。(d) 单独不成立:它只在 `summary.json` 恰好同轮推送时才触发,换一台新机器、换 Claude Code / Codex 就漏——但它是必要的**补充**,否则历史判冲突的同一轮里 primary 仍会把 rewind 后的记录推出去,产生两机都没有过的混合态。**谓词三个合取项都不是装饰**:`side < base` 说它退回去了;`base <= other` 说基点仍在会赢的那侧之内(这才让「跌破了对方仍持有的点」成立,也把被手改坏的基点限制成空操作而非永久冲突);`side > 0` 保住「零字节侧永不产生 CONFLICT」。传进 planner 的是**两个布尔量**而不是基点数值——一个叫 `convergedSize` 的数摆在 `PlanInput` 里,离 `if (local.size > convergedSize) PUSH_OVERWRITE` 只有一次疏忽,那正是 EV-1 要禁的;叫否决名字的布尔量不会被那样读。只收窄不放宽,基点缺失即退回原行为(fail-open 到「慢」,不是到「错」)。四条各有一个会红的注入 |
 | 62 | **报告里点名「留在本机、且没人测过缺了会怎样」的成员**(`SessionGroup.unprovenOmissions` → `PassReport.unprovenOmissions` → 报告面板「Stays on this machine」)。判据是**有没有实测证据**,不是「见没见过」 | (a) 报「白名单没见过的名字」 ／ (b) 什么都不做,只在 findings 里记一笔 ／ (c) 弹 Notice 而不是进报告 ／ (d) 递归走进子目录,逐个文件点名 | **(a) 抓不到催生它的那个案子**:`compaction*` 早在 2026-08-24 的真实库普查里就有,它不进白名单是**记录在案的刻意决定**(findings 残留 6)——novelty 检测器会全程沉默,而 `/compact` 已经把 36,811 B 正文搬了进去。漏掉的是推理不是检测,所以判据必须换成**证据**:只有 6b.5 逐个移走实测过的四个(`prompt_context.json`/`system_prompt.txt`/`events.jsonl`/`title_refresh_idx`)与实测恒 0 字节的 `*.lock` 保持沉默,其余一律点名。副作用是这份名单**会随着实测推进而变短**,这正是想要的激励。(b) 等于承认「用户无从知道」是可接受的,而 §6.6.1 的整个白名单机制本就建立在「说清楚」上。(c) 每轮 pass 都弹同样一条就是噪音;报告是拉取式的,看的时候才出现,和既有的 `unknownFiles`(replica 侧)同构。(d) 目录名才是可操作的粒度——走进 `compaction/` 只会把一行诚实的话变成几行,而里面每个文件的去留是同一个决定。**只报不动**:§8.2 白名单仍然决定搬什么,ADR-34 仍然禁止碰其余的。计数按 (provider, name) 去重,二十个会话都有 `signals.json` 是关于 provider 的一个事实,不是二十行。四条各有一个会红的注入 |
+| 63 | **废除轮内第二次观察**:`StabilityInput.o1`、`changed-within-pass` 判定、`probeDelayMs` 设置、`P2:o1-taken` 钩子一并移除;稳定性只由「与上一轮 ledger 比」+「静默窗口」判定,读期间的完整性由引擎既有的 O2/O3 校验负责 | (a) 按规范实装(全扫 O1 → 睡一次 → 全扫 O2) ／ (b) 逐文件 sleep ／ (c) 留着旋钮只修注释 | **这道检查从未生效过**:`probeDelayMs` 一路传进 `EngineDeps` 却**从头到尾没有一处读它**,两次 `lstat` 是背靠背的,所以 `changed-within-pass` 只在「文件改了又改回完全相同的签名」时才可能触发。**而且实装了也不值**——三路独立反驳(本地 CLI 交错逐 tick、远端同步工具含原子 rename 换 ino/ctime 与云占位符注水、插件自身怪路径)**都没能找出 O1/O2 独有的保护**:落在第二次 stat 之前的变化已进 O2,被 `changed-since-last-pass` 抓;落在读字节期间的变化被 O2/O3 抓。(a) 的代价是每轮多一次全量 stat 扫描加一次固定停顿,换来的覆盖为零。(b) 更糟,百会话就是 40 秒一轮。(c) 是把一个什么都不做的旋钮留在 `data.json` 里骗人。**旁证**:group 见证那条路径本来就传 `{o1: activity, o2: activity}`——同一个值,该检查在那里结构性地是死的,而它是唯一被实测驱动(ADR-58)加进来的稳定性路径。ADR-58 早已否决过「靠固定窗口对付流式写入」:平台期长度由模型出字速度决定、没有上界。**代价与补偿**:删掉后 `readStillValid`(O2/O3)成了唯一的轮内防线,而它**当时没有任何测试**——全套 978 个用例在禁用它之后仍然全绿。本 ADR 一并补上该用例(在 `P2:o2-taken` 注入本地追加),并借此发现禁用它的真实后果不是「读到旧字节」而是**凭空制造一次 `CONFLICT`**(旧 stat 配新字节 ⇒ `divergent-content`)。用户设置里的 `probeDelayMs` 因 `pickUnknown` 会被原样保留,不做迁移、不毁值 |
 
 ---
 
@@ -2082,7 +2084,10 @@ Band 间严格优先。**band 内固定按 `neutralRel` 字典序排列**，`obs
 | **OQ-17** | **Grok 的 `chat_history.jsonl` 在一条消息流式生成期间是否就地改写** | ✅ **已测(2026-08-27)+ 已修(2026-08-30,按 group 判活跃度,§9.1)** | 开发机 100 ms 高频采样实测([findings](./findings/2026-08-27-oq17-grok-streaming.md)):**流式期间就地重写,首个差异偏移在文件中部**(14306 B 的文件里偏移 5919),**且被改的是已完成的行**——§7.4.1 的「末尾无换行」机制覆盖不到。`updates.jsonl` 与 `events.jsonl` 全程严格追加(后者单轮采到 96 个版本、零违反)。**真正的问题是时间线**:`chat_history.jsonl` 在一次 turn 中途静止了 **23 秒**,而同期 `events.jsonl` 走了约 90 个版本 ⇒ 默认 `localQuietMs=3000` 会判它稳定并推走中间态,turn 结束后落定的版本不是它的延伸 ⇒ CONFLICT。**F-5 的成因至此闭合,且与「两台机器」无关。** ⇒ **待改:稳定性判定按 group 的 `max(mtime)` 算,不按单文件**(§9.1);安全性无缺口(判 CONFLICT、两分支入隔离、可一键解决) |
 | **OQ-18** | **Tier R 的收敛基点在「推送被同步工具丢弃」时会指向错误的历史** | 🟡 **部分关闭(ADR-57)**:留得下冲突副本的传输已挡住;留不下的仍无兜底 | 断网期间跑过 pass ⇒ 本机把自己的推送记成收敛基点;同步工具随后保留了对端版本、把本机版本改成冲突副本 ⇒ 本机看到「local == base、remote 变了」⇒ 按 §7.2b #4b **快进覆盖**而不是判 CONFLICT。claudian(2026-08-29 C7-v1)与 Grok(2026-08-26 F-3)各复现一次,**是所有 Tier R provider 的共性**。**而且这是现实路径**——`autoIntervalMinutes` 默认 5 分钟,真实用户断网期间一定会跑 pass。字节不丢(备份区 + 同步工具的冲突副本各一份)但用户不会想到去看。**已证明「仅凭内容 + 本机 ledger」无解**(ADR-57 的 E1/E2 构造:两条执行留下完全相同的字节与观察历史,而正确动作不同),所以修法必须引入新的数据来源。已实装的是**同步工具自己留下的证据**:在 #4b 形状下,若 replica 里有个兄弟文件装着**本机当前的字节**,那就是同步工具把本机这一份搁置了 ⇒ 改判 CONFLICT。**剩余缺口**:留不下副本的传输方式仍会静默覆盖(只有备份 + 一句汇总提示);长期解是 §5.1 里发布 **lineage 记录**(每机一份 append-only 的 `(rel, parent, head)`),它与传输无关,但要两台都升级才生效。见 [findings](./findings/2026-08-29-claudian-acceptance.md) 与 ADR-57 |
 | **OQ-19** | **一台机器同时管理两个 vault 时 binding 选错** | ✅ **已修(2026-08-30,ADR-59)** | `WorkspaceBinding` 增加 `vaultPath`,选 binding 时按**当前打开的 vault** 匹配。护栏没有被放宽,反而更准了:身份比对的对象从「本机随便哪个 workspace」变成「**这个 vault 的那个 binding**」,所以身份文件被替换仍然 fail closed(有测试钉着),而打开第二个 vault 不再被误判成异常。旧 binding 没有这个字段,首次打开它自己的 vault 时补盖;**补盖完成前**保持旧行为(即仍可能选错),这是刻意的——未打戳的 binding 有可能就是本 vault 的,此时「没有 binding 认领本 vault」还不能读成「这是个新 vault」|
-| **OQ-20** | **`probeDelayMs` 配了但从未生效** | ⛔ **已确认,待修** | 设置里有、一路传进引擎、§9.1 注释写着「两次观察间隔 probeDelayMs」,而观测路径里**没有任何 sleep**:两次 `lstat` 背靠背。⇒「轮内再观察」这道防线不存在,`changed-within-pass` 几乎永不触发。**不影响 OQ-17**(400ms 看不穿 23 秒的平台期),但一个什么都不做的旋钮比没有更糟。修法要把「逐文件睡」改成「全扫 o1 → 睡一次 → 全扫 o2」,否则百会话就是 40 秒一轮 |
+| **OQ-21** | **`recordLedger` 的「未变」判断与 `signaturesEqual` 不一致** | ⛔ 已确认,待修 | 它只比 `size`/`tailHash`/`mtimeMs` 三项(sync-engine.ts:1330 一带),而 `judgeStability` 比五项(多 `ctimeMs`/`ino`);且逐文件调用点传 `nowMs` 而不是 `verdict.firstSeenMs`(group 见证那处传对了)。后果:一个被 `judgeStability` 判成 `changed-since-last-pass` 的变化,可能在账本里被记成「没变」而保留旧的 `firstSeenMs` ⇒ 静默窗口不重启。2026-08-30 由 OQ-20 的反驳轮附带发现 |
+| **OQ-22** | **§9.1.3 的 `PULL_NEW` 快速通道是死的** | ⛔ 已确认,待修或删 | `sync-engine.ts` 里 `pullNewFastPath: false` 是硬编码的,`allowsPullNewFastPath()` 在生产代码里零调用者(只有测试在调)。所以「对端新会话不必等满静默窗口就落地」这条承诺目前不存在。要么接上,要么按 ADR-63 的先例废除并改规范。同上,附带发现 |
+| **OQ-23** | **无 inode 文件系统上 E0 签名退化** | ⏳ 未测 | `observe` 把 `st.ino ?? 0`,所以 exFAT/FAT32(U 盘、手机同步目录)或部分 SMB 上签名退化成 `(size, mtime, tailHash)`,原子 rename 替换就测不出来了。而「指定本地同步目录」正当地包含这些盘。**`ctimeMs` 在那些盘上是否也退化没有实测**,所以本条只记不判。测法:在 exFAT 卷上对一个文件做 rename 替换,前后各 `lstat` 一次 |
+| **OQ-20** | **`probeDelayMs` 配了但从未生效** | ✅ **已关闭(2026-08-30,ADR-63):废除,不是实装** | 设置里有、一路传进引擎、§9.1 注释写着「两次观察间隔 probeDelayMs」,而观测路径里**没有任何 sleep**:两次 `lstat` 背靠背。⇒「轮内再观察」这道防线不存在,`changed-within-pass` 几乎永不触发。**不影响 OQ-17**(400ms 看不穿 23 秒的平台期),但一个什么都不做的旋钮比没有更糟。原以为要实装,实测后改为**废除**:三路独立反驳都找不出 O1/O2 独有的保护(前面的变化已进 O2 被 ledger 抓,读期间的变化被 O2/O3 抓),而 group 见证那条路径本来就传同一个值两次。见 ADR-63。**连带发现**:`readStillValid`(O2/O3)当时零测试覆盖,已补,且禁用它的后果是凭空造一次 `CONFLICT` |
 | **OQ-16** | **Grok 的稳定窗口实测值** | ⏳ 未测(不阻塞) | 两次静置都发生在无活跃写入者时;唯一尾部观测是 Windows 孤儿进程的 165.9 秒,且它在 resume 写过 `summary.json` **之后**又重写了一遍——一轮 pass 可能抓到 CLI 随后丢弃的 primary。缓解手段是既有的覆盖前备份 + 下一轮再收敛 |
 | **OQ-11** | **Codex 会话如何归属到本 vault 的 workspace**（`~/.codex/sessions/` 是全局目录，没有按项目分区） | ✅ **已决（ADR-46）** | 用 vault 内 Claudian 的会话记录做归属源——它在 vault 里，所以"属于这个 vault"是它的构造性质，不需要读 rollout 内容也不需要猜 `cwd`。已实现并有回归（`tests/m1/codex-adapter.test.ts`）。**遗留**：真机确认 `.claudian/sessions/` 的实际文件名与字段在你的版本上与样本一致（探测套件 P3） |
 | **OQ-13** | **Codex compact 是否 append-only** | ✅ **PASS**(2026-08-13 人工 TUI 补测) | `/compact` 使 rollout +4654B **严格前缀追加**(103093→107747B,0 违规)——compacted 历史以新条目落盘,与 Claude Code 的 compact 同构。Codex 发布阻塞解除 |

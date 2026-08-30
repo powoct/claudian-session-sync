@@ -31,7 +31,6 @@ const sig = (overrides: Partial<E0Signature> = {}): E0Signature => ({
 const judge = (overrides: Partial<Parameters<typeof judgeStability>[0]> = {}) => {
   const base = sig();
   return judgeStability({
-    o1: base,
     o2: base,
     ledger: { sig: base, firstSeenMs: NOW - QUIET_MS - 1 },
     nowMs: NOW,
@@ -65,13 +64,6 @@ describe("judgeStability — not settled yet", () => {
     expect(verdict.firstSeenMs).toBe(NOW - 1_000);
   });
 
-  it("defers and restarts the clock when it changed during the pass", () => {
-    const verdict = judge({ o2: sig({ size: 8192, tailHash: "bbbb" }) });
-    expect(verdict.stable).toBe(false);
-    expect(verdict.reason).toBe("changed-within-pass");
-    expect(verdict.firstSeenMs).toBe(NOW);
-  });
-
   it("defers and restarts the clock when it changed since the previous pass", () => {
     const verdict = judge({ ledger: { sig: sig({ size: 1 }), firstSeenMs: NOW - 999_999 } });
     expect(verdict.stable).toBe(false);
@@ -94,7 +86,6 @@ describe("judgeStability — clocks (§9.1.2)", () => {
     // Dropping the mtime component keeps the other four working.
     const future = sig({ mtimeMs: NOW + 3_600_000 });
     const verdict = judge({
-      o1: future,
       o2: future,
       ledger: { sig: future, firstSeenMs: NOW - QUIET_MS - 1 },
     });
@@ -106,7 +97,6 @@ describe("judgeStability — clocks (§9.1.2)", () => {
   it("tolerates a small clock skew without flagging it", () => {
     const slightlyAhead = sig({ mtimeMs: NOW + SKEW_MS - 1 });
     const verdict = judge({
-      o1: slightlyAhead,
       o2: slightlyAhead,
       ledger: { sig: slightlyAhead, firstSeenMs: NOW - QUIET_MS - 1 },
     });
@@ -115,9 +105,12 @@ describe("judgeStability — clocks (§9.1.2)", () => {
 
   it("still detects a real change while ignoring a future mtime", () => {
     const future = sig({ mtimeMs: NOW + 3_600_000 });
-    const verdict = judge({ o1: future, o2: { ...future, size: 9999 } });
+    const verdict = judge({
+      ledger: { sig: future, firstSeenMs: NOW - QUIET_MS - 1 },
+      o2: { ...future, size: 9999 },
+    });
     expect(verdict.stable).toBe(false);
-    expect(verdict.reason).toBe("changed-within-pass");
+    expect(verdict.reason).toBe("changed-since-last-pass");
   });
 
   it("recovers from the clock stepping backwards instead of waiting forever", () => {
@@ -132,19 +125,29 @@ describe("judgeStability — clocks (§9.1.2)", () => {
 });
 
 describe("judgeStability — coarse and lying timestamps", () => {
+  /**
+   * Each component, asserted against the previous pass rather than against a
+   * second observation inside this one (ADR-63 removed the latter). The claim
+   * is unchanged and is the load-bearing one: every component of the signature
+   * is doing work, and dropping any of them would let a real change read as
+   * "nothing happened".
+   */
+  const changedSince = (before: ReturnType<typeof sig>, after: ReturnType<typeof sig>) =>
+    judge({ ledger: { sig: before, firstSeenMs: NOW - QUIET_MS - 1 }, o2: after }).reason;
+
   it("notices an append that shares an mtime, via size", () => {
     // FAT/exFAT have 2-second granularity: two appends inside one tick carry
     // the same mtime and only size or the trailing bytes give it away.
     const before = sig({ size: 100, tailHash: "aaaa" });
     const after = sig({ size: 200, tailHash: "aaaa" });
     expect(signaturesEqual(before, after)).toBe(false);
-    expect(judge({ o1: before, o2: after }).reason).toBe("changed-within-pass");
+    expect(changedSince(before, after)).toBe("changed-since-last-pass");
   });
 
   it("notices a rewrite that shares an mtime and a size, via the tail hash", () => {
     const before = sig({ size: 100, tailHash: "aaaa" });
     const after = sig({ size: 100, tailHash: "bbbb" });
-    expect(judge({ o1: before, o2: after }).reason).toBe("changed-within-pass");
+    expect(changedSince(before, after)).toBe("changed-since-last-pass");
   });
 
   it("treats a bare touch as a change, conservatively", () => {
@@ -152,17 +155,15 @@ describe("judgeStability — coarse and lying timestamps", () => {
     // costs a deferred pass.
     const before = sig({ mtimeMs: NOW - 60_000 });
     const after = sig({ mtimeMs: NOW - 30_000 });
-    expect(judge({ o1: before, o2: after }).reason).toBe("changed-within-pass");
+    expect(changedSince(before, after)).toBe("changed-since-last-pass");
   });
 
   it("notices a replaced file that kept its size and timestamps, via the inode", () => {
-    expect(judge({ o1: sig({ ino: 1 }), o2: sig({ ino: 2 }) }).reason).toBe("changed-within-pass");
+    expect(changedSince(sig({ ino: 1 }), sig({ ino: 2 }))).toBe("changed-since-last-pass");
   });
 
   it("notices a metadata-only change, via ctime", () => {
-    expect(judge({ o1: sig({ ctimeMs: 1 }), o2: sig({ ctimeMs: 2 }) }).reason).toBe(
-      "changed-within-pass",
-    );
+    expect(changedSince(sig({ ctimeMs: 1 }), sig({ ctimeMs: 2 }))).toBe("changed-since-last-pass");
   });
 });
 

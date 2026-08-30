@@ -164,7 +164,6 @@ export interface BackupRequest {
 export interface EngineSettings {
   readonly maxFileSizeBytes: number;
   readonly maxFilesPerPass: number;
-  readonly probeDelayMs: number;
   readonly localQuietMs: number;
   readonly remoteQuietMs: number;
   readonly clockSkewToleranceMs: number;
@@ -387,7 +386,6 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const activity = await observeGroupActivity(deps, group);
       const key = `${adapter.id}/${group.logicalId}`;
       const verdict = judgeStability({
-        o1: activity,
         o2: activity,
         ledger: deps.ledger.local(key),
         nowMs: deps.clock.nowMs(),
@@ -462,19 +460,23 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel);
 
       // ── P2 stability gate ────────────────────────────────────────────────
-      // Before any bytes: two stats separated by probeDelayMs, compared with
-      // each other and with the previous pass. An unstable file never reaches
-      // P3, so it never costs a read.
-      const localO1 = await observe(deps, localPath);
-      const remoteO1 = await observe(deps, remotePath);
-      await barrier("P2:o1-taken", { neutralRel: file.neutralRel });
+      // Before any bytes: one stat per side, compared with what the previous
+      // pass recorded and with how long that has been true. An unstable file
+      // never reaches P3, so it never costs a read.
+      //
+      // One stat, not two (ADR-63). The second observation and its
+      // `changed-within-pass` verdict are gone: the delay that was meant to
+      // separate them was never implemented, and implementing it would not
+      // have earned it. A change that lands before this stat is in it, and the
+      // ledger comparison catches it; a change that lands during the byte read
+      // is caught by O2/O3 below.
       const localO2 = await observe(deps, localPath);
       const remoteO2 = await observe(deps, remotePath);
       await barrier("P2:o2-taken", { neutralRel: file.neutralRel });
 
       const nowMs = deps.clock.nowMs();
-      const localStable = judgeSide(deps, localO1, localO2, deps.ledger.local(file.neutralRel), nowMs, "local");
-      const remoteStable = judgeSide(deps, remoteO1, remoteO2, deps.ledger.remote(file.neutralRel), nowMs, "remote");
+      const localStable = judgeSide(deps, localO2, deps.ledger.local(file.neutralRel), nowMs, "local");
+      const remoteStable = judgeSide(deps, remoteO2, deps.ledger.remote(file.neutralRel), nowMs, "remote");
 
       // ── P3 index ─────────────────────────────────────────────────────────
       // What has to be read here is decided by the authorisation matrix
@@ -1224,15 +1226,13 @@ function byteLevel(bytes: Uint8Array | null): string {
 
 function judgeSide(
   deps: EngineDeps,
-  o1: SideObservation,
   o2: SideObservation,
   ledger: LedgerEntryView | null,
   nowMs: number,
   side: "local" | "remote",
 ): { stable: boolean; reason?: string } {
-  if (!o1.stat || !o2.stat) return { stable: !o2.exists, reason: "absent" };
+  if (!o2.stat) return { stable: !o2.exists, reason: "absent" };
   const verdict = judgeStability({
-    o1: o1.stat,
     o2: o2.stat,
     ledger: ledger ? { sig: ledger.sig, firstSeenMs: ledger.firstSeenMs } : null,
     nowMs,

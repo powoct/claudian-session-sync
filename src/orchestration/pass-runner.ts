@@ -81,7 +81,6 @@ export interface ProviderRuntime {
 export interface PassSettings {
   readonly maxFileSizeBytes: number;
   readonly maxFilesPerPass: number;
-  readonly probeDelayMs: number;
   readonly localQuietMs: number;
   readonly remoteQuietMs: number;
   readonly clockSkewToleranceMs: number;

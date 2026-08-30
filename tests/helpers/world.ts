@@ -426,7 +426,6 @@ export class Machine {
       settings: {
         maxFileSizeBytes: 20 * 1024 * 1024,
         maxFilesPerPass: 200,
-        probeDelayMs: 0,
         localQuietMs: 0,
         remoteQuietMs: 0,
         clockSkewToleranceMs: 5000,
@@ -586,7 +585,6 @@ export class Machine {
       settings: {
         maxFileSizeBytes: 20 * 1024 * 1024,
         maxFilesPerPass: 200,
-        probeDelayMs: 0,
         localQuietMs: 0,
         remoteQuietMs: 0,
         clockSkewToleranceMs: 5000,
