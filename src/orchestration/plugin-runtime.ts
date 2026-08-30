@@ -716,7 +716,6 @@ export class PluginRuntime {
         settings: {
           maxFileSizeBytes: this.settings.maxFileSizeMB * 1024 * 1024,
           maxFilesPerPass: this.settings.maxFilesPerPass,
-          probeDelayMs: this.settings.probeDelayMs,
           localQuietMs: this.settings.localQuietMs,
           remoteQuietMs: this.settings.remoteQuietMs,
           clockSkewToleranceMs: this.settings.clockSkewToleranceMs,

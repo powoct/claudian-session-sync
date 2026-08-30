@@ -187,6 +187,50 @@ describe("R-01: the file changes between observation and use", () => {
     // never a third thing assembled from a stale read.
     expect([pushed, localNow]).toContain(nowRemote);
   });
+
+  it("refuses to decide on a stat and a body that disagree (O2/O3)", async () => {
+    // The read-integrity check, pinned. It was not: disabling
+    // `readStillValid` left all 978 tests green, and the sibling above cannot
+    // see it — appending at `P3:bytes-read` leaves the bytes already read
+    // equal to what was pushed last time, so a stale push is indistinguishable
+    // from a correct one.
+    //
+    // The window that shows it is between the stat and the read. Append at
+    // `P2:o2-taken` and the engine holds O2's signature for an 8-turn file
+    // while its hands hold an 11-turn body; O3 is what notices, and the side
+    // is marked unstable rather than planned on the mismatched pair.
+    //
+    // This matters more since ADR-63: the intra-pass O1/O2 comparison is gone,
+    // and the argument for removing it was that this check covers the read.
+    // An untested cover is not one.
+    const w = newWorld();
+    const a = w.machine("A");
+
+    await a.cli.session(SID).append(8);
+    await settle(a);
+
+    // A peer's version, written straight into the replica so the two sides
+    // differ and the pass has to read both. Then a pass to let the remote
+    // ledger catch up and its quiet window elapse — without that the pass
+    // defers on the remote before it ever reaches a read, and the test would
+    // pass for a reason that has nothing to do with O2/O3.
+    await fsp.appendFile(replicaFile(a), '{"uuid":"peer","type":"user"}\n');
+    await a.pass();
+    a.advanceClock(95_000);
+
+    const report = await a.pass({
+      barrier: async (point) => {
+        if (point === "P2:o2-taken") await a.cli.session(SID).append(3);
+      },
+    });
+
+    const mine = report.actions.filter((entry) => entry.neutralRel?.includes(SID));
+    expect(mine.length, "the pass must have considered the file").toBeGreaterThan(0);
+    for (const entry of mine) {
+      expect(entry.action, `${entry.reason}`).toBe("DEFER");
+      expect(entry.reason).toBe("side-unstable");
+    }
+  });
 });
 
 describe("crash recovery is independent of how far the pass got", () => {

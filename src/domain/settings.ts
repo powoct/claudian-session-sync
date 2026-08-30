@@ -24,8 +24,6 @@ export interface PortableSettings {
   readonly backupKeep: number;
   readonly maxFileSizeMB: number;
   readonly maxFilesPerPass: number;
-  /** Gap between the two stability observations of one pass (§9.1). */
-  readonly probeDelayMs: number;
   readonly localQuietMs: number;
   readonly remoteQuietMs: number;
   readonly clockSkewToleranceMs: number;
@@ -51,7 +49,6 @@ const BOUNDS = {
   // wants headroom over the largest *ordinary* one, not a tight fit.
   maxFileSizeMB: { min: 1, max: 512, fallback: 64 },
   maxFilesPerPass: { min: 1, max: 5000, fallback: 200 },
-  probeDelayMs: { min: 0, max: 60_000, fallback: 400 },
   localQuietMs: { min: 0, max: 600_000, fallback: 3_000 },
   remoteQuietMs: { min: 0, max: 600_000, fallback: 8_000 },
   clockSkewToleranceMs: { min: 0, max: 24 * 60 * 60 * 1000, fallback: 5_000 },
@@ -64,7 +61,6 @@ export const DEFAULT_SETTINGS: PortableSettings = {
   backupKeep: BOUNDS.backupKeep.fallback,
   maxFileSizeMB: BOUNDS.maxFileSizeMB.fallback,
   maxFilesPerPass: BOUNDS.maxFilesPerPass.fallback,
-  probeDelayMs: BOUNDS.probeDelayMs.fallback,
   localQuietMs: BOUNDS.localQuietMs.fallback,
   remoteQuietMs: BOUNDS.remoteQuietMs.fallback,
   clockSkewToleranceMs: BOUNDS.clockSkewToleranceMs.fallback,
@@ -98,7 +94,6 @@ export function parseSettings(raw: unknown): {
       backupKeep: num("backupKeep"),
       maxFileSizeMB: num("maxFileSizeMB"),
       maxFilesPerPass: num("maxFilesPerPass"),
-      probeDelayMs: num("probeDelayMs"),
       localQuietMs: num("localQuietMs"),
       remoteQuietMs: num("remoteQuietMs"),
       clockSkewToleranceMs: num("clockSkewToleranceMs"),

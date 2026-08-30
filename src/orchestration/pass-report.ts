@@ -163,7 +163,6 @@ export interface UnprovenOmissionEntry {
 export type HookPoint =
   | "P0:preflight-done"
   | "P1:discover-done"
-  | "P2:o1-taken"
   | "P2:o2-taken"
   | "P3:bytes-read"
   | "P3:o3-taken"
