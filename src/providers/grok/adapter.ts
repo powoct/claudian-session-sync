@@ -69,6 +69,29 @@ const MEMBERS: ReadonlyMap<string, { readonly role: "primary" | "aux"; readonly 
     ["rewind_points.jsonl", { role: "aux" as const, mode: "append-jsonl" as const }],
   ]);
 
+/**
+ * Members whose absence on the other machine has **measured** backing.
+ *
+ * 2026-08-24, both platforms, one file moved away at a time (§6b.5): the CLI
+ * rebuilt `prompt_context.json`, `system_prompt.txt` (byte-identical) and
+ * `events.jsonl`, and `title_refresh_idx` turned out to carry no ordering
+ * information at all — the session stayed listed and resumed intact without
+ * each of them. `*.lock` files were measured at zero bytes in every snapshot
+ * on both machines; they are flock handles, not content.
+ *
+ * Everything else a session directory holds is named in the report instead.
+ * Not because it is suspicious — most of it is machine-local state — but
+ * because nobody has checked, and `compaction/` is what that costs: its
+ * exclusion was a deliberate, recorded decision, and it still took a probe to
+ * notice that `/compact` had moved the conversation into it.
+ */
+const ABSENCE_MEASURED = new Set([
+  "prompt_context.json",
+  "system_prompt.txt",
+  "events.jsonl",
+  "title_refresh_idx",
+]);
+
 export interface GrokAdapterDeps {
   /** `<GROK_HOME>/sessions` or `~/.grok/sessions`, already realpath'd. */
   readonly providerRoot: string;
@@ -155,10 +178,19 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
         const sessionDir = deps.joinPath(projectDir, entry.name);
         const files: SessionFileRef[] = [];
         const witnessPaths: string[] = [];
+        const unprovenOmissions: string[] = [];
         let lastModifiedMs = 0;
 
         for (const member of await deps.listDir(sessionDir).catch(() => [])) {
-          if (!member.isFile) continue;
+          if (!member.isFile) {
+            // A directory is named and not descended into. `compaction/` holds
+            // the conversation `/compact` moved out of `chat_history.jsonl`
+            // (36,811 B of it, measured), so the name is the part worth
+            // reporting; walking inside would only turn one honest line into
+            // several, and none of it travels either way.
+            unprovenOmissions.push(`${member.name}/`);
+            continue;
+          }
           // Everything the CLI writes counts as a sign of life, whether or not
           // it travels — `events.jsonl` is the most sensitive of them (roughly
           // ten writes a second during a turn) and is deliberately not synced,
@@ -169,7 +201,12 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
             witnessPaths.push(deps.joinPath(sessionDir, member.name));
           }
           const known = MEMBERS.get(member.name);
-          if (known === undefined) continue;
+          if (known === undefined) {
+            if (!member.name.endsWith(".lock") && !ABSENCE_MEASURED.has(member.name)) {
+              unprovenOmissions.push(member.name);
+            }
+            continue;
+          }
 
           const absPath = deps.joinPath(sessionDir, member.name);
           const stat = await deps.statFile(absPath);
@@ -192,7 +229,13 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
         // pushing its history without its commit point would put a session in
         // the sync folder that no machine can ever show.
         if (!files.some((file) => file.role === "primary")) continue;
-        groups.push({ logicalId: entry.name as LogicalId, files, lastModifiedMs, witnessPaths });
+        groups.push({
+          logicalId: entry.name as LogicalId,
+          files,
+          lastModifiedMs,
+          witnessPaths,
+          unprovenOmissions,
+        });
       }
       return groups;
     },

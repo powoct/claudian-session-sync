@@ -8,7 +8,7 @@
 
 一个 **desktop-only** 的 Obsidian 插件，在多台电脑（含 Mac ↔ Windows 跨平台）之间同步 AI agent CLI 的对话 session 原始文件（jsonl 等），使用户能在另一台机器上 resume 同一 session 继续对话。
 
-命名（2026-08-11 定）：**Claudian Session Sync**。适配范围以 Claudian（fork: YishenTu/claudian）支持的 agent CLI 为准（Claude Code、Codex、Grok、OpenCode、Pi），**不额外适配、不保证兼容其它 agent CLI**；README 需写明本插件与 Claudian 无隶属关系（除非其作者另行接纳），且同步对象**默认不含** vault 内 `.claudian/sessions`（见下"与 Claudian 的界限"）。
+命名（2026-08-11 定）：**Claudian Session Sync**。适配范围以 Claudian（YishenTu/claudian）支持的 agent CLI 为准（Claude Code、Codex、Grok、OpenCode、Pi），**不额外适配、不保证兼容其它 agent CLI**；README 需写明本插件与 Claudian 无隶属关系（除非其作者另行接纳），且同步对象**默认不含** vault 内 `.claudian/sessions`（见下"与 Claudian 的界限"）。
 
 一句话：**把 agent CLI 的 session 存储在多机之间做"带语义的搬运工"**——不理解对话内容，只理解 session 文件的追加式结构和机器相关的落位规则。
 
@@ -23,7 +23,7 @@
 
 ## 支持的 provider
 
-用户使用 Claudian 插件（fork: YishenTu/claudian），它支持多个 agent CLI。各 provider 的存储结构、Tier 归属与当前状态**见架构文档 §6**，本文只记一条不变的要求：
+用户使用 Claudian 插件（YishenTu/claudian），它支持多个 agent CLI。各 provider 的存储结构、Tier 归属与当前状态**见架构文档 §6**，本文只记一条不变的要求：
 
 > provider 抽象成接口 + 配置驱动的路径映射，每个 provider 一个 adapter；用户可在设置里启用/禁用单个 provider，也可手动覆盖路径（应对版本变化和非标准安装）。**Tier 归属必须有实测证据，未验证一律只读。**
 

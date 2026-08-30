@@ -70,6 +70,33 @@ export class ReportModal extends Modal {
       }
     }
 
+    if (report.unprovenOmissions.length > 0) {
+      // Deliberately not "Files left alone" — that heading is about the sync
+      // folder and about somebody else's artifacts. This is the CLI's own
+      // directory, and the honest thing to say is not "we ignored these" but
+      // "these stay here, and we cannot tell you it is safe".
+      contentEl.createEl("h3", { text: "Stays on this machine" });
+      contentEl.createEl("p", {
+        text:
+          "These sit inside sessions that are syncing, but they are not carried — and " +
+          "unlike the rest, nobody has measured what the other machine loses without them. " +
+          "Named so you can ask, not because anything is wrong.",
+      });
+      const list = contentEl.createEl("ul");
+      for (const omission of report.unprovenOmissions.slice(0, MAX_UNKNOWN_SHOWN)) {
+        list.createEl("li", {
+          text: `${omission.name} (${omission.providerId}) — in ${omission.sessions} session${
+            omission.sessions === 1 ? "" : "s"
+          }`,
+        });
+      }
+      if (report.unprovenOmissions.length > MAX_UNKNOWN_SHOWN) {
+        list.createEl("li", {
+          text: `…and ${report.unprovenOmissions.length - MAX_UNKNOWN_SHOWN} more.`,
+        });
+      }
+    }
+
     if (report.actions.length === 0) {
       contentEl.createEl("p", { text: "No files were considered." });
       return;

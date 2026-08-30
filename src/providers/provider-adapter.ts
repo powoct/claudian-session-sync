@@ -56,6 +56,24 @@ export interface SessionGroup {
    * for every provider whose session is one file.
    */
   readonly witnessPaths?: readonly string[];
+  /**
+   * Member names this session holds that do **not** travel, and whose absence
+   * on the other machine has never been measured.
+   *
+   * Not "names we do not recognise" — that line would have been useless here.
+   * `compaction/` was in the 2026-08-24 census and its exclusion was a recorded
+   * decision, so a novelty detector would have stayed quiet while `/compact`
+   * moved 37 KB of conversation into a file that does not travel (OQ-14). The
+   * line that catches it is evidential: a member is silent only when someone
+   * measured that the CLI rebuilds it, or that its absence changes nothing.
+   * Everything else is named, because "we never checked" is exactly what the
+   * user is entitled to know before wondering where their history went.
+   *
+   * The list therefore shrinks as measurements land, which is the incentive it
+   * is meant to create. Reported, never acted on: §8.2's whitelist still
+   * decides what is carried, and ADR-34 still forbids touching the rest.
+   */
+  readonly unprovenOmissions?: readonly string[];
 }
 
 /**

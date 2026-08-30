@@ -229,6 +229,10 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const actions: ActionEntry[] = [];
   const violations: ViolationEntry[] = [];
   const unknownFiles: UnknownFileEntry[] = [];
+  // Counted per (provider, name) rather than per session: twenty Grok sessions
+  // all holding `signals.json` is one fact about the provider, not twenty
+  // lines about sessions.
+  const omissionCounts = new Map<string, number>();
   /** Providers whose backup retention did not bind this pass (§9.3.3). */
   const rotationDeferredFor = new Set<string>();
   /**
@@ -362,6 +366,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // reachable by `--resume <id>`, with the id arriving separately through
     // the vault's Claudian record. Whole-group deferral keeps that window at
     // the few milliseconds one pass needs.
+    for (const name of group.unprovenOmissions ?? []) {
+      const key = `${adapter.id}\u0000${name}`;
+      omissionCounts.set(key, (omissionCounts.get(key) ?? 0) + 1);
+    }
+
     const planned = orderedForCommit(group);
 
     // §9.1 / OQ-17: is this session being written *right now*? Asked of the
@@ -883,6 +892,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       violations,
       notices,
       unknownFiles,
+      unprovenOmissions: [...omissionCounts]
+        .map(([key, sessions]) => {
+          const [providerId, name] = key.split("\u0000") as [string, string];
+          return { providerId, name, sessions };
+        })
+        .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name)),
     };
   }
 

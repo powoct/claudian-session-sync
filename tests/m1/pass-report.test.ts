@@ -44,6 +44,15 @@ const ALLOWED_KEYS = new Set([
   "violations",
   "notices",
   "unknownFiles",
+  "unprovenOmissions",
+  // UnprovenOmissionEntry — `providerId` is shared with ActionEntry below.
+  // `name` is a bare member name from the provider's own fixed vocabulary
+  // (`signals.json`, `compaction/`), never a path and never derived from
+  // anything the user typed; `sessions` is a count. A provider that named a
+  // file after a conversation title would break that, which is the reason this
+  // list is maintained by hand.
+  "name",
+  "sessions",
   // ActionEntry
   "providerId",
   "logicalIdPrefix",
