@@ -67,6 +67,17 @@ export interface WiredPassOptions {
   readonly firstPassAfterStartup?: boolean;
   readonly verifyAll?: boolean;
   readonly readiness?: ReadinessThresholds;
+  /**
+   * The quiet window, which every other test wants at zero.
+   *
+   * Zero is right for the decision-table tests — they are about what a pass
+   * does with settled files, and making each of them wait would only add
+   * clock-advancing noise. But it also meant nothing here could exercise the
+   * window itself, so §9.1's "watched it hold still" half had no wired test at
+   * all until OQ-21 needed one.
+   */
+  readonly localQuietMs?: number;
+  readonly remoteQuietMs?: number;
 }
 
 export const WORKSPACE_ID = "3f1a9c2e-6b47-4d18-9a03-5e7c8d21b4f6";
@@ -268,6 +279,8 @@ export class Machine {
       withLock?: boolean;
       /** Registered alongside the Claude Code adapter, for multi-provider tests. */
       extraAdapters?: readonly ProviderAdapter[];
+      localQuietMs?: number;
+      remoteQuietMs?: number;
     } = {},
   ): Promise<PassReport> {
     // Load, run, write back — the real shape of a pass, and the reason this is
@@ -426,8 +439,8 @@ export class Machine {
       settings: {
         maxFileSizeBytes: 20 * 1024 * 1024,
         maxFilesPerPass: 200,
-        localQuietMs: 0,
-        remoteQuietMs: 0,
+        localQuietMs: options.localQuietMs ?? 0,
+        remoteQuietMs: options.remoteQuietMs ?? 0,
         clockSkewToleranceMs: 5000,
         backupKeep: options.backupKeep ?? 3,
       },
@@ -569,6 +582,8 @@ export class Machine {
     dryRun?: boolean;
     barrier?: Barrier;
     extraAdapters?: readonly ProviderAdapter[];
+    localQuietMs?: number;
+    remoteQuietMs?: number;
   }): EngineDeps {
     const fs = countingGateway(this.nodeGateway(), this.io);
     const adapter = this.adapter();
@@ -585,8 +600,12 @@ export class Machine {
       settings: {
         maxFileSizeBytes: 20 * 1024 * 1024,
         maxFilesPerPass: 200,
-        localQuietMs: 0,
-        remoteQuietMs: 0,
+        // Zero unless a test asks otherwise: these are decision-table tests,
+        // and making each one wait out a window would add clock-advancing
+        // noise to every case that is not about waiting. The cost was that
+        // §9.1's "watched it hold still" half had no wired test at all.
+        localQuietMs: options.localQuietMs ?? 0,
+        remoteQuietMs: options.remoteQuietMs ?? 0,
         clockSkewToleranceMs: 5000,
       },
       remoteReadiness: "ready",
