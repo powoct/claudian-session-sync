@@ -99,6 +99,16 @@ On each machine:
   `.claudian/sessions/` inside the vault. Those records travel with your **vault's**
   sync, not with this plugin — see the next section.
 
+> **There is a setting for this.** *Show this device's conversations on your other devices*
+> (off by default) publishes a copy of each of this machine's conversation records to the
+> layer every device reads, so they appear in Claudian's list on the other machine. Two
+> things to know before turning it on. The copy stops being updated as soon as the other
+> machine edits it, so a rename made there stays there and does not come back — the
+> conversation itself is unaffected, it lives in the CLI's session file. And on the other
+> machine the conversation shows an **Assign to this device** button: pressing it hides the
+> conversation on the machine that created it, which is upstream's fence doing its job and
+> not something this plugin can undo.
+>
 > **Claudian 2.2.5 and later: the conversation may not be *listed* on the other machine,
 > even though resuming works.** From 2.2.5 each new conversation's record is filed under
 > the device that created it (`.claudian/sessions/devices/device-<hash>/`), and Claudian's
