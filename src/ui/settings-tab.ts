@@ -169,20 +169,22 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
 
   private renderProviders(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Show this device's conversations on your other devices")
+      .setName("Share this device's conversations with your other devices")
       .setDesc(
         "Claudian 2.2.5 files each new conversation under the device that made it, and a " +
           "device only reads its own folder — so a conversation started here is missing from " +
-          "the other machine's list even after its session file has synced. This publishes a " +
-          "copy where every device can see it. Two things to know: the copy is made once and " +
-          "kept up to date only while the other machine has not edited it, so a rename made " +
-          "there stays there and does not come back here; and on the other machine the " +
-          "conversation offers an “Assign to this device” button — pressing it hides the " +
-          "conversation on this one. Off by default.",
+          "the other machine's list even after its session file has synced. This moves the " +
+          "record into the layer every device reads, so all of them list it and all of them " +
+          "write to the same one. Three things to know. It moves the record rather than " +
+          "copying it, so there is one of it and no version to diverge. Turning this back off " +
+          "stops further moves but does not bring back what has already been shared. And a " +
+          "shared conversation carries any folders it had been given access to, as absolute " +
+          "paths — on the other machine those paths may mean something else. Off by default, " +
+          "and set per machine.",
       )
       .addToggle((toggle) =>
-        toggle.setValue(this.runtime.currentSettings().mirrorConversations).onChange(async (value) => {
-          await this.runtime.updateSettings({ mirrorConversations: value });
+        toggle.setValue(this.runtime.sharesConversations()).onChange(async (value) => {
+          await this.runtime.setShareConversations(value);
         }),
       );
 
