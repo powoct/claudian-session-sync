@@ -45,8 +45,6 @@ export type PlanFlag =
   | "truncatedTail"
   /** Same, and it has stayed that way long enough that a human should see it. */
   | "malformedTail"
-  /** A new remote session landed without waiting out the quiet window (§9.1.3). */
-  | "pullNewFastPath"
   /** A side has dropped below the last convergence this machine witnessed. */
   | "shrankBelowConverged";
 
@@ -152,8 +150,6 @@ export interface PlanInput {
   /** A deterministic quarantine directory for this exact pair already exists. */
   readonly conflictKnown: boolean;
   readonly maxFileSizeBytes: number;
-  /** All §9.1.3 conditions met; the only route to a write from unstable input. */
-  readonly pullNewFastPath: boolean;
   readonly hints: DeferOnlyHints;
   readonly history: LocalHistory;
 }
@@ -197,25 +193,23 @@ export function plan(input: PlanInput): PlanResult {
     return result("SKIP_PLACEHOLDER", "cloud-placeholder", flags);
   }
 
-  // 5 — stability, with exactly one exception in the whole system.
+  // 5 — stability, with no exceptions (ADR-70).
   //
-  // The fast path is normalised away whenever its own precondition does not
-  // hold, rather than trusted as passed: a caller that sets it alongside an
-  // existing local file is contradicting itself, and the safe reading of a
-  // contradiction is the conservative one.
-  const fastPath = input.pullNewFastPath && !local.exists && remote.exists;
-  if (!fastPath) {
-    const truncated = tailIsTruncated(local) || tailIsTruncated(remote);
-    if (truncated) {
-      flags.push("truncatedTail");
-      if (history.truncatedTailPasses >= MALFORMED_TAIL_PASSES) flags.push("malformedTail");
-      return result("DEFER", "tail-not-parseable", flags);
-    }
-    if ((local.exists && !local.stable) || (remote.exists && !remote.stable)) {
-      return result("DEFER", "side-unstable", flags);
-    }
-  } else {
-    flags.push("pullNewFastPath");
+  // §9.1.3 used to carve one out: a brand-new remote session could be pulled
+  // without waiting out the quiet window, on the grounds that creating a file
+  // risks nothing this machine already had. It was never wired up, and it is
+  // not being wired up — the condition that carried it was an intra-pass second
+  // observation, which ADR-63 retired, and the signal left over (every JSONL
+  // line parses) is blind to the one thing it had to catch: a half-landed
+  // append-only file parses perfectly, because a prefix of it is a valid file.
+  const truncated = tailIsTruncated(local) || tailIsTruncated(remote);
+  if (truncated) {
+    flags.push("truncatedTail");
+    if (history.truncatedTailPasses >= MALFORMED_TAIL_PASSES) flags.push("malformedTail");
+    return result("DEFER", "tail-not-parseable", flags);
+  }
+  if ((local.exists && !local.stable) || (remote.exists && !remote.stable)) {
+    return result("DEFER", "side-unstable", flags);
   }
 
   // Zero-byte normalisation, before any relation is trusted.

@@ -562,7 +562,7 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 
 | 项 | 性质 | 说明 |
 |---|---|---|
-| **OQ-22** `PULL_NEW` 快速通道是死码 | ⛔ 待修或删 | `pullNewFastPath: false` 硬编码，`allowsPullNewFastPath()` 生产代码零调用者。§9.1.3 承诺的「对端新会话不必等满静默窗口」目前不成立——**要么实现，要么把承诺从文档里删掉**，两者都行，含糊不行 |
+| ~~**OQ-22** `PULL_NEW` 快速通道是死码~~ | ✅ **关闭（2026-09-01，ADR-70）：删掉了** | 接上它的第一步是复活 ADR-63 刚废掉的轮内第二次观察；剩下的 `fullyParsed` 对 append-only 文件结构性失明（半落地的前缀就是合法 JSONL）。收益上限一轮自动 pass，代价是可能在用户刚开始用的会话上造一次 CONFLICT。删除**行为等价**——那个标志一直硬编码 `false` |
 | **OQ-23** 无 inode 文件系统 | ⏳ 未测 | exFAT/FAT32（U 盘、手机同步目录）或部分 SMB 上 E0 退化成 `(size, mtime, tailHash)`，原子 rename 替换测不出来。而「指定本地同步目录」正当地包含这些盘 |
 | **OQ-24** `claudian` provider 不认 `devices/` 层 | 🟡 可见性已由 ADR-69 解决 | provider 的**完整复制**仍未做。难点未变：`logicalId` 是备份路径的单个路径段，全长 device key 会撞 Windows 260 上限，而 ADR-54 不许概率性短前缀 |
 | **D8「不该搬的没搬」** | 只有单元测试 | `already shared` / `assigned to a device` / `deleted in the shared layer` 三种 Notice 在 2026-09-01 那轮一条都没触发 |
