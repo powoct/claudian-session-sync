@@ -14,7 +14,26 @@
  * would make a settings typo indistinguishable from a broken install.
  */
 
-export const SETTINGS_SCHEMA_VERSION = 1;
+export const SETTINGS_SCHEMA_VERSION = 2;
+
+/**
+ * Values a previous version wrote as *its* default, and this one measured wrong.
+ *
+ * `data.json` cannot tell "the user chose 3000" from "3000 was our default and
+ * we serialised it", because the plugin writes every field on every save. So a
+ * measured correction to a default reaches nobody who has already run the
+ * plugin — which is every acceptance machine, and every existing user.
+ *
+ * OQ-16 measured that 3000 ms lets a Grok session that is mid-turn read as
+ * settled: merging every non-lock file in the session, the whole thing held
+ * still for 3.3 s in one recorded turn and 8.2 s in another. That is a safety
+ * value, not a preference, so a stored 3000 is carried to 15000 once — and
+ * only from exactly the old default, so anyone who really did pick 3000 by
+ * hand and anyone who picked any other number keeps what they picked.
+ */
+const SUPERSEDED_DEFAULTS: Readonly<Record<string, { readonly was: number; readonly now: number }>> = {
+  localQuietMs: { was: 3_000, now: 15_000 },
+};
 
 export interface PortableSettings {
   readonly schemaVersion: number;
@@ -116,7 +135,7 @@ export function parseSettings(raw: unknown): {
       backupKeep: num("backupKeep"),
       maxFileSizeMB: num("maxFileSizeMB"),
       maxFilesPerPass: num("maxFilesPerPass"),
-      localQuietMs: num("localQuietMs"),
+      localQuietMs: carried("localQuietMs", c),
       remoteQuietMs: num("remoteQuietMs"),
       clockSkewToleranceMs: num("clockSkewToleranceMs"),
       scrubMaxAgeHours: num("scrubMaxAgeHours"),
@@ -138,6 +157,20 @@ export function serialiseSettings(
 /** The bounds, for a settings panel that wants to say why it refused a value. */
 export function boundsFor(key: keyof typeof BOUNDS): { min: number; max: number } {
   return { min: BOUNDS[key].min, max: BOUNDS[key].max };
+}
+
+/**
+ * A bounded number, except where an older schema stored what was then our own
+ * default and is now known to be unsafe (see `SUPERSEDED_DEFAULTS`).
+ */
+function carried(key: keyof typeof BOUNDS, raw: Record<string, unknown>): number {
+  const superseded = SUPERSEDED_DEFAULTS[key];
+  const stored = raw[key];
+  const olderSchema = typeof raw.schemaVersion === "number" && raw.schemaVersion < SETTINGS_SCHEMA_VERSION;
+  if (superseded && olderSchema && stored === superseded.was) {
+    return clamp(superseded.now, BOUNDS[key]);
+  }
+  return clamp(stored, BOUNDS[key]);
 }
 
 function clamp(value: unknown, bound: { min: number; max: number; fallback: number }): number {
