@@ -186,6 +186,27 @@ export class RuntimeHarness {
     await this.runtime.refresh();
   }
 
+  /**
+   * Moves a conversation's record into a device directory, as Claudian 2.2.5
+   * does for every new conversation.
+   *
+   * The `.meta.json` moves; nothing else does — `.inputs.json` is written from
+   * `SESSIONS_PATH` upstream and stays at the top level, which is what split
+   * one conversation's files across two layers and made this worth a fixture.
+   */
+  async scopeRecordToDevice(sessionId: string, deviceKey: string): Promise<void> {
+    const store = path.join(this.vaultRoot, ".claudian", "sessions");
+    const name = `conv-fake-${sessionId}.meta.json`;
+    const deviceDir = path.join(store, "devices", deviceKey);
+    await fsp.mkdir(deviceDir, { recursive: true });
+    await fsp.rename(path.join(store, name), path.join(deviceDir, name));
+  }
+
+  /** A device key of the shape upstream requires: `device-` + 64 hex. */
+  static deviceKey(seed: string): string {
+    return `device-${createHash("sha256").update(seed).digest("hex")}`;
+  }
+
   /** Appends records the way the CLI does — always append, never rewrite. */
   async appendSession(sessionId: string, lines: number): Promise<void> {
     // Admission is by the vault's Claudian records (ADR-47), so creating a

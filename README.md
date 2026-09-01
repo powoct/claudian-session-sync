@@ -99,6 +99,16 @@ On each machine:
   `.claudian/sessions/` inside the vault. Those records travel with your **vault's**
   sync, not with this plugin — see the next section.
 
+> **Claudian 2.2.5 and later: the conversation may not be *listed* on the other machine,
+> even though resuming works.** From 2.2.5 each new conversation's record is filed under
+> the device that created it (`.claudian/sessions/devices/device-<hash>/`), and Claudian's
+> list is device-scoped — a record belonging to another device is not shown. This plugin
+> still carries the session file, so `claude --resume <id>` / `codex resume <id>` work
+> normally; what is missing is the entry in Claudian's sidebar. The **Assign to this
+> device** button does not help here: it promotes a record from the *top level*, not from
+> another device's folder. Moving (or copying) that one `conv-*.meta.json` up to
+> `.claudian/sessions/` makes the conversation listed and assignable again.
+
 ## ⚠️ Keep `.claudian/` in your vault sync
 
 Claudian's conversation list lives in `<vault>/.claudian/`. This plugin deliberately does

@@ -15,6 +15,7 @@ import { DEFAULT_SETTINGS } from "../../src/domain/settings";
 import { RuntimeHarness, sha256 } from "../helpers/runtime-harness";
 
 const SID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+const OTHER_SID = "2b631f15-c463-4c0c-b66e-e6b04835aa8a";
 
 /**
  * The exception `conflict-commands.test.ts` states, applied here too.
@@ -330,6 +331,71 @@ describe("dry run", () => {
     expect(report?.dryRun).toBe(true);
     expect(report?.actions.length).toBeGreaterThan(0);
     expect([...after].sort()).toEqual([...before].sort());
+  }, SLOW);
+});
+
+describe("Claudian 2.2.5 files new conversations under devices/ (2026-09-01)", () => {
+  // Upstream moved every *new* conversation's record from
+  // `.claudian/sessions/<conv>.meta.json` to
+  // `.claudian/sessions/devices/device-<64 hex>/<conv>.meta.json`
+  // (`storagePaths.ts`: DEVICE_SESSIONS_PATH, getDeviceSessionsPath). The
+  // admission scan listed one level and dropped every directory entry, so
+  // those conversations stopped being admitted — and because admission
+  // failures produce no action, the pass said "up to date" while the session
+  // never left the machine. That silence is what made it expensive to find.
+  const DEVICE = RuntimeHarness.deviceKey("mac-mini");
+
+  it("admits a session whose record lives in a device directory", async () => {
+    const h = await makeHarness();
+    await h.appendSession(SID, 4);
+    await h.scopeRecordToDevice(SID, DEVICE);
+    await h.configure();
+    await h.settle();
+
+    const status = await h.runtime.refresh();
+    const landed = path.join(
+      h.syncDir,
+      status.workspaceId as string,
+      "claude-code",
+      `${SID}.jsonl`,
+    );
+    await expect(fsp.stat(landed), "the session never reached the sync folder").resolves.toBeTruthy();
+  }, SLOW);
+
+  it("still admits the legacy records that stayed at the top level", async () => {
+    // 2.2.5 leaves existing conversations where they were — the vault that
+    // found this had 111 of them beside 2 device-scoped ones — so the old
+    // layout is not a migration step to pass through, it is half the store.
+    const h = await makeHarness();
+    await h.appendSession(SID, 4);
+    await h.appendSession(OTHER_SID, 4);
+    await h.scopeRecordToDevice(OTHER_SID, DEVICE);
+    await h.configure();
+    await h.settle();
+
+    const status = await h.runtime.refresh();
+    for (const id of [SID, OTHER_SID]) {
+      const landed = path.join(h.syncDir, status.workspaceId as string, "claude-code", `${id}.jsonl`);
+      await expect(fsp.stat(landed), `${id} did not land`).resolves.toBeTruthy();
+    }
+  }, SLOW);
+
+  it("admits records from another machine's device directory", async () => {
+    // The whole point of the plugin. Upstream's own listing is device-scoped —
+    // `selectSessionMetadataCandidate` returns null when a record belongs to a
+    // different device — but admission here answers a different question: does
+    // this vault know this session id. If it were device-scoped too, a
+    // conversation started on the Mac could never have its bytes carried to
+    // the Windows box, which is the one thing this plugin exists to do.
+    const h = await makeHarness();
+    await h.appendSession(SID, 4);
+    await h.scopeRecordToDevice(SID, RuntimeHarness.deviceKey("some-other-machine"));
+    await h.configure();
+    await h.settle();
+
+    const status = await h.runtime.refresh();
+    const landed = path.join(h.syncDir, status.workspaceId as string, "claude-code", `${SID}.jsonl`);
+    await expect(fsp.stat(landed)).resolves.toBeTruthy();
   }, SLOW);
 });
 

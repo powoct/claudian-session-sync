@@ -90,6 +90,96 @@ describe("admission by Claudian record (claude-code)", () => {
   });
 });
 
+describe("Claudian 2.2.5: records under devices/ (2026-09-01)", () => {
+  const DEVICE = `device-${"a1b2c3d4".repeat(8)}`;
+  const OTHER_DEVICE = `device-${"f9e8d7c6".repeat(8)}`;
+
+  it("admits a conversation whose record moved into a device directory", async () => {
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, DEVICE);
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(report.actions.filter((a) => a.result === "APPLIED").map((a) => a.neutralRel)).toEqual([
+      `claude-code/${SID}.jsonl`,
+    ]);
+  });
+
+  it("ignores a directory that is not a device key", async () => {
+    // §8.2's fail-closed rule reaches in here too: the walk is two levels and
+    // the name must match upstream's own `device-` + 64 hex, so a folder the
+    // user dropped into the store is not a place records are read from.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, "notes-backup");
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(report.actions.filter((a) => a.result === "APPLIED")).toEqual([]);
+  });
+
+  it("pairs a tombstone within its own layer, not across them", async () => {
+    // Upstream's rule, read off `selectSessionMetadataCandidate`: a device
+    // deletion is tested against the device layer and an unscoped deletion
+    // against the flat one. Pairing across layers would let one machine's
+    // delete hide a conversation another machine still holds — and this plugin
+    // does not propagate deletions at all (ADR-10).
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, DEVICE);
+    machine.cli.tombstone(SID, { device: OTHER_DEVICE }); // another device's delete
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(
+      report.actions.filter((a) => a.result === "APPLIED").map((a) => a.neutralRel),
+      "another device's tombstone ended admission",
+    ).toEqual([`claude-code/${SID}.jsonl`]);
+  });
+
+  it("does not let a top-level tombstone bury a device-scoped record", async () => {
+    // `selectSessionMetadataCandidate` returns the device record whenever it
+    // exists and its *own* layer has no deletion — `unscopedDeleted` is only
+    // ever consulted for the flat and legacy paths. So a conversation deleted
+    // back when it lived at the top level, then recreated under a device, is
+    // live upstream, and admission must agree or the session silently stops
+    // syncing again for a different reason.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.tombstone(SID); // top level
+    machine.cli.scopeToDevice(SID, DEVICE); // record moves, tombstone does not
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(
+      report.actions.filter((a) => a.result === "APPLIED").map((a) => a.neutralRel),
+      "a top-level tombstone suppressed a device record",
+    ).toEqual([`claude-code/${SID}.jsonl`]);
+  });
+
+  it("stops admitting when the tombstone is in the same device directory", async () => {
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, DEVICE);
+    machine.cli.tombstone(SID, { device: DEVICE });
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(report.actions.filter((a) => a.result === "APPLIED")).toEqual([]);
+  });
+});
+
 describe("tombstones are matched by name, never parsed", () => {
   it("a torn half-written tombstone still ends admission", async () => {
     // Claudian rewrites these files wholesale, so catching one mid-write is a
