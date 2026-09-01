@@ -45,6 +45,7 @@ import {
   restoreBackup,
 } from "./restore-commands";
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
+import { mirrorOwnConversations } from "./conversation-mirror";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
@@ -69,6 +70,15 @@ export interface RuntimeHost {
   readonly joinPath: (...parts: string[]) => string;
   readonly dirnameOf: (target: string) => string;
   readonly hashBytes: (bytes: Uint8Array) => string;
+  /**
+   * This machine's Claudian installation key, when it can be read (ADR-67).
+   *
+   * Claudian derives it as `device-` + sha256 of a seed it keeps in
+   * `localStorage`, and Obsidian gives every plugin the same renderer — so
+   * this machine can compute its own key without any of it crossing a
+   * machine boundary. Optional, and null whenever Claudian has not run here.
+   */
+  readonly claudianDeviceKey?: () => string | null;
   readonly platform: string;
   readonly hostname: string;
   readonly homedir: string;
@@ -228,6 +238,13 @@ export class PluginRuntime {
 
     this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
+      // Before the pass, and only when asked for (ADR-67). Publishing a record
+      // to the flat layer changes what the *other* machines admit, so doing it
+      // first means this pass already carries the sessions it just made
+      // visible rather than leaving them a pass behind.
+      if (this.settings.mirrorConversations && !(options.dryRun ?? false)) {
+        await this.mirrorConversations();
+      }
       const outcome = await runWorkspacePass({
         ...prepared.deps,
         dryRun: options.dryRun ?? false,
@@ -849,6 +866,37 @@ export class PluginRuntime {
       .loadRemote(workspaceId, binding.syncDirPath)
       .catch(() => null);
     return recorded?.rootId == null || recorded.rootId === root.rootId;
+  }
+
+  /**
+   * Publishes this device's conversation records to the flat layer (ADR-67).
+   *
+   * Failures are swallowed on purpose: this is a convenience laid on top of
+   * another plugin's store, and it must never be the reason a sync pass does
+   * not run. What it cannot do, it does not do.
+   */
+  private async mirrorConversations(): Promise<void> {
+    const binding = this.binding;
+    if (!binding) return;
+    try {
+      const outcome = await mirrorOwnConversations({
+        fs: this.host.fs,
+        guard: await this.pathGuard(),
+        joinPath: this.host.joinPath,
+        hashBytes: (bytes) => this.host.hashBytes(bytes),
+        vaultRealPath: this.host.vaultRoot,
+        deviceKey: this.host.claudianDeviceKey?.() ?? null,
+        written: binding.mirroredConversations ?? {},
+        record: async (written) => {
+          const home = await this.homeStore();
+          await home.saveBinding({ ...binding, mirroredConversations: written });
+          this.binding = { ...binding, mirroredConversations: written };
+        },
+      });
+      void outcome;
+    } catch {
+      // Deliberately quiet — see above.
+    }
   }
 
   private async conflictDeps() {

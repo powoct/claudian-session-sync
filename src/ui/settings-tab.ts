@@ -168,6 +168,24 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
   }
 
   private renderProviders(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Show this device's conversations on your other devices")
+      .setDesc(
+        "Claudian 2.2.5 files each new conversation under the device that made it, and a " +
+          "device only reads its own folder — so a conversation started here is missing from " +
+          "the other machine's list even after its session file has synced. This publishes a " +
+          "copy where every device can see it. Two things to know: the copy is made once and " +
+          "kept up to date only while the other machine has not edited it, so a rename made " +
+          "there stays there and does not come back here; and on the other machine the " +
+          "conversation offers an “Assign to this device” button — pressing it hides the " +
+          "conversation on this one. Off by default.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.runtime.currentSettings().mirrorConversations).onChange(async (value) => {
+          await this.runtime.updateSettings({ mirrorConversations: value });
+        }),
+      );
+
     new Setting(containerEl).setName("Agent CLIs").setHeading();
 
     for (const provider of PROVIDERS) {

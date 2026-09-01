@@ -72,6 +72,16 @@ export interface WorkspaceBinding {
    * migration to a single ordinary pass.
    */
   readonly vaultPath?: string;
+  /**
+   * conversationId → hash of the flat mirror this machine last wrote (ADR-67).
+   *
+   * The converged-base idea of ADR-48, kept locally and for one purpose: it is
+   * the only way to tell a mirror this machine still owns from one the other
+   * machine has since edited. Without it the choice is between never
+   * refreshing a stale title and silently overwriting somebody's rename, and
+   * this project has just spent a release deciding it does not do the second.
+   */
+  readonly mirroredConversations?: Readonly<Record<string, string>>;
 }
 
 export interface ProviderBinding {
@@ -309,8 +319,21 @@ function parseBinding(raw: unknown, expected: WorkspaceId): LoadOutcome<Workspac
       ...(typeof c.vaultPath === "string" && c.vaultPath.length > 0
         ? { vaultPath: c.vaultPath }
         : {}),
+      ...(c.mirroredConversations
+        ? { mirroredConversations: parseMirrored(c.mirroredConversations) }
+        : {}),
     },
   };
+}
+
+/** Strings to strings, and nothing else: a hand-edited file is not a map. */
+function parseMirrored(raw: unknown): Record<string, string> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string" && value.length > 0) out[key] = value;
+  }
+  return out;
 }
 
 function parseProviders(raw: unknown): Record<string, ProviderBinding> {

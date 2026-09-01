@@ -153,6 +153,21 @@ export default class AiSessionSyncPlugin extends Plugin {
       homedir: homedir(),
       vaultRoot: this.vaultRoot(),
       pid: process.pid,
+      // Claudian keeps its installation seed in localStorage, and Obsidian
+      // gives every plugin the same renderer, so this machine can derive its
+      // own key exactly as Claudian does (`utils/env.ts`). Only ever read
+      // here, never written, and never sent anywhere: it names a folder in
+      // this vault, and the whole point is that the other machine's key is
+      // different.
+      claudianDeviceKey: () => {
+        try {
+          const seed = window.localStorage.getItem("claudian.deviceSettingsKey")?.trim();
+          if (!seed) return null;
+          return `device-${createHash("sha256").update(seed, "utf8").digest("hex")}`;
+        } catch {
+          return null;
+        }
+      },
       loadSettings: () => this.loadData(),
       saveSettings: (value) => this.saveData(value),
       openFolder: (target) => openInFileManager(target),
