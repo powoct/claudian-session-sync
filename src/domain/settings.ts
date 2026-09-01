@@ -27,9 +27,17 @@ export const SETTINGS_SCHEMA_VERSION = 2;
  * OQ-16 measured that 3000 ms lets a Grok session that is mid-turn read as
  * settled: merging every non-lock file in the session, the whole thing held
  * still for 3.3 s in one recorded turn and 8.2 s in another. That is a safety
- * value, not a preference, so a stored 3000 is carried to 15000 once — and
- * only from exactly the old default, so anyone who really did pick 3000 by
- * hand and anyone who picked any other number keeps what they picked.
+ * value, not a preference, so a stored 3000 is carried to 15000 once.
+ *
+ * **This does take 3000 from someone who chose it deliberately, and there is
+ * no way not to.** A schema-1 file cannot distinguish the two cases at all —
+ * the review of this change made the point, and it is right: a promise to keep
+ * a hand-picked 3000 and a promise to correct an unsafe default cannot both be
+ * kept on the same bytes. Safety wins, the cost is stated here and in the
+ * settings text, and the value is one field away from being set again.
+ *
+ * Only the exact old default moves; any other number is a choice the file can
+ * actually evidence, and is left alone.
  */
 const SUPERSEDED_DEFAULTS: Readonly<Record<string, { readonly was: number; readonly now: number }>> = {
   localQuietMs: { was: 3_000, now: 15_000 },
@@ -130,7 +138,15 @@ export function parseSettings(raw: unknown): {
 
   return {
     settings: {
-      schemaVersion: SETTINGS_SCHEMA_VERSION,
+      // Never downgraded. A file written by a later version is that version's
+      // to migrate, and stamping it back to ours would let a future upgrade
+      // run its migrations a second time on values it had already converted —
+      // the unknown fields survive either way, but the number that says who
+      // owns them would not.
+      schemaVersion:
+        typeof c.schemaVersion === "number" && c.schemaVersion > SETTINGS_SCHEMA_VERSION
+          ? c.schemaVersion
+          : SETTINGS_SCHEMA_VERSION,
       autoIntervalMinutes: num("autoIntervalMinutes"),
       backupKeep: num("backupKeep"),
       maxFileSizeMB: num("maxFileSizeMB"),
