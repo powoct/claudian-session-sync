@@ -43,7 +43,6 @@ const input = (overrides: Partial<PlanInput> = {}): PlanInput => ({
   relation: "divergent",
   conflictKnown: false,
   maxFileSizeBytes: MAX_BYTES,
-  pullNewFastPath: false,
   hints: { remoteHadNonZeroSize: false },
   history: {
     truncatedTailPasses: 0,
@@ -470,25 +469,17 @@ describe("§5.2.7 priority regressions", () => {
     );
   });
 
-  it("the fast path is the only route from unstable input to a write", () => {
+  it("an unstable remote defers even when nothing exists here to lose", () => {
+    // §9.1.3 used to exempt exactly this shape. ADR-70 withdrew the exemption:
+    // a half-landed append-only file is a valid file, so "nothing to lose" is
+    // not the same as "safe to take" — the moment it lands, the user can
+    // resume the session and append to a prefix, and then neither side is a
+    // prefix of the other.
     const result = plan(
-      input({
-        local: absent(),
-        remoteSide: R({ stable: false, observedHash: "hash-r" }),
-        relation: "n/a",
-        pullNewFastPath: true,
-      }),
+      input({ local: absent(), remoteSide: R({ stable: false, observedHash: "hash-r" }), relation: "n/a" }),
     );
-    expect(result.action).toBe("PULL_NEW");
-    expect(result.flags).toContain("pullNewFastPath");
-  });
-
-  it("the fast path cannot be used to overwrite anything", () => {
-    // It exists because creating a file that was not there risks nothing that
-    // was already on this machine. Replacing one does.
-    expect(
-      actionOf({ remoteSide: R({ stable: false }), relation: "r-extends-l", pullNewFastPath: true }),
-    ).toBe("DEFER");
+    expect(result.action).toBe("DEFER");
+    expect(result.reason).toBe("side-unstable");
   });
 });
 
@@ -504,11 +495,10 @@ describe("§5.2.7 exhaustive combinations", () => {
     zeroByte: ["none", "l-zero", "r-zero", "both-zero"] as const,
     tail: ["lf", "no-lf", "truncated"] as const,
     conflictKnown: [true, false],
-    // Added after review: these three were fixed constants, which left the
-    // "fast path is the only route from unstable input to a write" assertion
-    // resting on two point cases and a comment.
+    // Added after review: both were fixed constants, which left the
+    // "never writes from an unstable side" assertion resting on two point
+    // cases and a comment.
     placeholder: ["none", "l", "r"] as const,
-    fastPath: [true, false],
     hadContent: [true, false],
   };
 
@@ -530,7 +520,6 @@ describe("§5.2.7 exhaustive combinations", () => {
                     for (const tail of dims.tail)
                       for (const conflictKnown of dims.conflictKnown)
                         for (const placeholder of dims.placeholder)
-                          for (const fastPath of dims.fastPath)
                             for (const hadContent of dims.hadContent) {
                         // Impossible states are filtered rather than asserted
                         // about: a relation between a file and nothing is not a
@@ -577,7 +566,6 @@ describe("§5.2.7 exhaustive combinations", () => {
                           relation,
                           conflictKnown,
                           maxFileSizeBytes: MAX_BYTES,
-                          pullNewFastPath: fastPath,
                           hints: { remoteHadNonZeroSize: hadContent },
                           history: { truncatedTailPasses: 0 , localShrankBelowConverged: false, remoteShrankBelowConverged: false},
                         };
@@ -587,6 +575,10 @@ describe("§5.2.7 exhaustive combinations", () => {
   const ALL = [...combinations()];
 
   it("generates a meaningful number of combinations", () => {
+    // 20,736 as of ADR-70, down from twice that: the fast-path dimension was
+    // binary and it is gone. The floor is deliberately just under the current
+    // number, so removing another dimension trips this rather than quietly
+    // halving the matrix again.
     expect(ALL.length).toBeGreaterThan(20_000);
   });
 
@@ -638,36 +630,17 @@ describe("§5.2.7 exhaustive combinations", () => {
     }
   });
 
-  it("never writes from an unstable side unless the fast path applies", () => {
+  it("never writes from an unstable side — there is no exemption left", () => {
+    // This used to carry an exception for the §9.1.3 fast path. ADR-70 removed
+    // it, so the statement is now unconditional, and that is the point of
+    // keeping the test: an unstable observation authorises no write at all,
+    // not even one that creates rather than replaces.
     const writes: Action[] = ["PUSH_NEW", "PULL_NEW", "PUSH_OVERWRITE", "PULL_OVERWRITE"];
     for (const combo of ALL) {
       const unstable =
         (combo.local.exists && !combo.local.stable) || (combo.remoteSide.exists && !combo.remoteSide.stable);
       if (!unstable) continue;
-
-      // The fast path's own preconditions, restated here rather than reusing
-      // the planner's, so the test does not agree with the code by
-      // construction: it only applies when nothing exists locally to lose.
-      const fastPathApplies =
-        combo.pullNewFastPath && !combo.local.exists && combo.remoteSide.exists;
-      if (fastPathApplies) continue;
-
       expect(writes, JSON.stringify(combo)).not.toContain(plan(combo).action);
-    }
-  });
-
-  it("only ever reaches PULL_NEW through the fast path when a side is unstable", () => {
-    for (const combo of ALL) {
-      const unstable =
-        (combo.local.exists && !combo.local.stable) || (combo.remoteSide.exists && !combo.remoteSide.stable);
-      if (!unstable) continue;
-      const { action } = plan(combo);
-      if (action === "PULL_NEW") {
-        // Creating is the only write an unstable observation may authorise,
-        // and only when it replaces nothing.
-        expect(combo.pullNewFastPath, JSON.stringify(combo)).toBe(true);
-        expect(combo.local.exists, JSON.stringify(combo)).toBe(false);
-      }
     }
   });
 
@@ -678,31 +651,6 @@ describe("§5.2.7 exhaustive combinations", () => {
     for (const combo of ALL) {
       if (!combo.local.isPlaceholder && !combo.remoteSide.isPlaceholder) continue;
       expect(writes, JSON.stringify(combo)).not.toContain(plan(combo).action);
-    }
-  });
-
-  it("never lets the fast path overwrite anything", () => {
-    for (const combo of ALL) {
-      if (!combo.pullNewFastPath) continue;
-      if (!combo.local.exists) continue;
-      // A caller setting the fast path for a file that already exists locally
-      // is contradicting itself; the planner normalises it away rather than
-      // trusting it. Two consequences, both asserted: the flag never appears,
-      // and an unstable side still defers instead of riding the exemption.
-      const { action, flags } = plan(combo);
-      expect(flags, JSON.stringify(combo)).not.toContain("pullNewFastPath");
-
-      const unstable =
-        !combo.local.stable || (combo.remoteSide.exists && !combo.remoteSide.stable);
-      const reachedStabilityGate =
-        combo.remote === "ready" &&
-        combo.local.size <= combo.maxFileSizeBytes &&
-        combo.remoteSide.size <= combo.maxFileSizeBytes &&
-        !combo.local.isPlaceholder &&
-        !combo.remoteSide.isPlaceholder;
-      if (unstable && reachedStabilityGate) {
-        expect(action, JSON.stringify(combo)).toBe("DEFER");
-      }
     }
   });
 

@@ -558,7 +558,6 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         relation,
         conflictKnown: false,
         maxFileSizeBytes: deps.settings.maxFileSizeBytes,
-        pullNewFastPath: false,
         hints: { remoteHadNonZeroSize: deps.ledger.remote(file.neutralRel)?.remoteHadNonZeroSize ?? false },
         history: {
           // Either side can be the one with the half-written record, so the

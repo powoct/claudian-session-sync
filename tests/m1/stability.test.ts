@@ -9,7 +9,6 @@
 import { describe, expect, it } from "vitest";
 import {
   type E0Signature,
-  allowsPullNewFastPath,
   judgeStability,
   signatureKey,
   signaturesEqual,
@@ -185,37 +184,5 @@ describe("signatureKey", () => {
   it("can omit mtime, which is what makes the future-mtime path possible", () => {
     // A pre-hashed signature could not do this — the component is gone.
     expect(signatureKey(sig({ mtimeMs: 1 }), true)).toBe(signatureKey(sig({ mtimeMs: 2 }), true));
-  });
-});
-
-describe("allowsPullNewFastPath (§9.1.3)", () => {
-  const base = {
-    localExists: false,
-    remoteSize: 4096,
-    o1: sig(),
-    o2: sig(),
-    fullyParsed: true,
-  };
-
-  it("allows a new remote session to land without waiting out the window", () => {
-    expect(allowsPullNewFastPath(base)).toBe(true);
-  });
-
-  it("refuses when the file already exists locally", () => {
-    // The asymmetry is the point: this path may only ever create, never replace.
-    expect(allowsPullNewFastPath({ ...base, localExists: true })).toBe(false);
-  });
-
-  it("refuses a zero-byte remote file", () => {
-    expect(allowsPullNewFastPath({ ...base, remoteSize: 0 })).toBe(false);
-  });
-
-  it("refuses when the content did not fully parse", () => {
-    // A size check alone would wave through a half-transferred file.
-    expect(allowsPullNewFastPath({ ...base, fullyParsed: false })).toBe(false);
-  });
-
-  it("refuses when the file moved between the two probes", () => {
-    expect(allowsPullNewFastPath({ ...base, o2: sig({ size: 8192 }) })).toBe(false);
   });
 });
