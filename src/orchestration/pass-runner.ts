@@ -42,6 +42,16 @@ const SCRUB_SAMPLE_FRACTION = 0.02;
 const DEFAULT_SCRUB_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface PassRunnerDeps {
+  /**
+   * Run before discovery, inside the pass (ADR-69).
+   *
+   * Sharing a conversation record moves a file in the vault, which changes
+   * what this same pass will admit — so it belongs before P1 rather than in a
+   * separate call outside the lock, where it had a check-then-write window
+   * against Claudian, the peer and the engine itself. Returns notices to fold
+   * into the report.
+   */
+  readonly beforeDiscover?: () => Promise<readonly string[]>;
   readonly fs: FsGateway;
   readonly guard: PathGuardDeps;
   readonly clock: Clock;
@@ -272,6 +282,8 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     keep: deps.settings.backupKeep,
   });
 
+  const shareNotices = deps.beforeDiscover ? await deps.beforeDiscover() : [];
+
   const report = await runPass({
     fs: deps.fs,
     clock: deps.clock,
@@ -359,7 +371,13 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     }
   }
 
-  return { report, readiness: record };
+  return {
+    report:
+      shareNotices.length > 0
+        ? { ...report, notices: [...shareNotices, ...report.notices] }
+        : report,
+    readiness: record,
+  };
 }
 
 /** Just enough to know which roots exist and how to compare paths. */

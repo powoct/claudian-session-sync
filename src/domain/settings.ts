@@ -56,13 +56,6 @@ export interface PortableSettings {
   readonly clockSkewToleranceMs: number;
   /** Hours before a file is read in full again regardless of the cache (T1). */
   readonly scrubMaxAgeHours: number;
-  /**
-   * Publish this device's conversations to the flat layer, so the vault's
-   * other machines can see them in Claudian (ADR-67). Off by default: it
-   * writes into another plugin's store, and the trade it makes is one the
-   * user has to opt into knowingly.
-   */
-  readonly mirrorConversations: boolean;
   readonly logLevel: "off" | "info" | "debug";
 }
 
@@ -113,7 +106,6 @@ export const DEFAULT_SETTINGS: PortableSettings = {
   remoteQuietMs: BOUNDS.remoteQuietMs.fallback,
   clockSkewToleranceMs: BOUNDS.clockSkewToleranceMs.fallback,
   scrubMaxAgeHours: BOUNDS.scrubMaxAgeHours.fallback,
-  mirrorConversations: false,
   logLevel: "info",
 };
 
@@ -155,7 +147,6 @@ export function parseSettings(raw: unknown): {
       remoteQuietMs: num("remoteQuietMs"),
       clockSkewToleranceMs: num("clockSkewToleranceMs"),
       scrubMaxAgeHours: num("scrubMaxAgeHours"),
-      mirrorConversations: c.mirrorConversations === true,
       logLevel: c.logLevel === "off" || c.logLevel === "debug" ? c.logLevel : "info",
     },
     unknown: pickUnknown(c),
