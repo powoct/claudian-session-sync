@@ -1,9 +1,9 @@
 # HANDOFF — 交接说明
 
-> 更新时间：**2026-08-27**（**0.2.0 已发布**；M1/M2/M4 完成；M3 主体交付并通过 Grok 两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：**2026-09-01**（**0.3.0 已发布**；M1/M2/M4 完成；M3 主体交付；Claudian 2.2.5 兼容性已通过两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
-## 当前状态（2026-08-27）
+## 当前状态（2026-09-01）
 
 | 里程碑 | 状态 |
 |---|---|
@@ -25,7 +25,23 @@ B 机冲突计数归零，两个会话 8 个文件三方一致，I1 两区间均
 `.aiss/prev` 否决、**Grok**，以及验收抓出的两条修复。
 Release notes 已手写（面向使用者，重点写「会被误判成 bug 的三件事」+ 未测项）。
 
-**没有待办的人类动作。** 下一步做什么见下面的「下一步」表，都不紧急。
+### 2026-09-01：Claudian 2.2.5 把准入打断了，0.3.0 是它的修复
+
+**这是本项目至今最贵的一次缺陷，因为它一声不响。** 2.2.5 起新建对话的 `.meta.json` 落进
+`.claudian/sessions/devices/device-<64hex>/`，而准入的单层扫描看不见它 ⇒ 会话不进候选集 ⇒
+**不产生 report 行、不弹 Notice、状态栏照常「up to date」**，四个 provider 全中（共用 `readVaultScope`）。
+2.2.5 之前的老对话照常同步，所以更难发现。
+
+0.3.0 的内容 = 这条修复（ADR-65）＋ **让下一次不再无声**（ADR-66：说出没读的层）
+＋ OQ-14 的修复（ADR-61：跌破收敛基点判 CONFLICT，Grok rewind 不再被静默撤销）
+＋ **共享开关**（ADR-69：把本机记录**搬进** flat 层，取代被审核推翻的复制方案 ADR-67）
+＋ 静默窗口实测值 15 秒（ADR-64/68）。
+
+**2026-09-01 四步两机验收全过**（[findings](docs/zh-CN/findings/2026-09-01-claudian-2.2.5-acceptance.md)，
+剧本 [testing.md §9.8](docs/zh-CN/testing.md)）。被测构建与 `main` 的本地构建、与 release 产物
+**三者字节相同**（`ec8f2034…`／252,002 B）。
+
+**没有待办的人类动作。** 下一步做什么见下面的「下一步」表与「验收欠账」，都不紧急。
 
 ### 发布记录
 
@@ -33,6 +49,7 @@ Release notes 已手写（面向使用者，重点写「会被误判成 bug 的�
 |---|---|---|---|
 | **0.1.0** | 2026-08-15 | M1 + M2：Claude Code、Codex（两机验收后摘 experimental） | M1 十步 ✅ / M4 ✅ |
 | **0.2.0** | 2026-08-27 | 全部 M3：备份恢复 UI、点击路径的两道闸门、opaque 表 + `claudian` provider、`.aiss/prev` 否决、**Grok** | Grok 九步 ✅（双向）；**`claudian` 七步 ✅（2026-08-29，含真分叉）** —— 0.2.0 的每个 provider 都有两机验收背书 |
+| **0.3.0** | 2026-09-01 | **Claudian 2.2.5 兼容**（ADR-65）＋ 未读层告警（66）＋ rewind 不再被静默撤销（61）＋ **共享开关**（69）＋ 静默窗口 15 秒（64/68） | **§9.8 四步 ✅**（2026-09-01，Mac ↔ Windows，真实 vault）——被测构建＝`main` 本地构建＝release 产物，字节相同 |
 
 打 tag 的方式：`git tag <版本> && git push origin <版本>`，tag 名必须**恰好等于** manifest 版本（无 `v` 前缀）。
 **确认发布是否真的跑了要用 `gh run list --workflow=release`**，不是 `gh pr checks`（理由见「待做的杂项」里 2026-08-27 那条）。
@@ -528,9 +545,9 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 | 项 | 性质 | 说明 |
 |---|---|---|
 | ~~OQ-15 Grok 两机往返 + G1 充分性~~ | ✅ **关闭（2026-08-26）** | 两机九步验收，G4/G7 双向 resume 历史完整 |
-| **OQ-17 Grok 流式期间是否就地改写末行** | 非阻塞 | 验收 F-5：单机也判了 CONFLICT。已排除 Claudian 改写（源码零命中）；表现安全（两分支入隔离、一次点击解决），但说明稳定窗口对「正在出字的会话」偏短 |
-| OQ-14 Grok rewind / `/compact` | 非阻塞 | grok 1.0.5 无 headless 入口。风险已封顶：若是截断 ⇒ 判 `CONFLICT`、两侧都留、不丢字节 |
-| OQ-16 Grok 稳定窗口实测值 | 非阻塞 | 现有设计按观察判定；要精确值需 5 秒粒度专项探测 |
+| ~~OQ-17 Grok 流式期间是否就地改写末行~~ | ✅ 关闭（2026-08-27） | 实测：Grok 每轮**就地重写** `chat_history.jsonl`。改为问「这个会话是不是正在被写」而不是问其中某一个文件（ADR-58 的 group 见证） |
+| ~~OQ-14 Grok rewind / `/compact`~~ | ✅ 关闭（2026-08-30），**查出的缺陷已修** | 用户在 TUI 内人工补测。`prefix-check` 字节级判定 **rewind = 纯截断** ⇒ 落在 `PULL_OVERWRITE` 那一支，**rewind 会被静默撤销**——原先写的「风险已封顶」是错的。已修（ADR-61）并于 2026-09-01 真机复验 |
+| ~~OQ-16 Grok 稳定窗口实测值~~ | ✅ 关闭（2026-08-30） | 100 ms 粒度两次采样：单轮之中整个会话曾**完全静止 3.3 秒**，旧的 3 秒默认会把一轮当成结束。新默认 **15 秒**（ADR-64），升级路径见 ADR-68 |
 | ~~OQ-7 规模性能基准~~ | ✅ 关闭（2026-08-13） | 百文件/百 MiB 级：全量 hash 亚秒 |
 | OQ-10 漫游 profile | 非阻塞 | `%USERPROFILE%\.claudian-session-sync` 是否被漫游同步 |
 | ~~OQ-6 生命周期~~ | ✅ 关闭（2026-08-24） | OpenCode 结构上不可同步；**Grok 已接入**；Pi 两台机器都「装了但无会话」 |
@@ -538,6 +555,23 @@ mkdir -p ~/aiss-handoff && cp main.js manifest.json ~/aiss-handoff/
 | `memory/` 子目录归属 | 非阻塞 | 白名单不同步它，记为已知限制（F-7） |
 | **Windows 备份路径余量** | 非阻塞（有数字，需盯） | ADR-54 给备份路径加了 `<logicalId>` 一层，**Windows 上少了 37 字符余量**。按你真实 vault 路径实测最深一条（codex `remote/` 备份）= **239/259**，改动前 202。超限失败在安全方向（备份失败 ⇒ 取消覆盖 ⇒ 不丢字节，报告显示 `PATH_TOO_LONG`），但那个文件会停止同步。真撞上的修法：超长时回落到扁平位置（见 architecture §9.3.2 的注） |
 | Grok 的 `resources_state.json` / `compaction*` / `plan*` / `terminal` / `web_fetch` | 非阻塞（已知限制） | 真实库里存在但沙箱从未产出，**不在白名单** ⇒ 不同步。刻意的：`announcement_state.json` 已被证明是机器作用域，「未知成员默认跟着走」会把 A 机的指纹移植到 B 机 |
+
+## 验收欠账与未决问题（2026-09-01 起，非阻塞）
+
+0.3.0 发出去了，但下面几条是**明知没覆盖**的，别当成已验过：
+
+| 项 | 性质 | 说明 |
+|---|---|---|
+| **OQ-22** `PULL_NEW` 快速通道是死码 | ⛔ 待修或删 | `pullNewFastPath: false` 硬编码，`allowsPullNewFastPath()` 生产代码零调用者。§9.1.3 承诺的「对端新会话不必等满静默窗口」目前不成立——**要么实现，要么把承诺从文档里删掉**，两者都行，含糊不行 |
+| **OQ-23** 无 inode 文件系统 | ⏳ 未测 | exFAT/FAT32（U 盘、手机同步目录）或部分 SMB 上 E0 退化成 `(size, mtime, tailHash)`，原子 rename 替换测不出来。而「指定本地同步目录」正当地包含这些盘 |
+| **OQ-24** `claudian` provider 不认 `devices/` 层 | 🟡 可见性已由 ADR-69 解决 | provider 的**完整复制**仍未做。难点未变：`logicalId` 是备份路径的单个路径段，全长 device key 会撞 Windows 260 上限，而 ADR-54 不许概率性短前缀 |
+| **D8「不该搬的没搬」** | 只有单元测试 | `already shared` / `assigned to a device` / `deleted in the shared layer` 三种 Notice 在 2026-09-01 那轮一条都没触发 |
+| **两种传输同时送同一条记录** | 未测 | vault 同步 + `claudian` provider 同开。设置文案已警告，但没实测过它长什么样 |
+| **并发创建/更新/删除同一条记录** | 未测 | 独立审核点名的第三处 |
+| **codex** | 本轮未参与 | 未改动，回归由自动化测试覆盖；下次两机验收顺手带上 |
+
+**上游 Discussion 不再等**（作者已回复但没有为本插件适配的计划，也没必要）。ADR-69 的搬运方案
+不依赖上游做任何事。
 
 ## 交接说明
 
