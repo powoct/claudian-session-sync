@@ -45,7 +45,7 @@ import {
   restoreBackup,
 } from "./restore-commands";
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
-import { mirrorOwnConversations } from "./conversation-mirror";
+import { shareOwnConversations } from "./conversation-sharing";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
@@ -238,15 +238,15 @@ export class PluginRuntime {
 
     this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
-      // Before the pass, and only when asked for (ADR-67). Publishing a record
-      // to the flat layer changes what the *other* machines admit, so doing it
-      // first means this pass already carries the sessions it just made
-      // visible rather than leaving them a pass behind.
-      if (this.settings.mirrorConversations && !(options.dryRun ?? false)) {
-        await this.mirrorConversations();
-      }
       const outcome = await runWorkspacePass({
         ...prepared.deps,
+        // Inside the pass, so it holds the same lock every other write here
+        // does (ADR-69; the review found the first version running outside it,
+        // with a check-then-write window against the peer, Claudian and the
+        // engine itself). A dry run moves nothing.
+        ...(this.binding?.shareConversations === true && !(options.dryRun ?? false)
+          ? { beforeDiscover: () => this.shareConversations() }
+          : {}),
         dryRun: options.dryRun ?? false,
         verifyAll: options.verifyAll ?? false,
         firstPassAfterStartup: !this.firstPassDone,
@@ -869,33 +869,55 @@ export class PluginRuntime {
   }
 
   /**
-   * Publishes this device's conversation records to the flat layer (ADR-67).
+   * Moves this device's conversation records into the layer every device reads
+   * (ADR-69).
    *
-   * Failures are swallowed on purpose: this is a convenience laid on top of
-   * another plugin's store, and it must never be the reason a sync pass does
-   * not run. What it cannot do, it does not do.
+   * Failures are swallowed, and the outcome is reported rather than acted on:
+   * this is a convenience laid on top of another plugin's store, and it must
+   * never be the reason a sync pass does not run.
    */
-  private async mirrorConversations(): Promise<void> {
+  /** Is this machine moving its conversation records into the shared layer? */
+  sharesConversations(): boolean {
+    return this.binding?.shareConversations === true;
+  }
+
+  /** Machine-local consent, so it never travels with the vault (ADR-69). */
+  async setShareConversations(value: boolean): Promise<void> {
     const binding = this.binding;
     if (!binding) return;
+    const next = { ...binding, shareConversations: value };
+    const home = await this.homeStore();
+    await home.saveBinding(next);
+    this.binding = next;
+  }
+
+  private async shareConversations(): Promise<readonly string[]> {
     try {
-      const outcome = await mirrorOwnConversations({
+      const outcome = await shareOwnConversations({
         fs: this.host.fs,
         guard: await this.pathGuard(),
         joinPath: this.host.joinPath,
-        hashBytes: (bytes) => this.host.hashBytes(bytes),
+        hashBytes: (bytes: Uint8Array) => this.host.hashBytes(bytes),
         vaultRealPath: this.host.vaultRoot,
         deviceKey: this.host.claudianDeviceKey?.() ?? null,
-        written: binding.mirroredConversations ?? {},
-        record: async (written) => {
-          const home = await this.homeStore();
-          await home.saveBinding({ ...binding, mirroredConversations: written });
-          this.binding = { ...binding, mirroredConversations: written };
-        },
       });
-      void outcome;
+      const notices: string[] = [];
+      if (outcome.moved + outcome.completed > 0) {
+        notices.push(
+          `${outcome.moved + outcome.completed} conversation record(s) moved to the shared ` +
+            "layer, so your other devices list them. Moving them back is not something this " +
+            "switch can undo.",
+        );
+      }
+      for (const held of outcome.heldBack.slice(0, 3)) {
+        notices.push(`not shared — ${held}`);
+      }
+      if (outcome.heldBack.length > 3) {
+        notices.push(`…and ${outcome.heldBack.length - 3} more left where they are`);
+      }
+      return notices;
     } catch {
-      // Deliberately quiet — see above.
+      return [];
     }
   }
 

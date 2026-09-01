@@ -73,15 +73,14 @@ export interface WorkspaceBinding {
    */
   readonly vaultPath?: string;
   /**
-   * conversationId → hash of the flat mirror this machine last wrote (ADR-67).
-   *
-   * The converged-base idea of ADR-48, kept locally and for one purpose: it is
-   * the only way to tell a mirror this machine still owns from one the other
-   * machine has since edited. Without it the choice is between never
-   * refreshing a stale title and silently overwriting somebody's rename, and
-   * this project has just spent a release deciding it does not do the second.
+   * Move this device's conversation records into the layer every device reads
+   * (ADR-69). Machine-local, and deliberately not in `PortableSettings`:
+   * `data.json` lives in the vault and travels with it, so a switch stored
+   * there would turn itself on for the other machine and start moving *its*
+   * records. Writing into another plugin's store is consent each machine
+   * gives for itself.
    */
-  readonly mirroredConversations?: Readonly<Record<string, string>>;
+  readonly shareConversations?: boolean;
 }
 
 export interface ProviderBinding {
@@ -319,21 +318,9 @@ function parseBinding(raw: unknown, expected: WorkspaceId): LoadOutcome<Workspac
       ...(typeof c.vaultPath === "string" && c.vaultPath.length > 0
         ? { vaultPath: c.vaultPath }
         : {}),
-      ...(c.mirroredConversations
-        ? { mirroredConversations: parseMirrored(c.mirroredConversations) }
-        : {}),
+      ...(c.shareConversations === true ? { shareConversations: true } : {}),
     },
   };
-}
-
-/** Strings to strings, and nothing else: a hand-edited file is not a map. */
-function parseMirrored(raw: unknown): Record<string, string> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "string" && value.length > 0) out[key] = value;
-  }
-  return out;
 }
 
 function parseProviders(raw: unknown): Record<string, ProviderBinding> {
