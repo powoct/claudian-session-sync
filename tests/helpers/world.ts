@@ -13,7 +13,7 @@
  * and case sensitivity stay honest.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, promises as fsp, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, promises as fsp, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { LogicalId, SafeAbsolutePath } from "../../src/domain/types";
 import {
@@ -694,14 +694,33 @@ export class FakeCli {
     return new FakeSession(path.join(this.projectDir, `${id}.jsonl`));
   }
 
-  /** Marks the conversation deleted, the way Claudian's markDeleted does. */
-  tombstone(id: string): void {
-    mkdirSync(this.claudianStore, { recursive: true });
+  /**
+   * Marks the conversation deleted, the way Claudian's markDeleted does.
+   *
+   * `device` writes the marker inside that device's directory instead of at
+   * the top level, which is the distinction upstream draws:
+   * `getDeviceDeletionMarkerPath` and `getUnscopedDeletionMarkerPath` are two
+   * paths, and `selectSessionMetadataCandidate` tests them against two
+   * different layers.
+   */
+  tombstone(id: string, options: { device?: string } = {}): void {
+    const dir = options.device
+      ? path.join(this.claudianStore, "devices", options.device)
+      : this.claudianStore;
+    mkdirSync(dir, { recursive: true });
     writeFileSync(
-      path.join(this.claudianStore, `conv-fake-${id}.deleted.json`),
+      path.join(dir, `conv-fake-${id}.deleted.json`),
       `${JSON.stringify({ schemaVersion: 1, conversationId: `conv-fake-${id}`, deletedAt: 0 }, null, 2)}
 `,
     );
+  }
+
+  /** Moves a conversation's record into a device directory, as 2.2.5 does. */
+  scopeToDevice(id: string, deviceKey: string): void {
+    const name = `conv-fake-${id}.meta.json`;
+    const dir = path.join(this.claudianStore, "devices", deviceKey);
+    mkdirSync(dir, { recursive: true });
+    renameSync(path.join(this.claudianStore, name), path.join(dir, name));
   }
 
   async list(): Promise<string[]> {

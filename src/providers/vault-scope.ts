@@ -61,6 +61,36 @@ const STORE_DIRS = [
   [".claude", "sessions"],
 ] as const;
 
+/**
+ * Claudian 2.2.5 files each *new* conversation's record under its own device
+ * (upstream `storagePaths.ts`: `DEVICE_SESSIONS_PATH`, `getDeviceSessionsPath`).
+ *
+ *   .claudian/sessions/<conv>.meta.json                      ← before, and still
+ *   .claudian/sessions/devices/device-<64 hex>/<conv>.meta.json  ← 2.2.5 onwards
+ *
+ * Both layers are real at once: the vault that surfaced this held 111 records
+ * at the top level beside two device-scoped ones, and upstream's own reader
+ * still consults the flat path (`getUnscopedMetadataPath`) and even
+ * `.claude/sessions` before it gives up. So this is not a migration to step
+ * over — it is a store with layers.
+ *
+ * Read from **every** device directory, not just this machine's, and that is
+ * deliberate. Upstream's listing is device-scoped on purpose:
+ * `selectSessionMetadataCandidate` returns null for a record assigned to
+ * another device, which is how the "Assign to this device" button earns its
+ * name. Admission is a different question — *does this vault know this session
+ * id* — and answering it per-device would mean a conversation started on the
+ * Mac could never have its bytes carried to the Windows box. That is the one
+ * thing this plugin exists to do, so the id is admitted and Claudian remains
+ * the judge of what it shows.
+ *
+ * Two levels exactly, and the directory name is checked against upstream's own
+ * pattern. An unbounded walk would sweep in whatever a user dropped into the
+ * store, which §8.2's fail-closed rule spends its whole budget avoiding.
+ */
+const DEVICES_DIR = "devices";
+const DEVICE_KEY = /^device-[a-f0-9]{64}$/;
+
 const META_SUFFIX = ".meta.json";
 /**
  * Claudian's deletion is a tombstone, not a removal: `markDeleted` writes
@@ -108,23 +138,55 @@ export async function readVaultScope(
     if (entries.length === 0) continue;
     storeFound = true;
 
-    const tombstoned = new Set(
-      entries
-        .filter((entry) => entry.isFile && entry.name.endsWith(TOMBSTONE_SUFFIX))
-        .map((entry) => entry.name.slice(0, -TOMBSTONE_SUFFIX.length)),
-    );
+    await admitFrom(deps, dir, entries, providerId, accept, sessionIds);
 
-    for (const entry of entries) {
-      if (!entry.isFile || !entry.name.endsWith(META_SUFFIX)) continue;
-      if (tombstoned.has(entry.name.slice(0, -META_SUFFIX.length))) continue;
-      const text = await deps.readTextFile(deps.joinPath(dir, entry.name));
-      if (text === null) continue;
-      const id = sessionIdOf(text, providerId, accept);
-      if (id !== null) sessionIds.add(id);
+    // `devices/` sits inside the store, so it is reached from the listing
+    // already in hand rather than by probing a path that may not exist.
+    if (!entries.some((entry) => !entry.isFile && entry.name === DEVICES_DIR)) continue;
+    const devicesDir = deps.joinPath(dir, DEVICES_DIR);
+    for (const device of await deps.listDir(devicesDir).catch(() => [])) {
+      if (device.isFile || !DEVICE_KEY.test(device.name)) continue;
+      const deviceDir = deps.joinPath(devicesDir, device.name);
+      const deviceEntries = await deps.listDir(deviceDir).catch(() => []);
+      await admitFrom(deps, deviceDir, deviceEntries, providerId, accept, sessionIds);
     }
   }
 
   return { sessionIds, storeFound };
+}
+
+/**
+ * One directory of records → the session ids it admits.
+ *
+ * Tombstones pair **within a directory**, which is upstream's rule and not an
+ * approximation of it: `selectSessionMetadataCandidate` tests `deviceDeleted`
+ * against the device layer and `unscopedDeleted` against the flat one, and a
+ * device-scoped deletion deliberately does not bury a flat record of the same
+ * conversation. Pairing across layers would have one machine's delete hide a
+ * conversation another machine still holds.
+ */
+async function admitFrom(
+  deps: VaultScopeDeps,
+  dir: string,
+  entries: ReadonlyArray<{ name: string; isFile: boolean }>,
+  providerId: string,
+  accept: (value: unknown) => value is string,
+  sessionIds: Set<string>,
+): Promise<void> {
+  const tombstoned = new Set(
+    entries
+      .filter((entry) => entry.isFile && entry.name.endsWith(TOMBSTONE_SUFFIX))
+      .map((entry) => entry.name.slice(0, -TOMBSTONE_SUFFIX.length)),
+  );
+
+  for (const entry of entries) {
+    if (!entry.isFile || !entry.name.endsWith(META_SUFFIX)) continue;
+    if (tombstoned.has(entry.name.slice(0, -META_SUFFIX.length))) continue;
+    const text = await deps.readTextFile(deps.joinPath(dir, entry.name));
+    if (text === null) continue;
+    const id = sessionIdOf(text, providerId, accept);
+    if (id !== null) sessionIds.add(id);
+  }
 }
 
 /**
