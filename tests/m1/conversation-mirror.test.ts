@@ -7,7 +7,7 @@
  * this is a copy into it — with the three rules that keep it from becoming a
  * second source of truth.
  */
-import { promises as fsp } from "node:fs";
+import { promises as fsp, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -28,7 +28,14 @@ afterEach(async () => {
 async function vault(): Promise<string> {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "aiss-mirror-"));
   roots.push(root);
-  return root;
+  // `realpathSync.native`, the same call production makes (main.ts), because
+  // the two disagree in exactly the places CI runs. Skipping it passed on
+  // Linux and failed on both others: macOS mkdtemp returns `/var/folders/…`,
+  // a symlink to `/private/var/…`, and Windows returns a tmpdir under an 8.3
+  // short-named profile folder, which the non-native realpath leaves alone.
+  // Either way the containment walk refused every write and the feature
+  // silently did nothing — the guard working, and the fixture lying.
+  return realpathSync.native(root);
 }
 
 const store = (root: string) => path.join(root, ".claudian", "sessions");
@@ -215,6 +222,23 @@ describe("ADR-67: publishing this device's conversations", () => {
     const { outcome } = await run(root, { written: first.saved });
     expect(outcome.removed).toBe(0);
     expect(await read(path.join(store(root), `${CONV}.meta.json`))).toContain("theirs now");
+  });
+
+  it("writes nothing when the vault path has not been resolved", async () => {
+    // The contract `vaultRealPath` names, pinned rather than assumed. A path
+    // that reaches a symlink is refused by the containment walk in
+    // `resolveUnderRoot`, and refusing is the right direction — this writes
+    // into another plugin's store, so a root that is not its own realpath is
+    // exactly the shape a write must not follow out of the vault.
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one" });
+    const linked = path.join(os.tmpdir(), `aiss-link-${path.basename(root)}`);
+    await fsp.symlink(root, linked);
+    roots.push(linked);
+
+    const { outcome } = await run(linked);
+    expect(outcome.created).toBe(0);
+    expect(await read(path.join(store(root), `${CONV}.meta.json`))).toBeNull();
   });
 
   it("never writes an assignment fence", async () => {
