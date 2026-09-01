@@ -37,7 +37,7 @@ import type {
   SessionFileRef,
   SessionGroup,
 } from "../provider-adapter";
-import { isSessionUuid, readVaultScope } from "../vault-scope";
+import { describeUnreadDirs, isSessionUuid, readVaultScope } from "../vault-scope";
 
 export const GROK_PROVIDER_ID = "grok";
 
@@ -157,7 +157,7 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
       if (!scope.storeFound) {
         return { ok: false, reason: "no Claudian conversation records in this vault" };
       }
-      return { ok: true };
+      return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
     },
 
     async listSessions() {

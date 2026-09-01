@@ -33,7 +33,7 @@ import {
   isCodexSessionId,
   rolloutLogicalId,
 } from "./rollout-name";
-import { readVaultScope } from "../vault-scope";
+import { describeUnreadDirs, readVaultScope } from "../vault-scope";
 
 export const CODEX_PROVIDER_ID = "codex";
 
@@ -74,7 +74,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         // like a broken install.
         return { ok: false, reason: "no Claudian conversation records in this vault" };
       }
-      return { ok: true };
+      return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
     },
 
     async listSessions() {

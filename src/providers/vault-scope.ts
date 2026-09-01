@@ -115,6 +115,22 @@ export interface VaultScope {
   readonly sessionIds: ReadonlySet<string>;
   /** Whether a store was found at all — the difference between "none" and "no store". */
   readonly storeFound: boolean;
+  /**
+   * Directories inside the store this scan did not read (OQ-26).
+   *
+   * The scan is deliberately shallow — the flat layer and `devices/<key>/`,
+   * nothing else (§8.2). That is the right rule and it is also exactly how
+   * 2026-09-01 happened: Claudian 2.2.5 introduced a directory level, the scan
+   * skipped it in silence, and because an unadmitted session produces no
+   * action, the pass reported "up to date" while nothing synced. There was no
+   * report line to read, because there was nothing to attach one to.
+   *
+   * So the skip is now said out loud. Normally empty; non-empty means either a
+   * user put something in the store, or upstream moved the records again — and
+   * the second one should never again be discovered by a user noticing a
+   * missing conversation.
+   */
+  readonly unreadDirs: readonly string[];
 }
 
 /**
@@ -130,6 +146,7 @@ export async function readVaultScope(
   accept: (value: unknown) => value is string,
 ): Promise<VaultScope> {
   const sessionIds = new Set<string>();
+  const unreadDirs: string[] = [];
   let storeFound = false;
 
   for (const parts of STORE_DIRS) {
@@ -140,19 +157,29 @@ export async function readVaultScope(
 
     await admitFrom(deps, dir, entries, providerId, accept, sessionIds);
 
+    const storeRel = parts.join("/");
+    for (const entry of entries) {
+      if (entry.isFile || entry.name === DEVICES_DIR) continue;
+      unreadDirs.push(`${storeRel}/${entry.name}/`);
+    }
+
     // `devices/` sits inside the store, so it is reached from the listing
     // already in hand rather than by probing a path that may not exist.
     if (!entries.some((entry) => !entry.isFile && entry.name === DEVICES_DIR)) continue;
     const devicesDir = deps.joinPath(dir, DEVICES_DIR);
     for (const device of await deps.listDir(devicesDir).catch(() => [])) {
-      if (device.isFile || !DEVICE_KEY.test(device.name)) continue;
+      if (device.isFile) continue;
+      if (!DEVICE_KEY.test(device.name)) {
+        unreadDirs.push(`${storeRel}/${DEVICES_DIR}/${device.name}/`);
+        continue;
+      }
       const deviceDir = deps.joinPath(devicesDir, device.name);
       const deviceEntries = await deps.listDir(deviceDir).catch(() => []);
       await admitFrom(deps, deviceDir, deviceEntries, providerId, accept, sessionIds);
     }
   }
 
-  return { sessionIds, storeFound };
+  return { sessionIds, storeFound, unreadDirs };
 }
 
 /**
@@ -230,4 +257,20 @@ function sessionIdOf(
     if (accept(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * The sentence an adapter passes to `healthCheck`'s warnings for an unread
+ * layer. One phrasing, because four adapters read the same store and the
+ * engine keeps only the first copy of an identical notice.
+ */
+export function describeUnreadDirs(unreadDirs: readonly string[]): string[] {
+  if (unreadDirs.length === 0) return [];
+  const shown = unreadDirs.slice(0, 3).join(", ");
+  const rest = unreadDirs.length > 3 ? ` and ${unreadDirs.length - 3} more` : "";
+  return [
+    `Claudian's conversation store has folders this version does not read (${shown}${rest}). ` +
+      "Conversations recorded in them are not synced. If Claudian has been updated, this " +
+      "plugin probably needs to catch up.",
+  ];
 }

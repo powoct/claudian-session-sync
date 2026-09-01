@@ -275,6 +275,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const groups: Array<{ adapter: ProviderAdapter; group: SessionGroup }> = [];
   for (const adapter of deps.adapters) {
     const health = await adapter.healthCheck();
+    // Said even when the provider is fine, and deduplicated: the four adapters
+    // read the same Claudian store, so a layer none of them reads is one fact
+    // about the vault rather than four about providers.
+    for (const warning of health.warnings ?? []) {
+      if (!notices.includes(warning)) notices.push(warning);
+    }
     if (!health.ok) {
       notices.push(`provider ${adapter.id} unavailable: ${health.reason ?? "unknown"}`);
       continue; // One provider failing must not stop the others.
