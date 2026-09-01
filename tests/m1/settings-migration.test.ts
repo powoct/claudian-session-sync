@@ -8,7 +8,7 @@
  * the most conversations to lose.
  */
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, parseSettings } from "../../src/domain/settings";
+import { DEFAULT_SETTINGS, parseSettings, serialiseSettings } from "../../src/domain/settings";
 
 describe("a superseded default is carried forward once", () => {
   it("moves a stored 3000 to the measured 15000", () => {
@@ -17,6 +17,30 @@ describe("a superseded default is carried forward once", () => {
     // reads a mid-turn session as settled. That is a safety value.
     const { settings } = parseSettings({ schemaVersion: 1, localQuietMs: 3_000 });
     expect(settings.localQuietMs).toBe(15_000);
+  });
+
+  it("takes a deliberately chosen 3000 too, because the file cannot say it was chosen", () => {
+    // The honest half of the trade, asserted rather than glossed. A schema-1
+    // file records the same bytes whether the user typed 3000 or the plugin
+    // wrote it as its own default, so a promise to keep the first and a
+    // promise to correct the second cannot both be kept. This pins which one
+    // this project chose — an earlier version of the note claimed both.
+    const { settings } = parseSettings({ schemaVersion: 1, localQuietMs: 3_000 });
+    expect(settings.localQuietMs).toBe(15_000);
+  });
+
+  it("never stamps a newer schema back down to this one", () => {
+    // A file a later version wrote is that version's to migrate. Rewriting the
+    // number that says so would let a future upgrade run its migrations again
+    // over values it had already converted.
+    const { settings, unknown } = parseSettings({
+      schemaVersion: 99,
+      futureMode: true,
+      localQuietMs: 9_000,
+    });
+    expect(settings.schemaVersion).toBe(99);
+    expect(serialiseSettings(settings, unknown).schemaVersion).toBe(99);
+    expect(unknown.futureMode).toBe(true);
   });
 
   it("leaves any other stored value exactly alone", () => {
