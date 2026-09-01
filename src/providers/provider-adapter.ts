@@ -114,8 +114,22 @@ export interface ProviderAdapter {
   readonly primaryExtensions: readonly string[];
   readonly auxSuffixPattern: RegExp | null;
 
-  /** Is this provider usable on this machine right now? */
-  healthCheck(): Promise<{ readonly ok: boolean; readonly reason?: string }>;
+  /**
+   * Is this provider usable on this machine right now?
+   *
+   * `warnings` is for the case this has no other word for: the provider works,
+   * and something about the way it works deserves a sentence anyway. It exists
+   * because 2026-09-01's failure had no channel — an upstream layout change
+   * meant sessions stopped being admitted, and an unadmitted session produces
+   * no group, no action and no report line, so a pass with nothing to say said
+   * "up to date". Every other diagnostic this plugin has hangs off a file it
+   * decided something about; this one has to survive there being none.
+   */
+  healthCheck(): Promise<{
+    readonly ok: boolean;
+    readonly reason?: string;
+    readonly warnings?: readonly string[];
+  }>;
   listSessions(): Promise<SessionGroup[]>;
   /**
    * The inverse of `listSessions`, for a file only the replica has.

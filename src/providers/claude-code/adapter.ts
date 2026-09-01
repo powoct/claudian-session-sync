@@ -19,7 +19,7 @@
  */
 import type { LogicalId } from "../../domain/types";
 import { type ProviderAdapter, type SessionGroup, classifyFileName } from "../provider-adapter";
-import { isSessionUuid, readVaultScope } from "../vault-scope";
+import { describeUnreadDirs, isSessionUuid, readVaultScope } from "../vault-scope";
 import { escapeProjectPath } from "./path-escape";
 
 /** Claudian's name for this provider — not this plugin's (`claude-code`). */
@@ -78,7 +78,7 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
         // "syncs nothing" is indistinguishable from a broken install.
         return { ok: false, reason: "no Claudian conversation records in this vault" };
       }
-      return { ok: true };
+      return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
     },
 
     async listSessions() {

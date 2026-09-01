@@ -8,7 +8,7 @@
  * These tests cover the admission half for the provider that changed — Claude
  * Code, whose project directory used to be the whole rule.
  */
-import { promises as fsp } from "node:fs";
+import { mkdirSync, promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { World, WORKSPACE_ID } from "../helpers/world";
@@ -164,6 +164,58 @@ describe("Claudian 2.2.5: records under devices/ (2026-09-01)", () => {
       report.actions.filter((a) => a.result === "APPLIED").map((a) => a.neutralRel),
       "a top-level tombstone suppressed a device record",
     ).toEqual([`claude-code/${SID}.jsonl`]);
+  });
+
+  it("says out loud when the store has a layer it does not read (OQ-26)", async () => {
+    // The expensive half of 2026-09-01 was not the missing recursion, it was
+    // that nothing said anything: an unadmitted session produces no group, so
+    // no action, so no report line, so a pass with nothing to say reported
+    // "up to date". Every other diagnostic here hangs off a file the pass
+    // decided something about; this one has to survive there being none.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, "some-future-layout");
+
+    await machine.pass();
+    const report = await machine.pass();
+
+    expect(report.actions.filter((a) => a.result === "APPLIED")).toEqual([]);
+    const spoken = report.notices.join(" ");
+    expect(spoken, `notices were: ${JSON.stringify(report.notices)}`).toContain(
+      "folders this version does not read",
+    );
+    expect(spoken).toContain("some-future-layout");
+  });
+
+  it("also names a folder that appears beside devices/, not only inside it", async () => {
+    // Two places a layer can show up, and both are worth naming: upstream
+    // could add a sibling of `devices/` as easily as it added `devices/`.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    mkdirSync(path.join(machine.vaultPath, ".claudian", "sessions", "archive"), {
+      recursive: true,
+    });
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(report.notices.join(" ")).toContain("archive");
+  });
+
+  it("says nothing when every layer was read", async () => {
+    // A warning that fires on a healthy vault is a warning nobody reads.
+    world = World.create();
+    const machine = world.machine("A");
+    await machine.initialiseSyncDir();
+    await machine.cli.session(SID).append(3);
+    machine.cli.scopeToDevice(SID, DEVICE);
+
+    await machine.pass();
+    const report = await machine.pass();
+    expect(report.notices.join(" ")).not.toContain("does not read");
   });
 
   it("stops admitting when the tombstone is in the same device directory", async () => {
