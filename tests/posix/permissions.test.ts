@@ -10,6 +10,7 @@
  * somewhere else rather than be skipped in place.
  */
 import { promises as fsp } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { MachineId } from "../../src/domain/types";
@@ -18,6 +19,7 @@ import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
 import { type PathGuardDeps, splitPathSegments } from "../../src/infra/path-guard";
 import { readJson } from "../../src/infra/json-file";
 import { createSyncDirStore } from "../../src/infra/sync-dir-store";
+import { shareOwnConversations } from "../../src/orchestration/conversation-sharing";
 import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 const isWindows = process.platform === "win32";
@@ -87,5 +89,56 @@ describe.skipIf(isWindows)("the write probe answers by trying", () => {
     } finally {
       await fsp.chmod(root, 0o700);
     }
+  });
+});
+
+describe.skipIf(isWindows)("sharing conversation records fails closed on an unreadable store", () => {
+  it("publishes nothing when the shared layer cannot be listed", async () => {
+    // The tombstone and the fence live in the flat layer, so a store read as
+    // "empty" makes both invisible and sends every record straight down the
+    // publish row — which is how a conversation the user deleted everywhere
+    // gets put back. A directory we may not read is emphatically not an empty
+    // one, the same rule `readJson` already applies.
+    //
+    // `0o311` is the shape that makes this reachable, and the mode matters:
+    // write + execute, but not read. Traversal still works, so the device
+    // folder underneath lists and the publish write would *succeed* — only
+    // `readdir` on the store is refused. A mode that also blocked writing
+    // would pass this test for the wrong reason.
+    const root = makeRoot();
+    const device = `device-${"ab12cd34".repeat(8)}`;
+    const conv = "conv-1788190814061-hrrhmqcp6";
+    const store = path.join(root, ".claudian", "sessions");
+    await fsp.mkdir(path.join(store, "devices", device), { recursive: true });
+    await fsp.writeFile(
+      path.join(store, "devices", device, `${conv}.meta.json`),
+      `${JSON.stringify({ id: conv, providerId: "claude" }, null, 2)}\n`,
+    );
+    // Deleted on every machine — the marker this must not step over.
+    await fsp.writeFile(path.join(store, `${conv}.deleted.json`), `{"deletedAt":1}\n`);
+    await fsp.chmod(store, 0o311);
+
+    try {
+      const outcome = await shareOwnConversations({
+        fs,
+        guard,
+        joinPath: (...parts: string[]) => path.join(...parts),
+        hashBytes: (bytes) => createHash("sha256").update(bytes).digest("hex"),
+        vaultRealPath: root,
+        deviceKey: device,
+        nowMs: 1_788_500_000_000,
+        published: { schemaVersion: 1, deviceKey: device, records: {} },
+        backup: async () => path.join(root, "backup-taken"),
+        mayWrite: async () => true,
+      });
+      expect(outcome.moved + outcome.folded + outcome.tombstoned).toBe(0);
+    } finally {
+      await fsp.chmod(store, 0o700);
+    }
+
+    expect(
+      await fsp.readFile(path.join(store, `${conv}.meta.json`), "utf8").catch(() => null),
+      "a deleted conversation must not be republished",
+    ).toBeNull();
   });
 });
