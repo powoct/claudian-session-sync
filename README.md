@@ -102,10 +102,14 @@ On each machine:
 > **There is a setting for this.** *Share this device's conversations with your other
 > devices* (off by default, and set per machine) **moves** each of this machine's
 > conversation records into the layer every device reads. All of them then list the
-> conversation, and all of them write to the same record — there is one of it, so there is
-> no second version to drift. Three things to know before turning it on. It moves rather
-> than copies, so the record leaves this device's folder. Turning it back off stops further
-> moves but **does not un-share what has already moved**. And a shared conversation carries
+> conversation, and all of them write to the same record. Three things to know before
+> turning it on. Claudian decides where to save a conversation **once per session**, so
+> after a move it keeps writing a copy in this device's folder until you next restart
+> Obsidian; each sync folds that copy forward into the shared one, and where it cannot tell
+> which version should win it keeps both and asks you — the command **Repair shared
+> conversation records** lists those with both sizes and dates, one at a time. Turning the
+> setting back off stops further moves but **does not un-share what has already moved**.
+> And a shared conversation carries
 > any folders it had been given access to as absolute paths, which on the other machine may
 > point at something else — the same exposure every conversation had before Claudian 2.2.5,
 > when all records lived in that layer.

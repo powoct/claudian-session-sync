@@ -175,12 +175,14 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
           "device only reads its own folder — so a conversation started here is missing from " +
           "the other machine's list even after its session file has synced. This moves the " +
           "record into the layer every device reads, so all of them list it and all of them " +
-          "write to the same one. Three things to know. It moves the record rather than " +
-          "copying it, so there is one of it and no version to diverge. Turning this back off " +
-          "stops further moves but does not bring back what has already been shared. And a " +
-          "shared conversation carries any folders it had been given access to, as absolute " +
-          "paths — on the other machine those paths may mean something else. Off by default, " +
-          "and set per machine.",
+          "write to the same one. Three things to know. Claudian decides where to save a " +
+          "conversation once per session, so after a move it keeps writing a copy here until " +
+          "you next restart Obsidian; each sync folds that copy forward, and where it cannot " +
+          "tell which version should win it leaves both and asks you — see \"Repair shared " +
+          "conversation records\". Turning this back off stops further moves but does not " +
+          "bring back what has already been shared. And a shared conversation carries any " +
+          "folders it had been given access to, as absolute paths — on the other machine " +
+          "those paths may mean something else. Off by default, and set per machine.",
       )
       .addToggle((toggle) =>
         toggle.setValue(this.runtime.sharesConversations()).onChange(async (value) => {

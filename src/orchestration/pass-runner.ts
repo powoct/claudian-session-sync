@@ -46,9 +46,11 @@ export interface PassRunnerDeps {
    * Run before discovery, inside the pass (ADR-69).
    *
    * Sharing a conversation record moves a file in the vault, which changes
-   * what this same pass will admit — so it belongs before P1 rather than in a
-   * separate call outside the lock, where it had a check-then-write window
-   * against Claudian, the peer and the engine itself. Returns notices to fold
+   * what this same pass will admit — so it runs before P1, and it is handed to
+   * `runPass` rather than called here, because here is *outside the lock*.
+   * Until 2026-09-04 it was called here and two comments claimed otherwise;
+   * the step now also takes destructive writes, which makes the lock the
+   * difference between a replan and a lost record. Returns notices to fold
    * into the report.
    */
   readonly beforeDiscover?: () => Promise<readonly string[]>;
@@ -282,9 +284,8 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     keep: deps.settings.backupKeep,
   });
 
-  const shareNotices = deps.beforeDiscover ? await deps.beforeDiscover() : [];
-
   const report = await runPass({
+    ...(deps.beforeDiscover ? { beforeDiscover: deps.beforeDiscover } : {}),
     fs: deps.fs,
     clock: deps.clock,
     ids: deps.ids,
@@ -371,13 +372,9 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     }
   }
 
-  return {
-    report:
-      shareNotices.length > 0
-        ? { ...report, notices: [...shareNotices, ...report.notices] }
-        : report,
-    readiness: record,
-  };
+  // The share step's notices are already in the report: `runPass` pushes them
+  // as it runs, now that it owns the call.
+  return { report, readiness: record };
 }
 
 /** Just enough to know which roots exist and how to compare paths. */

@@ -137,6 +137,12 @@ export interface EngineDeps {
    * the previous holder notices.
    */
   readonly lock?: PassLock;
+  /**
+   * Runs inside the lock, before P1 (ADR-71). It moves records in the vault, so
+   * it must be inside for the same reason every other write here is: between
+   * its read and its write sit Claudian, the peer machine and this engine.
+   */
+  readonly beforeDiscover?: () => Promise<readonly string[]>;
   /** Injected so the engine stays free of Date, per testing.md §3 req 4. */
   readonly nowIso: () => string;
 }
@@ -266,6 +272,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   }
 
   async function runPassBody(): Promise<PassReport> {
+  // Before P1, because moving a record changes what this same pass admits.
+  // Inside the lock, because it writes.
+  for (const notice of deps.beforeDiscover ? await deps.beforeDiscover() : []) {
+    notices.push(notice);
+  }
   await barrier("P0:preflight-done", {});
   if (deps.remoteReadiness === "unsupported-format") {
     return finish("aborted", "format-version-unsupported");

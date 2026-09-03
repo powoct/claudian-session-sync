@@ -20,7 +20,7 @@ import {
 } from "../domain/settings";
 import type { ConflictResolution } from "../domain/conflict";
 import type { NotReadyReason, ReadinessObservation, ReadinessState } from "../domain/readiness";
-import type { MachineId, WorkspaceId } from "../domain/types";
+import type { LogicalId, MachineId, WorkspaceId } from "../domain/types";
 import type { Clock, IdGen } from "../infra/clock";
 import type { FsGateway } from "../infra/fs-gateway";
 import {
@@ -45,7 +45,12 @@ import {
   restoreBackup,
 } from "./restore-commands";
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
-import { shareOwnConversations } from "./conversation-sharing";
+import type { PassLock } from "./sync-engine";
+import {
+  type ShareOutcome,
+  type SharingHold,
+  shareOwnConversations,
+} from "./conversation-sharing";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
@@ -176,6 +181,8 @@ export class PluginRuntime {
   private passInFlight = false;
   private startedAtMs: number;
   private firstPassDone = false;
+  /** Last pass's forks, so the repair screen has something before it re-scans. */
+  private sharingHolds: readonly SharingHold[] = [];
   private readonly listeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(private readonly host: RuntimeHost) {
@@ -891,34 +898,137 @@ export class PluginRuntime {
     this.binding = next;
   }
 
-  private async shareConversations(): Promise<readonly string[]> {
+  /**
+   * Runs the reconciliation and turns its outcome into report lines.
+   *
+   * `lock` is the pass's own, so every write here is re-checked against it —
+   * this runs inside `runPass`, which is where the two comments that used to
+   * claim it always said it was.
+   */
+  private async shareConversations(lock?: PassLock): Promise<readonly string[]> {
+    const holds = await this.runSharing(lock);
+    if (holds === null) return [];
+    this.sharingHolds = holds.holds;
+    const notices: string[] = [];
+    const { outcome } = holds;
+
+    if (outcome.moved + outcome.completed > 0) {
+      notices.push(
+        `${outcome.moved + outcome.completed} conversation record(s) moved to the shared ` +
+          "layer, so your other devices list them. Moving them back is not something this " +
+          "switch can undo.",
+      );
+    }
+    if (outcome.folded > 0) {
+      notices.push(
+        `${outcome.folded} shared conversation record(s) caught up with this device's newer ` +
+          "version. The version each replaced is in your backups.",
+      );
+    }
+    if (outcome.retired > 0) {
+      notices.push(
+        `${outcome.retired} conversation record(s) are now maintained by another device, so ` +
+          "this device's stale copy was withdrawn (a copy is in your backups).",
+      );
+    }
+    if (outcome.tombstoned > 0) {
+      notices.push(
+        `${outcome.tombstoned} conversation(s) you deleted were still listed in the shared ` +
+          "layer, and the deletion has now been carried across.",
+      );
+    }
+    for (const held of outcome.heldBack.slice(0, 3)) {
+      notices.push(`not shared — ${held}`);
+    }
+    if (outcome.heldBack.length > 3) {
+      notices.push(`…and ${outcome.heldBack.length - 3} more left where they are`);
+    }
+    if (outcome.holds.length > 0) {
+      notices.push(
+        `${outcome.holds.length} conversation record(s) differ on this device and in the shared ` +
+          'layer. Run "Repair shared conversation records" to see both and choose.',
+      );
+    }
+    return notices;
+  }
+
+  /**
+   * The reconciliation itself, shared by the pass and the repair screen.
+   *
+   * Failures are swallowed and the outcome is reported rather than acted on:
+   * this is a convenience laid on top of another plugin's store, and it must
+   * never be the reason a sync pass does not run.
+   */
+  private async runSharing(
+    lock?: PassLock,
+    forced?: ReadonlySet<string>,
+  ): Promise<{ outcome: ShareOutcome; holds: readonly SharingHold[] } | null> {
+    const workspaceId = this.identity?.file?.workspaceId;
+    const deviceKey = this.host.claudianDeviceKey?.() ?? null;
+    if (!workspaceId || deviceKey === null) return null;
     try {
+      const home = await this.homeStore();
+      const backupWriter = createBackupWriter({
+        fs: this.host.fs,
+        home,
+        joinPath: this.host.joinPath,
+        hashBytes: this.host.hashBytes,
+        nowMs: () => this.host.clock.nowMs(),
+        randomSuffix: () => this.host.ids.token(4),
+        keep: this.settings.backupKeep,
+      });
+      const published = await home.loadSharedRecords(workspaceId, deviceKey);
       const outcome = await shareOwnConversations({
         fs: this.host.fs,
         guard: await this.pathGuard(),
         joinPath: this.host.joinPath,
         hashBytes: (bytes: Uint8Array) => this.host.hashBytes(bytes),
         vaultRealPath: this.host.vaultRoot,
-        deviceKey: this.host.claudianDeviceKey?.() ?? null,
+        deviceKey,
+        nowMs: this.host.clock.nowMs(),
+        published,
+        // `<id>.meta` matches the claudian provider's own logical-id shape, so
+        // these land in the directory its restore path already looks in
+        // (a bare `<id>` would put them somewhere nothing relates to it).
+        backup: async (input) => {
+          const kept = await backupWriter.backup({
+            sourcePath: input.sourcePath,
+            workspaceId,
+            providerId: "claudian",
+            logicalId: `${input.conversationId}.meta` as LogicalId,
+            remote: false,
+            action: input.action,
+          });
+          return kept.path;
+        },
+        mayWrite: () => (lock ? lock.mayWrite() : Promise.resolve(true)),
+        ...(forced ? { forced } : {}),
       });
-      const notices: string[] = [];
-      if (outcome.moved + outcome.completed > 0) {
-        notices.push(
-          `${outcome.moved + outcome.completed} conversation record(s) moved to the shared ` +
-            "layer, so your other devices list them. Moving them back is not something this " +
-            "switch can undo.",
-        );
+      if (outcome.published !== null) {
+        await home.saveSharedRecords(workspaceId, outcome.published);
       }
-      for (const held of outcome.heldBack.slice(0, 3)) {
-        notices.push(`not shared — ${held}`);
-      }
-      if (outcome.heldBack.length > 3) {
-        notices.push(`…and ${outcome.heldBack.length - 3} more left where they are`);
-      }
-      return notices;
+      return { outcome, holds: outcome.holds };
     } catch {
-      return [];
+      return null;
     }
+  }
+
+  /** The forks a person has to decide, for the repair screen. */
+  async sharingConflicts(): Promise<readonly SharingHold[]> {
+    const run = await this.runSharing();
+    return run === null ? this.sharingHolds : run.holds;
+  }
+
+  /**
+   * Publishes this device's version of one conversation, on the user's say-so.
+   *
+   * One id at a time and never in bulk: each of these is an independent fork,
+   * and one decision does not carry to the next. The shared version it replaces
+   * is backed up first, and a backup that fails cancels the write.
+   */
+  async publishSharedRecord(conversationId: string): Promise<boolean> {
+    const run = await this.runSharing(undefined, new Set([conversationId]));
+    return run !== null && run.outcome.folded > 0;
   }
 
   private async conflictDeps() {

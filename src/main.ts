@@ -11,6 +11,7 @@ import { AiSessionSyncSettingTab } from "./ui/settings-tab";
 import { ConflictModal, describeOutcome } from "./ui/conflict-modal";
 import { ReportModal } from "./ui/report-modal";
 import { OrphanModal } from "./ui/orphan-modal";
+import { SharingModal } from "./ui/sharing-modal";
 import { RestoreModal } from "./ui/restore-modal";
 
 /**
@@ -85,6 +86,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       id: "show-conflicts",
       name: "Show conflicts",
       callback: () => this.openConflicts(),
+    });
+    this.addCommand({
+      id: "repair-shared-records",
+      name: "Repair shared conversation records",
+      callback: () => this.openSharing(),
     });
 
     // The three resolutions of §8.1 as palette entries. Each acts directly
@@ -242,6 +248,10 @@ export default class AiSessionSyncPlugin extends Plugin {
   /** §6.6's promise: a way to clear a half-copied session, never automatic. */
   private openOrphans(): void {
     new OrphanModal(this.getRuntime(), this.app).open();
+  }
+
+  private openSharing(): void {
+    new SharingModal(this.getRuntime(), this.app).open();
   }
 
   /**

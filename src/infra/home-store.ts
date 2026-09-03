@@ -114,6 +114,39 @@ export interface RemoteStateFile {
   readonly notReadyReason: NotReadyReason | null;
 }
 
+/**
+ * `shared-records.json` (ADR-71) — what this machine has published into
+ * Claudian's shared layer, and what it is holding back.
+ *
+ * One entry per conversation whose record this machine moved. `publishedHash`
+ * means exactly one thing: **bytes this machine itself wrote into the flat
+ * layer**, or bytes it proved byte-identical on both sides. It is never seeded
+ * from a record merely found there — that distinction is the whole safety
+ * argument, because the hash is what authorises overwriting the shared copy.
+ *
+ * Machine-local and unsynced, like everything else here. Losing it costs
+ * convergence, never bytes: every entry it forgets falls back to "hold and
+ * report", which is the same answer the code gives a record it has never seen.
+ */
+export interface SharedRecordsFile {
+  readonly schemaVersion: number;
+  /**
+   * The device key these entries were published from. A different one means a
+   * reinstalled Claudian, whose records live in a different folder — the
+   * entries describe conversations this installation never published.
+   */
+  readonly deviceKey: string;
+  readonly records: Readonly<Record<string, SharedRecordEntry>>;
+}
+
+export interface SharedRecordEntry {
+  /** sha256 of the bytes this machine last wrote into the flat layer. */
+  readonly publishedHash: string;
+  readonly publishedSize: number;
+  /** Last pass that saw this conversation at all; drives GC. */
+  readonly lastSeenMs: number;
+}
+
 export interface HomeLayout {
   readonly root: string;
   readonly machineFile: string;
@@ -125,6 +158,7 @@ export interface HomeLayout {
   stateDir(workspaceId: string): string;
   observationsFile(workspaceId: string): string;
   remoteFile(workspaceId: string): string;
+  sharedRecordsFile(workspaceId: string): string;
   lockFile(workspaceId: string): string;
 }
 
@@ -142,6 +176,7 @@ export function homeLayout(deps: HomeStoreDeps): HomeLayout {
     stateDir: (id) => join(root, "state", id),
     observationsFile: (id) => join(root, "state", id, "observations.json"),
     remoteFile: (id) => join(root, "state", id, "remote.json"),
+    sharedRecordsFile: (id) => join(root, "state", id, "shared-records.json"),
     lockFile: (id) => join(root, "locks", `${id}.lock`),
   };
 }
@@ -161,6 +196,8 @@ export interface HomeStore {
   saveObservations(workspaceId: WorkspaceId, file: ObservationsFile, nowMs: number): Promise<void>;
   loadRemote(workspaceId: WorkspaceId, syncDirPath: string): Promise<RemoteRecord>;
   saveRemote(workspaceId: WorkspaceId, record: RemoteRecord, context: RemoteContext): Promise<void>;
+  loadSharedRecords(workspaceId: WorkspaceId, deviceKey: string): Promise<SharedRecordsFile>;
+  saveSharedRecords(workspaceId: WorkspaceId, file: SharedRecordsFile): Promise<void>;
   /** Mints a path under the state root; the only way to get a writable one. */
   mint(absoluteTarget: string): Result<SafeAbsolutePath>;
 }
@@ -277,6 +314,27 @@ export function createHomeStore(deps: HomeStoreDeps): HomeStore {
       await put(layout.remoteFile(workspaceId), layout.stateDir(workspaceId), file);
     },
 
+    async loadSharedRecords(workspaceId, deviceKey) {
+      const empty: SharedRecordsFile = {
+        schemaVersion: STATE_SCHEMA_VERSION,
+        deviceKey,
+        records: {},
+      };
+      const load = await readJson(deps.fs, layout.sharedRecordsFile(workspaceId));
+      if (load.status !== "loaded") return empty;
+      const parsed = parseSharedRecords(load.raw);
+      if (parsed === null) return empty;
+      // Entries published from a different installation describe conversations
+      // in a device folder this one does not own. Treating them as ours would
+      // let a stale hash authorise overwriting a shared record.
+      if (parsed.deviceKey !== deviceKey) return empty;
+      return parsed;
+    },
+
+    async saveSharedRecords(workspaceId, file) {
+      await put(layout.sharedRecordsFile(workspaceId), layout.stateDir(workspaceId), file);
+    },
+
     mint,
   };
 }
@@ -340,6 +398,39 @@ function parseProviders(raw: unknown): Record<string, ProviderBinding> {
     };
   }
   return out;
+}
+
+/**
+ * Refuses far more than it repairs.
+ *
+ * A malformed entry is dropped rather than defaulted, because every default
+ * that could be invented here — an empty hash, a zero size — would be a claim
+ * about bytes in the vault that this machine never verified. Dropping one
+ * costs a held-back record and a line in the report.
+ */
+function parseSharedRecords(raw: unknown): SharedRecordsFile | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const c = raw as Partial<SharedRecordsFile>;
+  // A newer schema is never read and never rewritten: it is direct evidence of
+  // a newer build of this plugin on this machine (§5.3).
+  if (typeof c.schemaVersion !== "number" || c.schemaVersion > STATE_SCHEMA_VERSION) return null;
+  if (typeof c.deviceKey !== "string") return null;
+  if (typeof c.records !== "object" || c.records === null || Array.isArray(c.records)) return null;
+
+  const records: Record<string, SharedRecordEntry> = {};
+  for (const [id, value] of Object.entries(c.records)) {
+    if (typeof value !== "object" || value === null) continue;
+    const entry = value as Partial<SharedRecordEntry>;
+    if (typeof entry.publishedHash !== "string" || entry.publishedHash.length === 0) continue;
+    if (typeof entry.publishedSize !== "number" || !Number.isFinite(entry.publishedSize)) continue;
+    if (typeof entry.lastSeenMs !== "number" || !Number.isFinite(entry.lastSeenMs)) continue;
+    records[id] = {
+      publishedHash: entry.publishedHash,
+      publishedSize: entry.publishedSize,
+      lastSeenMs: entry.lastSeenMs,
+    };
+  }
+  return { schemaVersion: c.schemaVersion, deviceKey: c.deviceKey, records };
 }
 
 function parseRemote(raw: unknown): RemoteStateFile | null {
