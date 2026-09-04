@@ -59,6 +59,8 @@ interface RunOptions {
   /** Seeds the published base, as a successful earlier pass would have. */
   readonly published?: Record<string, { publishedHash: string; publishedSize: number }>;
   readonly forced?: ReadonlySet<string>;
+  readonly only?: ReadonlySet<string>;
+  readonly inspectOnly?: boolean;
   readonly mayWrite?: () => Promise<boolean>;
   /** Returns null to model a backup that could not be taken. */
   readonly backup?: () => Promise<string | null>;
@@ -110,6 +112,8 @@ async function run(root: string, options: RunOptions = {}) {
     backup: options.backup ?? (async () => path.join(root, "backup-taken")),
     mayWrite: options.mayWrite ?? (async () => true),
     ...(options.forced ? { forced: options.forced } : {}),
+    ...(options.only ? { only: options.only } : {}),
+    ...(options.inspectOnly ? { inspectOnly: options.inspectOnly } : {}),
   });
 }
 
@@ -475,5 +479,82 @@ describe("ADR-69: sharing by moving the record", () => {
     await run(root);
     const names = await fsp.readdir(store(root));
     expect(names.filter((n) => n.endsWith(".assigned.json"))).toEqual([]);
+  });
+});
+
+describe("ADR-71: looking is not consenting", () => {
+  it("writes nothing at all while inspecting", async () => {
+    // The sharing switch is machine-local consent, and opening the repair
+    // screen is not consent. Before `inspectOnly`, listing the forks ran the
+    // whole reconciliation — so a user with the switch off who opened the
+    // screen to look had every record on this device published by looking.
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "mine" });
+
+    const outcome = await run(root, { inspectOnly: true });
+
+    expect(outcome.moved).toBe(0);
+    expect(await read(sharedRecord(root, CONV)), "nothing was published").toBeNull();
+    expect(await read(deviceRecord(root, DEVICE, CONV))).toContain("mine");
+    // And it learned nothing it may remember: a base it did not create would
+    // authorise a later overwrite.
+    expect(outcome.published).toBeNull();
+  });
+
+  it("still finds the forks it is opened to show", async () => {
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "mine" });
+    await fsp.writeFile(
+      sharedRecord(root, CONV),
+      `${JSON.stringify({ id: CONV, providerId: "claude", title: "theirs" }, null, 2)}\n`,
+    );
+
+    const outcome = await run(root, { inspectOnly: true });
+    expect(outcome.holds).toHaveLength(1);
+    expect(outcome.holds[0]?.conversationId).toBe(CONV);
+  });
+
+  it("keeps scanning past a record it would have acted on", async () => {
+    // The row it would have folded is not stuck, so it is not shown — but
+    // abandoning the scan there would hide every fork found after it.
+    const root = await vault();
+    await fsp.mkdir(store(root), { recursive: true });
+    const other = "conv-1788480000000-aaaaaaaaa";
+    // One that a real pass would publish (no shared copy yet).
+    await writeRecord(root, DEVICE, other, { id: other, providerId: "claude", title: "fresh" });
+    // …and one that is genuinely forked, which is what must still be reported.
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "mine" });
+    await fsp.writeFile(
+      sharedRecord(root, CONV),
+      `${JSON.stringify({ id: CONV, providerId: "claude", title: "theirs" }, null, 2)}\n`,
+    );
+
+    const outcome = await run(root, { inspectOnly: true });
+    expect(outcome.holds.map((h) => h.conversationId)).toEqual([CONV]);
+    expect(await read(sharedRecord(root, other)), "the publishable one stayed put").toBeNull();
+  });
+
+  it("resolving one fork touches only that conversation", async () => {
+    // The user was shown one row and clicked one button. Publishing every
+    // other device record as a side effect is a decision they did not make,
+    // on records they were never shown.
+    const root = await vault();
+    const bystander = "conv-1788480000000-bbbbbbbbb";
+    await writeRecord(root, DEVICE, bystander, { id: bystander, providerId: "claude", title: "not asked about" });
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "mine" });
+    await fsp.writeFile(
+      sharedRecord(root, CONV),
+      `${JSON.stringify({ id: CONV, providerId: "claude", title: "theirs" }, null, 2)}\n`,
+    );
+
+    const outcome = await run(root, { forced: new Set([CONV]), only: new Set([CONV]) });
+
+    expect(outcome.folded).toBe(1);
+    expect(await read(sharedRecord(root, CONV))).toContain("mine");
+    expect(
+      await read(sharedRecord(root, bystander)),
+      "a record the user was never shown must not be published",
+    ).toBeNull();
+    expect(await read(deviceRecord(root, DEVICE, bystander))).toContain("not asked about");
   });
 });
