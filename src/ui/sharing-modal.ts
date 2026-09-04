@@ -19,7 +19,7 @@
  * person now stays somewhere a person can find it.
  */
 import { Modal, Notice, type App } from "obsidian";
-import type { SharingHold } from "../orchestration/conversation-sharing";
+import type { PublishOutcome, SharingHold } from "../orchestration/conversation-sharing";
 import type { PluginRuntime } from "../orchestration/plugin-runtime";
 
 export class SharingModal extends Modal {
@@ -96,15 +96,41 @@ export class SharingModal extends Modal {
 
   private async publish(hold: SharingHold, button: HTMLButtonElement): Promise<void> {
     button.disabled = true;
-    const done = await this.runtime.publishSharedRecord(hold.conversationId);
-    new Notice(
-      done
-        ? "Published. Your other devices will show this version once the vault syncs; the one " +
-          "it replaced is in your backups."
-        : "Nothing was published — the shared version changed again, or it could not be backed " +
-          "up. Nothing was overwritten.",
-    );
+    new Notice(describePublish(await this.runtime.publishSharedRecord(hold.conversationId)));
     await this.render();
+  }
+}
+
+/**
+ * Every outcome says what to do next, not only what went wrong.
+ *
+ * A refusal that stops at "nothing was published" gets the same button pressed
+ * again, which is right for one of these and useless for the others.
+ */
+export function describePublish(outcome: PublishOutcome): string {
+  if (outcome.ok) {
+    return (
+      "Published. Your other devices will show this version once the vault syncs; the one it " +
+      "replaced is in your backups."
+    );
+  }
+  switch (outcome.reason) {
+    case "sync-in-progress":
+      return (
+        "Not published — a sync is running right now, and this waits rather than writing " +
+        "underneath it. Nothing was overwritten; try again in a moment."
+      );
+    case "changed-again":
+      return (
+        "Not published — the shared version changed again while this was working, or it could " +
+        "not be backed up first. Nothing was overwritten. Reopen this screen to see where it " +
+        "stands now."
+      );
+    default:
+      return (
+        "Not published — this vault is not set up for sharing right now (no workspace, or " +
+        "Claudian's device key could not be read). Nothing was overwritten."
+      );
   }
 }
 

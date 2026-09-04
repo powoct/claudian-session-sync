@@ -130,6 +130,7 @@ describe.skipIf(isWindows)("sharing conversation records fails closed on an unre
         published: { schemaVersion: 1, deviceKey: device, records: {} },
         backup: async () => path.join(root, "backup-taken"),
         mayWrite: async () => true,
+        inspectOnly: false,
       });
       expect(outcome.moved + outcome.folded + outcome.tombstoned).toBe(0);
     } finally {

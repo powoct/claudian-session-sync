@@ -11,8 +11,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { App } from "obsidian";
 import { type FakeElement, Notice, makeStubApp } from "../helpers/obsidian-stub";
-import { SharingModal } from "../../src/ui/sharing-modal";
-import type { SharingHold } from "../../src/orchestration/conversation-sharing";
+import { SharingModal, describePublish } from "../../src/ui/sharing-modal";
+import type { PublishOutcome, SharingHold } from "../../src/orchestration/conversation-sharing";
 import type { PluginRuntime } from "../../src/orchestration/plugin-runtime";
 
 const asFake = (element: HTMLElement): FakeElement => element as unknown as FakeElement;
@@ -43,10 +43,10 @@ const hold = (over: Partial<SharingHold> = {}): SharingHold => ({
   ...over,
 });
 
-const stubRuntime = (holds: readonly SharingHold[], published = true) =>
+const stubRuntime = (holds: readonly SharingHold[], outcome: PublishOutcome = { ok: true }) =>
   ({
     sharingConflicts: async () => [...holds],
-    publishSharedRecord: async () => published,
+    publishSharedRecord: async () => outcome,
   }) as unknown as PluginRuntime;
 
 afterEach(() => {
@@ -108,11 +108,27 @@ describe("the repair screen", () => {
 
   it("says nothing was overwritten when publishing did not happen", async () => {
     // The refusal has to say what did *not* happen, or the user clicks again.
-    const modal = new SharingModal(stubRuntime([hold()], false), makeStubApp() as unknown as App);
+    const modal = new SharingModal(
+      stubRuntime([hold()], { ok: false, reason: "changed-again" }),
+      makeStubApp() as unknown as App,
+    );
     await modal.onOpen();
     await click(modal.contentEl, "Publish this device's version");
 
     expect(Notice.instances.at(-1)?.message).toContain("Nothing was overwritten");
+  });
+
+  it("tells a busy sync apart from a refusal, because only one is worth retrying", () => {
+    // Both used to land on one sentence, and the re-check's reviewer told the
+    // next operator not to trust the dialog at all — a screen a careful reader
+    // is instructed to disbelieve is a bug, not a wording preference.
+    const busy = describePublish({ ok: false, reason: "sync-in-progress" });
+    const moved = describePublish({ ok: false, reason: "changed-again" });
+
+    expect(busy).toContain("try again in a moment");
+    expect(moved).not.toContain("try again in a moment");
+    expect(busy).not.toBe(moved);
+    for (const message of [busy, moved]) expect(message).toContain("Nothing was overwritten");
   });
 
   it("says where the replaced version went when it did", async () => {

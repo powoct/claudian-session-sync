@@ -232,6 +232,29 @@ describe("providers", () => {
     expect(h.runtime.defaultProviderRoot("claude-code")).toBe(h.providerRoot);
     expect(h.runtime.defaultProviderRoot("nope")).toBeNull();
   });
+
+  it("lets an overridden root be cleared again", async () => {
+    // Emptying the box has to mean "go back to the detected path". It did not:
+    // the patch simply omitted the field, `{...previous, ...patch}` kept the
+    // old value, and there was no way back from the UI at all. The 2026-09-04
+    // re-check operator typed a stray `5` into Grok's path, watched 92 files
+    // go unreachable, and had to close Obsidian and edit the binding by hand.
+    const h = await makeHarness();
+    await h.runtime.refresh();
+    await h.runtime.createIdentity("v");
+    await h.runtime.setSyncDir(h.syncDir);
+
+    await h.runtime.setProvider("claude-code", { rootOverride: "/somewhere/wrong" });
+    expect(h.runtime.providerRootOverride("claude-code")).toBe("/somewhere/wrong");
+
+    await h.runtime.setProvider("claude-code", { rootOverride: null });
+    expect(h.runtime.providerRootOverride("claude-code")).toBeNull();
+
+    // And an unrelated patch still leaves a deliberate override alone.
+    await h.runtime.setProvider("claude-code", { rootOverride: "/somewhere/chosen" });
+    await h.runtime.setProvider("claude-code", { enabled: true });
+    expect(h.runtime.providerRootOverride("claude-code")).toBe("/somewhere/chosen");
+  });
 });
 
 /**

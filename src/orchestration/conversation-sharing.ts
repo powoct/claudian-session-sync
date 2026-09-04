@@ -152,9 +152,27 @@ export interface ShareDeps {
    * opening a screen is not consent. Before this existed, listing the forks
    * ran the full reconciliation — so a user with the switch off who opened the
    * screen out of curiosity had every record on this device published.
+   *
+   * **Required, deliberately.** The re-check's reviewer made the point that
+   * this fix holds only because every caller remembers to pass it, and that a
+   * future call site which forgot would silently reopen the same hole. So
+   * forgetting is now a compile error: there is no safe default to fall back
+   * on, because both intents are equally legitimate.
    */
-  readonly inspectOnly?: boolean;
+  readonly inspectOnly: boolean;
 }
+
+/**
+ * What pressing "publish" did.
+ *
+ * Three-way on purpose: a pass holding the lock and a record that moved under
+ * the click are different situations with different next steps, and a single
+ * "nothing happened" makes the user press the button again for the one case
+ * where pressing again cannot help.
+ */
+export type PublishOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: "sync-in-progress" | "changed-again" | "unavailable" };
 
 /** One conversation whose two copies have diverged, for the repair screen. */
 export interface SharingHold {

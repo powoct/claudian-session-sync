@@ -67,6 +67,7 @@ describe("appendix F reaches its own gates", () => {
           return kept;
         },
         mayWrite: async () => true,
+        inspectOnly: false,
       };
       const outcome = await shareOwnConversations({ ...base, ...over });
       if (outcome.published) published = outcome.published;
