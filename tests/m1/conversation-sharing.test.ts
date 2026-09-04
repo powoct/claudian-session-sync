@@ -111,9 +111,9 @@ async function run(root: string, options: RunOptions = {}) {
     },
     backup: options.backup ?? (async () => path.join(root, "backup-taken")),
     mayWrite: options.mayWrite ?? (async () => true),
+    inspectOnly: options.inspectOnly ?? false,
     ...(options.forced ? { forced: options.forced } : {}),
     ...(options.only ? { only: options.only } : {}),
-    ...(options.inspectOnly ? { inspectOnly: options.inspectOnly } : {}),
   });
 }
 
@@ -378,6 +378,7 @@ describe("ADR-69: sharing by moving the record", () => {
       published: { schemaVersion: 1, deviceKey: DEVICE, records: {} },
       backup: async () => path.join(root, "backup-taken"),
       mayWrite: async () => true,
+      inspectOnly: false,
     });
 
     expect(outcome.moved, "the move did not complete").toBe(0);

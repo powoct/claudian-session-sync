@@ -47,6 +47,7 @@ import {
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
 import type { PassLock } from "./sync-engine";
 import {
+  type PublishOutcome,
   type ShareOutcome,
   type SharingHold,
   shareOwnConversations,
@@ -375,25 +376,39 @@ export class PluginRuntime {
    * reason ADR-27 exists: a dry run writes nothing at all. What the user gets
    * is the scope, before any pass can act on it.
    */
+  /**
+   * `rootOverride: null` clears it; omitting the key leaves it alone.
+   *
+   * The distinction is the whole point. A patch that merely omits the field
+   * cannot express "remove this", so emptying the storage-folder box left the
+   * old value on disk and the user had no way back except editing the binding
+   * by hand — which is exactly what the 2026-09-04 re-check operator had to do
+   * after a stray keystroke put `5` in Grok's path.
+   */
   async setProvider(
     providerId: string,
-    patch: Partial<ProviderBinding>,
+    patch: Partial<Omit<ProviderBinding, "rootOverride">> & {
+      readonly rootOverride?: string | null;
+    },
   ): Promise<{ readonly firstEnable: boolean }> {
     const binding = this.binding;
     if (!binding) return { firstEnable: false };
     const previous = binding.providers[providerId] ?? { enabled: false };
     const firstEnable = patch.enabled === true && previous.introducedAt === undefined;
+    const { rootOverride, ...rest } = patch;
+    const next: ProviderBinding = {
+      ...previous,
+      ...rest,
+      ...(firstEnable ? { introducedAt: this.nowIso() } : {}),
+    };
+    if (rootOverride === null) delete (next as { rootOverride?: string }).rootOverride;
+    else if (rootOverride !== undefined) {
+      (next as { rootOverride?: string }).rootOverride = rootOverride;
+    }
     const home = await this.homeStore();
     await home.saveBinding({
       ...binding,
-      providers: {
-        ...binding.providers,
-        [providerId]: {
-          ...previous,
-          ...patch,
-          ...(firstEnable ? { introducedAt: this.nowIso() } : {}),
-        },
-      },
+      providers: { ...binding.providers, [providerId]: next },
     });
     await this.refresh();
     if (firstEnable) await this.syncNow({ dryRun: true });
@@ -906,7 +921,9 @@ export class PluginRuntime {
    * claim it always said it was.
    */
   private async shareConversations(lock?: PassLock): Promise<readonly string[]> {
-    const holds = await this.runSharing(lock ? { lock } : {});
+    const holds = await this.runSharing(
+      lock ? { lock, inspectOnly: false } : { inspectOnly: false },
+    );
     if (holds === null) return [];
     this.sharingHolds = holds.holds;
     const notices: string[] = [];
@@ -960,10 +977,11 @@ export class PluginRuntime {
    * never be the reason a sync pass does not run.
    */
   private async runSharing(options: {
+    /** Required: see `ShareDeps.inspectOnly`. Forgetting it is a consent bug. */
+    readonly inspectOnly: boolean;
     readonly lock?: PassLock;
     readonly forced?: ReadonlySet<string>;
     readonly only?: ReadonlySet<string>;
-    readonly inspectOnly?: boolean;
   }): Promise<{ outcome: ShareOutcome; holds: readonly SharingHold[] } | null> {
     const { lock, forced, only, inspectOnly } = options;
     const workspaceId = this.identity?.file?.workspaceId;
@@ -1007,7 +1025,7 @@ export class PluginRuntime {
         mayWrite: () => (lock ? lock.mayWrite() : Promise.resolve(true)),
         ...(forced ? { forced } : {}),
         ...(only ? { only } : {}),
-        ...(inspectOnly ? { inspectOnly } : {}),
+        inspectOnly,
       });
       if (outcome.published !== null) {
         await home.saveSharedRecords(workspaceId, outcome.published);
@@ -1039,14 +1057,22 @@ export class PluginRuntime {
    * and one decision does not carry to the next. The shared version it replaces
    * is backed up first, and a backup that fails cancels the write.
    */
-  async publishSharedRecord(conversationId: string): Promise<boolean> {
+  async publishSharedRecord(conversationId: string): Promise<PublishOutcome> {
     // `only`, so the click acts on the conversation the user was shown and no
     // other. Under the same lock every other click-path write takes: this is a
     // destructive write outside a pass, and a pass may be applying right now.
+    //
+    // The outcome is three-way rather than a boolean because two of the three
+    // read identically to a user and lead to different next moves: "a pass is
+    // running, try in a moment" is not "it did not apply". The re-check's
+    // reviewer flagged that both landed on one sentence, and said not to trust
+    // the dialog — a screen a careful reader is told to disbelieve is a bug.
     const one = new Set([conversationId]);
-    return this.withWriteGate(false, async () => {
-      const run = await this.runSharing({ forced: one, only: one });
-      return run !== null && run.outcome.folded > 0;
+    return this.withWriteGate<PublishOutcome>({ ok: false, reason: "sync-in-progress" }, async () => {
+      const run = await this.runSharing({ forced: one, only: one, inspectOnly: false });
+      if (run === null) return { ok: false, reason: "unavailable" };
+      if (run.outcome.folded > 0) return { ok: true };
+      return { ok: false, reason: "changed-again" };
     });
   }
 

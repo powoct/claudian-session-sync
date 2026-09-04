@@ -224,8 +224,11 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
             .setValue(this.rootOverride(provider.id))
             .onChange(async (value) => {
               const trimmed = value.trim();
+              // `null`, not an omitted key: emptying the box has to mean "go
+              // back to the detected path", and a patch that just leaves the
+              // field out cannot say that.
               await this.runtime.setProvider(provider.id, {
-                ...(trimmed.length > 0 ? { rootOverride: trimmed } : {}),
+                rootOverride: trimmed.length > 0 ? trimmed : null,
               });
             }),
         );
