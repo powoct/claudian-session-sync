@@ -1,6 +1,6 @@
 {
   "name": "claudian-session-sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Sync AI agent CLI session files across machines so a conversation can be resumed elsewhere.",
   "author": "powoct",
   "license": "MIT",
