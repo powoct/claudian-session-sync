@@ -24,7 +24,10 @@
  * (`ConversationRepository.metadataTargets`) that is derived **once per
  * Obsidian session**, from a single deferred scan at layout-ready. Nothing
  * watches `.claudian/sessions/`, and a cached conversation's metadata file is
- * never re-read. Our move runs inside a pass in that same process, so it always
+ * never re-read. That staleness is upstream's documented design, not an
+ * oversight — correctness there lives in the on-disk assignment fence, which
+ * every write re-reads — so it is not going to change, and this code treats it
+ * as a fixed property of the environment rather than a bug to wait out. Our move runs inside a pass in that same process, so it always
  * lands *after* the map was fixed — the map is stale by construction, not by
  * race. The next metadata write (a chat turn, a rename, a pin, a usage update)
  * recreates `devices/<key>/<id>.meta.json` from a strictly newer in-memory
