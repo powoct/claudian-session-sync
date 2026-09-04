@@ -906,7 +906,7 @@ export class PluginRuntime {
    * claim it always said it was.
    */
   private async shareConversations(lock?: PassLock): Promise<readonly string[]> {
-    const holds = await this.runSharing(lock);
+    const holds = await this.runSharing(lock ? { lock } : {});
     if (holds === null) return [];
     this.sharingHolds = holds.holds;
     const notices: string[] = [];
@@ -959,10 +959,13 @@ export class PluginRuntime {
    * this is a convenience laid on top of another plugin's store, and it must
    * never be the reason a sync pass does not run.
    */
-  private async runSharing(
-    lock?: PassLock,
-    forced?: ReadonlySet<string>,
-  ): Promise<{ outcome: ShareOutcome; holds: readonly SharingHold[] } | null> {
+  private async runSharing(options: {
+    readonly lock?: PassLock;
+    readonly forced?: ReadonlySet<string>;
+    readonly only?: ReadonlySet<string>;
+    readonly inspectOnly?: boolean;
+  }): Promise<{ outcome: ShareOutcome; holds: readonly SharingHold[] } | null> {
+    const { lock, forced, only, inspectOnly } = options;
     const workspaceId = this.identity?.file?.workspaceId;
     const deviceKey = this.host.claudianDeviceKey?.() ?? null;
     if (!workspaceId || deviceKey === null) return null;
@@ -1003,6 +1006,8 @@ export class PluginRuntime {
         },
         mayWrite: () => (lock ? lock.mayWrite() : Promise.resolve(true)),
         ...(forced ? { forced } : {}),
+        ...(only ? { only } : {}),
+        ...(inspectOnly ? { inspectOnly } : {}),
       });
       if (outcome.published !== null) {
         await home.saveSharedRecords(workspaceId, outcome.published);
@@ -1013,9 +1018,17 @@ export class PluginRuntime {
     }
   }
 
-  /** The forks a person has to decide, for the repair screen. */
+  /**
+   * The forks a person has to decide, for the repair screen.
+   *
+   * Read-only, and that is load-bearing rather than tidy. The sharing switch is
+   * machine-local consent; opening a screen is not consent. This used to run
+   * the full reconciliation, so a user with the switch off who opened the
+   * screen to look had every record on this device published by the act of
+   * looking (2026-09-04 acceptance, deviation 4).
+   */
   async sharingConflicts(): Promise<readonly SharingHold[]> {
-    const run = await this.runSharing();
+    const run = await this.runSharing({ inspectOnly: true });
     return run === null ? this.sharingHolds : run.holds;
   }
 
@@ -1027,8 +1040,14 @@ export class PluginRuntime {
    * is backed up first, and a backup that fails cancels the write.
    */
   async publishSharedRecord(conversationId: string): Promise<boolean> {
-    const run = await this.runSharing(undefined, new Set([conversationId]));
-    return run !== null && run.outcome.folded > 0;
+    // `only`, so the click acts on the conversation the user was shown and no
+    // other. Under the same lock every other click-path write takes: this is a
+    // destructive write outside a pass, and a pass may be applying right now.
+    const one = new Set([conversationId]);
+    return this.withWriteGate(false, async () => {
+      const run = await this.runSharing({ forced: one, only: one });
+      return run !== null && run.outcome.folded > 0;
+    });
   }
 
   private async conflictDeps() {

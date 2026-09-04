@@ -135,6 +135,25 @@ export interface ShareDeps {
    * without a person, and never in bulk.
    */
   readonly forced?: ReadonlySet<string>;
+  /**
+   * Restricts the whole pass to these conversations.
+   *
+   * A user resolving one fork asked about *that* conversation. Without this,
+   * the click would also move every other device-layer record into the shared
+   * layer as a side effect — a decision they did not make, on records they
+   * were never shown (found by the 2026-09-04 acceptance run).
+   */
+  readonly only?: ReadonlySet<string>;
+  /**
+   * Look, and change nothing.
+   *
+   * The repair screen has to *show* what is stuck without acting on it, and
+   * that is not a nicety: the sharing switch is machine-local consent, and
+   * opening a screen is not consent. Before this existed, listing the forks
+   * ran the full reconciliation — so a user with the switch off who opened the
+   * screen out of curiosity had every record on this device published.
+   */
+  readonly inspectOnly?: boolean;
 }
 
 /** One conversation whose two copies have diverged, for the repair screen. */
@@ -183,7 +202,11 @@ function empty(published: SharedRecordsFile | null = null): ShareOutcome {
 
 export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutcome> {
   if (deps.deviceKey === null || !DEVICE_KEY.test(deps.deviceKey)) return empty();
-  if (!(await deps.mayWrite())) return empty();
+  // An inspection needs no write permission, and demanding it would blank the
+  // repair screen whenever a pass happened to hold the lock.
+  if (!deps.inspectOnly && !(await deps.mayWrite())) return empty();
+  const inScope = (id: string) => deps.only === undefined || deps.only.has(id);
+  const mayWrite = async () => !deps.inspectOnly && (await deps.mayWrite());
 
   const store = deps.joinPath(deps.vaultRealPath, ...STORE_SEGMENTS);
 
@@ -234,6 +257,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   for (const entry of own) {
     if (!entry.isFile || !entry.name.endsWith(TOMBSTONE_SUFFIX)) continue;
     const id = entry.name.slice(0, -TOMBSTONE_SUFFIX.length);
+    if (!inScope(id)) continue;
     if (!flat.has(`${id}${META_SUFFIX}`)) continue; // nothing to resurrect
     if (flat.has(entry.name)) continue; // already tombstoned in the shared layer
 
@@ -260,7 +284,13 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
     const source = deps.joinPath(mine.value, entry.name);
     const bytes = await deps.fs.readFile(source).catch(() => null);
     if (!tombPath.ok || bytes === null) continue;
-    if (!(await deps.mayWrite())) return finish();
+    // An inspection skips the row rather than ending the scan: a row this pass
+    // would have acted on is not stuck, so it is not something to show anyone,
+    // and abandoning here would hide every fork found after it.
+    if (!(await mayWrite())) {
+      if (deps.inspectOnly) continue;
+      return finish();
+    }
     await deps.fs.writeFileAtomic(tombPath.value, bytes);
     state.delete(id);
     tombstoned += 1;
@@ -270,6 +300,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   for (const entry of own) {
     if (!entry.isFile || !entry.name.endsWith(META_SUFFIX)) continue;
     const id = entry.name.slice(0, -META_SUFFIX.length);
+    if (!inScope(id)) continue;
 
     // A fence names the device a conversation belongs to, and upstream checks
     // it before it resolves any metadata path. Moving a fenced record would be
@@ -314,7 +345,8 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
 
     // ── flat absent: the original move ───────────────────────────────────
     if (!flat.has(entry.name)) {
-      if (!(await deps.mayWrite())) return finish();
+      if (deps.inspectOnly) continue; // nothing stuck here to show a person
+      if (!(await mayWrite())) return finish();
       // No-replace, not atomic-replace: "the shared name is free" is this
       // row's premise, and a premise must fail at the syscall rather than be
       // assumed. Losing the race is a normal replan, not a licence to clobber.
@@ -361,7 +393,10 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
 
     // ── the shared copy is still ours: fold this device's record forward ──
     if (forced || (base !== undefined && sharedHash === base.publishedHash)) {
-      if (!(await deps.mayWrite())) return finish();
+      if (!(await mayWrite())) {
+        if (deps.inspectOnly) continue;
+        return finish();
+      }
       const kept = await deps.backup({
         sourcePath: target.value,
         conversationId: id,
@@ -380,7 +415,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
         hold(id, "the shared record changed while it was being replaced");
         continue;
       }
-      if (!(await deps.mayWrite())) return finish();
+      if (!(await mayWrite())) return finish();
       await deps.fs.writeFileAtomic(target.value, device.bytes);
       state.set(id, entryFor(deviceHash, device.bytes.length, deps.nowMs));
       if (await removeVerified(deps, source.value, deviceHash)) folded += 1;
@@ -394,7 +429,10 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
     // *ends* the loop: the next Obsidian session adopts the record as
     // `unscoped`, and this machine writes the shared copy forever after.
     if (base !== undefined && deviceHash === base.publishedHash) {
-      if (!(await deps.mayWrite())) return finish();
+      if (!(await mayWrite())) {
+        if (deps.inspectOnly) continue;
+        return finish();
+      }
       const kept = await deps.backup({
         sourcePath: source.value,
         conversationId: id,
@@ -453,11 +491,16 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
       tombstoned,
       heldBack,
       holds,
-      published: {
-        schemaVersion: deps.published.schemaVersion,
-        deviceKey: deps.published.deviceKey,
-        records,
-      },
+      // An inspection wrote nothing, so it learned nothing it may remember.
+      // Persisting a base it did not create is precisely the "seeded from a
+      // record we merely found" trap this whole design refuses.
+      published: deps.inspectOnly
+        ? null
+        : {
+            schemaVersion: deps.published.schemaVersion,
+            deviceKey: deps.published.deviceKey,
+            records,
+          },
     };
   }
 
@@ -497,7 +540,7 @@ async function removeVerified(
   source: SafeAbsolutePath,
   expected: string,
 ): Promise<boolean> {
-  if (!(await deps.mayWrite())) return false;
+  if (deps.inspectOnly || !(await deps.mayWrite())) return false;
   const still = await readIfPlainFile(deps, source);
   if (still === null || deps.hashBytes(still.bytes) !== expected) return false;
   await deps.fs.removeFile(source);
