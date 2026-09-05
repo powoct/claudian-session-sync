@@ -57,7 +57,10 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
   }
 
   private renderStatus(containerEl: HTMLElement, status: RuntimeStatus): void {
-    new Setting(containerEl).setName("Claudian Session Sync").setHeading();
+    // No heading here, and none naming the plugin: Obsidian already puts the
+    // plugin's name at the top of the pane, and the store review flags a
+    // heading that repeats it. The four sections below name what they
+    // configure; this one opens with the thing itself.
     new Setting(containerEl).setName("Status").setDesc(status.detail);
 
     if (status.phase === "await-init") {

@@ -158,6 +158,24 @@ type LoadFn = (request: string, parent: unknown, isMain: boolean) => unknown;
 const ModuleInternals = Module as unknown as { _load: LoadFn };
 let originalLoad: LoadFn;
 
+/**
+ * Obsidian runs a plugin in an Electron renderer, where `window` *is* the
+ * global object. This suite runs the bundle under Node, which has no `window`
+ * at all — so without this the bundle's `window.setTimeout` throws here while
+ * being perfectly correct in Obsidian, and the fix would be to weaken the
+ * plugin to suit the harness.
+ *
+ * Aliasing rather than stubbing is what makes the timer recording below still
+ * work: patching `globalThis.setTimeout` is observed through `window.setTimeout`
+ * because they are the same object, exactly as they are at runtime.
+ */
+// The DOM typings say `window` is `Window & typeof globalThis`, and Node's
+// global object is not that. The cast is the honest shape of the substitution:
+// what the bundle actually reaches for is the timer and storage members, and
+// those are the ones Node's global does have.
+const globals = globalThis as unknown as { window?: unknown };
+const hadWindow = "window" in globals;
+
 /** Timers created by the bundle, so a leak on unload is visible (§12.2b). */
 const liveTimers = new Set<unknown>();
 const realSetInterval = globalThis.setInterval;
@@ -166,6 +184,7 @@ const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
 
 beforeAll(() => {
+  if (!hadWindow) globals.window = globalThis;
   if (!existsSync(BUNDLE)) {
     throw new Error(`missing ${BUNDLE}. Run \`npm run build\` before \`npm run check:bundle\`.`);
   }
@@ -210,6 +229,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  if (!hadWindow) delete globals.window;
   ModuleInternals._load = originalLoad;
   globalThis.setInterval = realSetInterval;
   globalThis.clearInterval = realClearInterval;
@@ -493,5 +513,30 @@ describe("onload does not block Obsidian startup (§12.2c)", () => {
     expect(app.workspace.layoutReadyRanInline).toHaveLength(1);
     expect(fsCalls, "the first pass must be queued asynchronously, not merely deferred").toEqual([]);
     expect(elapsed).toBeLessThan(100);
+  });
+});
+
+describe("the globals the bundle expects from the renderer (§12.2b)", () => {
+  it("takes its timers from `window`, not the bare globals", () => {
+    // Obsidian's review asks for this for popout-window compatibility, and it
+    // is invisible under Node where the two are the same object. Asserting on
+    // the built bundle is the only way the distinction can be checked at all:
+    // a regression to bare `setTimeout` still passes every behavioural test.
+    const source = realFs.readFileSync(BUNDLE, "utf8");
+    for (const bare of [
+      /(?<![.\w])setTimeout\(/,
+      /(?<![.\w])clearTimeout\(/,
+      /(?<![.\w])setInterval\(/,
+      /(?<![.\w])clearInterval\(/,
+    ]) {
+      expect(source, `bundle calls a bare timer global: ${bare}`).not.toMatch(bare);
+    }
+    expect(source).toMatch(/window\.setTimeout\(/);
+    expect(source).toMatch(/window\.setInterval\(/);
+  });
+
+  it("never reaches for `globalThis`", () => {
+    // Same reason: in a popout it is not the window the UI belongs to.
+    expect(realFs.readFileSync(BUNDLE, "utf8")).not.toMatch(/globalThis\./);
   });
 });
