@@ -116,8 +116,11 @@ export default class AiSessionSyncPlugin extends Plugin {
     // (testing.md §12.2c). Registered for cleanup so a plugin disabled in the
     // same tick leaves no handle behind.
     this.app.workspace.onLayoutReady(() => {
-      const handle = setTimeout(() => void this.start(), 0);
-      this.register(() => clearTimeout(handle));
+      // `window.` rather than the bare globals: in a popout window the two
+      // are different objects, and a handle taken from one cannot be cleared
+      // through the other.
+      const handle = window.setTimeout(() => void this.start(), 0);
+      this.register(() => window.clearTimeout(handle));
     });
   }
 
@@ -144,7 +147,7 @@ export default class AiSessionSyncPlugin extends Plugin {
       ids,
       platform: process.platform,
       pid: process.pid,
-      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
     });
 
     this.runtime = new PluginRuntime({
@@ -222,7 +225,7 @@ export default class AiSessionSyncPlugin extends Plugin {
     if (minutes === this.intervalMinutes) return;
     this.intervalMinutes = minutes;
     if (this.timer !== null) {
-      clearInterval(this.timer);
+      window.clearInterval(this.timer);
       this.timer = null;
     }
     if (minutes <= 0) return;
@@ -230,8 +233,10 @@ export default class AiSessionSyncPlugin extends Plugin {
     // the contract tests in plain Node, where `window` does not exist, and a
     // ReferenceError there would be a test-harness failure standing in for a
     // production one.
+    // `window.setInterval` returns a number here, so the double cast the
+    // `globalThis` form needed is gone with it.
     this.timer = this.registerInterval(
-      globalThis.setInterval(() => void this.sync(), minutes * MINUTE_MS) as unknown as number,
+      window.setInterval(() => void this.sync(), minutes * MINUTE_MS),
     );
   }
 
@@ -309,12 +314,14 @@ export default class AiSessionSyncPlugin extends Plugin {
  */
 async function openInFileManager(target: string): Promise<boolean> {
   try {
-    // Not a static import: `electron` has no types here and is external to
-    // the bundle, so the module specifier is built at runtime to keep the
-    // bundler from trying to resolve it at all.
-    const electron = (await import(/* @vite-ignore */ String("electron"))) as {
-      shell?: { openPath?: (path: string) => Promise<string> };
-    };
+    // A literal specifier, deliberately. `electron` is in the build's
+    // `external` list, so esbuild leaves the import alone without any help —
+    // the computed `String("electron")` this used to carry bought nothing and
+    // read to a reviewer (rightly) as loading a module chosen at runtime.
+    // Optional chaining stays: the declaration says what Obsidian's Electron
+    // provides, and a build where it is absent must degrade to "here is the
+    // path" rather than throw out of a click handler.
+    const electron = await import("electron");
     const openPath = electron.shell?.openPath;
     if (!openPath) return false;
     // `openPath` resolves to "" on success and to an error message otherwise,

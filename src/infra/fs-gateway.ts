@@ -156,7 +156,7 @@ export async function retryOnTransient<T>(
       lastError = error;
       const code =
         typeof error === "object" && error !== null && "code" in error
-          ? String((error as { code: unknown }).code)
+          ? String(error.code)
           : undefined;
       if (code === undefined || !RETRYABLE_CODES.has(code)) throw error;
       const delay = delays[attempt];

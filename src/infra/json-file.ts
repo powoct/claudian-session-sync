@@ -95,6 +95,6 @@ function encode(value: unknown): Uint8Array {
 
 function errnoOf(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code: unknown }).code)
+    ? String(error.code)
     : undefined;
 }

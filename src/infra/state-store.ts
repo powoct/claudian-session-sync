@@ -415,7 +415,7 @@ export interface WorkspaceIdentityFile {
  * exact failure the two-step initialisation exists to prevent.
  */
 export function checkWorkspaceIdentity(input: {
-  readonly raw: unknown | undefined;
+  readonly raw: unknown;
   readonly boundWorkspaceId: WorkspaceId | null;
   readonly conflictCopyNames: readonly string[];
 }): { readonly status: WorkspaceIdentityStatus; readonly file?: WorkspaceIdentityFile } {
