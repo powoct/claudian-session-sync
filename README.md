@@ -163,6 +163,32 @@ safely is planned work). So:
 - **Stability gating.** Files still being written (by the CLI or by your sync tool) are
   observed, not copied; a pass acts only on files that have provably held still.
 
+### What it touches on your disk, and why the store review says what it says
+
+The community listing's automated review flags two things about this plugin. Both are
+accurate readings of the code, and both are worth explaining rather than explaining away.
+
+**"Direct filesystem access — can read and write any file on the system."** True, and
+unavoidable: the files this plugin exists to sync are your CLIs' session files, which live
+in `~/.claude`, `~/.codex`, `~/.grok` — *outside* the vault, where Obsidian's vault API
+cannot reach. That is also why the manifest says `isDesktopOnly: true`. What it actually
+touches is a short list:
+
+| | |
+|---|---|
+| **Reads** | the session files of the providers *you* switch on (all off by default), and Claudian's conversation records inside your vault |
+| **Writes** | your sync folder, those same session files when pulling a conversation from another machine, and its own state under `~/.claudian-session-sync` |
+| **Never** | anything else. Every path is resolved segment by segment and rejected if it escapes a known root or passes through a symlink; files it does not recognise are reported and left alone; credentials (`auth.json`, `config.toml`, `.credentials.json`) are excluded by name and never read |
+
+**"Persists data in localStorage instead of the Obsidian plugin data APIs."** This one is a
+false positive, and the distinction matters. This plugin's own settings go through
+`loadData()`/`saveData()` — the plugin data API, as expected. It **reads** exactly one
+`localStorage` key, `claudian.deviceSettingsKey`, which belongs to Claudian: from 2.2.5
+Claudian files each conversation's record under a folder named for a hash of that seed, so
+deriving the same hash is the only way to know which of those folders is this machine's.
+It is read, never written, used only to name a folder inside your own vault, and never sent
+anywhere. `main.ts` marks the call site with the same explanation.
+
 ### Honest limitations
 
 - Two machines writing the **same session at the same time** is detected and contained
