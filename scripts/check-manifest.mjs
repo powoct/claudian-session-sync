@@ -45,6 +45,23 @@ if (manifest) {
   if ("main" in manifest && manifest.main !== "main.js") {
     v.add(`manifest.main = ${JSON.stringify(manifest.main)} (want "main.js")`);
   }
+  // The community listing's automated review flagged this on the 0.3.1 entry:
+  // `authorUrl` is where the *author* lives, not where the plugin lives, and
+  // the repository already has its own field in the listing. It is one line
+  // that nobody would think to re-check, so the gate remembers instead.
+  const repoUrl = (pkg?.repository?.url ?? "").replace(/^git\+|\.git$/g, "");
+  if (typeof manifest.authorUrl === "string" && manifest.authorUrl.trim() !== "") {
+    const authorUrl = manifest.authorUrl.replace(/\/+$/, "");
+    if (/\/[^/]+\/[^/]+$/.test(new URL(authorUrl).pathname.replace(/\/+$/, ""))) {
+      v.add(
+        `manifest.authorUrl = ${JSON.stringify(manifest.authorUrl)} looks like a repository; ` +
+          "it must be a personal or organization profile (the listing rejects the plugin's own repo)",
+      );
+    }
+    if (repoUrl && authorUrl === repoUrl.replace(/\/+$/, "")) {
+      v.add("manifest.authorUrl must not be the plugin's own repository");
+    }
+  }
 }
 
 if (pkg) {

@@ -17,6 +17,11 @@ on:
 
 permissions:
   contents: write
+  # Attestation needs both: `id-token` to get the OIDC token that proves this
+  # workflow ran, `attestations` to record the result. Asked for here rather
+  # than at job level so the two stay next to the permission they extend.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -38,6 +43,15 @@ jobs:
             exit 1
           fi
       - run: npm run verify
+      # The listing's automated review asked for this, and for a plugin that
+      # reads and writes outside the vault it is worth more than for most:
+      # it lets anyone check that the main.js they installed was built by this
+      # workflow from this commit, rather than uploaded by hand. Runs after
+      # `verify` so the bytes attested are the bytes that passed the gate.
+      - name: attest the build
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: main.js
       - name: create release
         env:
           GH_TOKEN: ${{ github.token }}
