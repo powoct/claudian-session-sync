@@ -130,15 +130,6 @@ export interface BackupTarget {
  * directory has to. Two things depended on that answer: which live file a
  * restore writes into, and which copies retention may delete as reproducible.
  */
-/**
- * Windows' classic MAX_PATH, minus the NUL the API counts.
- *
- * Lives beside `backupDirFor` because the layout and the limit are one
- * decision: the `<logicalId>` segment this adds is the first thing dropped
- * when a path will not fit.
- */
-export const WINDOWS_MAX_PATH = 259;
-
 export function backupDirFor(target: BackupTarget): string[] {
   const parts = [target.workspaceId, target.providerId];
   if (target.remote) parts.push("remote");

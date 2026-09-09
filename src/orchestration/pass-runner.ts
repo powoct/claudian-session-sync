@@ -24,7 +24,6 @@ import type { Clock, IdGen } from "../infra/clock";
 import type { FsGateway } from "../infra/fs-gateway";
 import type { HomeStore, WorkspaceBinding } from "../infra/home-store";
 import { createBackupWriter } from "../infra/backup-writer";
-import { WINDOWS_MAX_PATH } from "../infra/backup-store";
 import { type PathGuardDeps, findRootOverlaps, resolveUnderRoot } from "../infra/path-guard";
 import {
   type SyncDirStore,
@@ -283,11 +282,6 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     nowMs: () => deps.clock.nowMs(),
     randomSuffix: () => deps.ids.token(4),
     keep: deps.settings.backupKeep,
-    // Windows refuses a path over 260 without long-path support, and the
-    // failure lands on the atomic write's temp name rather than the final one.
-    // Read off the guard, which already carries the platform for exactly these
-    // per-platform rules.
-    ...(deps.guard.platform === "win32" ? { maxPathChars: WINDOWS_MAX_PATH } : {}),
   });
 
   const report = await runPass({

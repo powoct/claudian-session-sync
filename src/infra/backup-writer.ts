@@ -16,7 +16,7 @@
  *    failing to tidy up is untidy, not dangerous.
  */
 import type { LogicalId, SafeAbsolutePath } from "../domain/types";
-import { type FsGateway, tempName } from "./fs-gateway";
+import type { FsGateway } from "./fs-gateway";
 import {
   type BackupRecord,
   type RotationCandidate,
@@ -40,22 +40,7 @@ export interface BackupWriterDeps {
   readonly nowMs: () => number;
   readonly randomSuffix: () => string;
   readonly keep: number;
-  /**
-   * The platform's path limit, and this machine's pid for the temp name.
-   *
-   * Injected rather than read from `process` so the budget is testable, and
-   * because the number that matters differs by platform: Windows refuses at
-   * 260 without long-path support, POSIX has room to spare.
-   */
-  readonly maxPathChars?: number;
 }
-
-/** Everything but Windows has room to spare; the caller passes 259 there. */
-const DEFAULT_MAX_PATH_CHARS = 4096;
-/** `20260909T000000-000Z` — the shape `backupStamp` produces. */
-const STAMP_CHARS = 20;
-/** Wider than any real pid, so the budget never shrinks between two runs. */
-const WIDEST_PID = 9_999_999;
 
 export interface BackupRequest {
   readonly sourcePath: string;
@@ -98,7 +83,40 @@ export function createBackupWriter(deps: BackupWriterDeps) {
      * holding a session in memory would be a poor trade at these sizes
      * (`maxFileSizeMB` caps it).
      */
+    /**
+     * Never throws, and that is the contract rather than a courtesy.
+     *
+     * `deps.backup(...)` is called from the engine OUTSIDE its try block, and
+     * `runPass` wraps the body in `try/finally` with no catch — so anything
+     * thrown here does not fail one file, it takes down the whole pass for
+     * every provider. That was reachable: ADR-54 assumed PathGuard refused an
+     * over-long path, but `mintStatePath` checks only NUL bytes and
+     * containment, so a long name reached `mkdirp` and threw ENAMETOOLONG.
+     * Codex made it likely by naming a reverted thread's rollout
+     * `<threadId>_<rolloutId>`, 37 characters more than before.
+     *
+     * The filesystem is left as the authority on its own limits rather than a
+     * budget being computed here. A predicted limit is a guess about the
+     * platform — Windows refuses at 260 only when long paths are disabled —
+     * and guessing low refuses backups that would have worked, which cancels
+     * overwrites and silently stops those files syncing. Asking and handling
+     * the answer is the same rule the readiness probe already follows.
+     */
     async backup(request: BackupRequest): Promise<BackupOutcome> {
+      try {
+        return await write(request);
+      } catch (error) {
+        // Every reason ends up as a cancelled overwrite, which is I1's rule:
+        // no backup, no overwrite. The code is carried so a user reading the
+        // report can tell "the path is too long for this filesystem" from "the
+        // disk is full".
+        return { path: null, reason: `backup-failed:${codeOf(error)}` };
+      }
+    },
+
+  };
+
+  async function write(request: BackupRequest): Promise<BackupOutcome> {
       const bytes = await readOrNull(deps.fs, request.sourcePath);
       if (bytes === null) {
         // Nothing there to preserve. Not an error in itself — but the caller
@@ -108,34 +126,15 @@ export function createBackupWriter(deps: BackupWriterDeps) {
       }
 
       const originalName = baseNameOf(request.sourcePath);
-      // The nested layout first, and a flat one when the nested path will not
-      // fit. Both the directory and the leaf grew when Codex began naming a
-      // reverted thread's rollout `<threadId>_<rolloutId>.jsonl`: that is 37
-      // more characters in the leaf alone, against a deepest measured Windows
-      // path of 239 of 259. Dropping the `<logicalId>` segment recovers
-      // exactly those 37, and it is safe to drop precisely here — the leaf
-      // already carries the id, which is the reason the segment exists
-      // (backup-store.ts).
-      const nested = backupDirFor({
+      const relDir = backupDirFor({
         workspaceId: request.workspaceId,
         providerId: request.providerId,
         remote: request.remote,
         logicalId: request.logicalId,
       });
-      const relDir = fits(deps, nested, originalName)
-        ? nested
-        : nested.slice(0, -1);
       const dirPath = deps.joinPath(deps.home.layout.backupsDir, ...relDir);
       const dir = deps.home.mint(dirPath);
       if (!dir.ok) return { path: null, reason: `backup-dir-rejected:${dir.violation}` };
-      if (!fits(deps, relDir, originalName)) {
-        // Even flat it does not fit. Returning null cancels the overwrite,
-        // which is the honest outcome — but it must be a RETURN, never a
-        // throw: `deps.backup(...)` is called outside the engine's try block
-        // and `runPass` has only try/finally, so an exception here takes down
-        // the whole pass for every provider, not just this file.
-        return { path: null, reason: "backup-path-too-long" };
-      }
       await deps.fs.mkdirp(dir.value, DIR_MODE);
 
       const existing = new Set(
@@ -168,10 +167,15 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         action: request.action,
       });
 
-      const rotation = await rotate(deps, dirPath, originalName, bytes, name, request.protectName);
-      return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
-    },
-  };
+    const rotation = await rotate(deps, dirPath, originalName, bytes, name, request.protectName);
+    return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
+  }
+}
+
+/** The errno a failed write carries, for a report a person can act on. */
+function codeOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : "unknown";
 }
 
 /**
@@ -329,25 +333,3 @@ function hashPrefixOf(hash: string): string {
   return bare.slice(0, 8);
 }
 
-/**
- * Will the longest name this call can produce fit inside the platform's limit?
- *
- * Measured against the *temp* form, not the final one: `writeFileAtomic`
- * stages `<final>.aiss-tmp-<pid>-<token4>` beside the target, so the temp path
- * is the longer of the two and it is where the failure actually lands
- * (`node-fs-gateway.ts` opens it with `wx`).
- *
- * Two sequence digits are budgeted for the rotation suffix rather than one,
- * because `backupKeep` reaches 20.
- */
-function fits(deps: BackupWriterDeps, relDir: readonly string[], originalName: string): boolean {
-  const limit = deps.maxPathChars ?? DEFAULT_MAX_PATH_CHARS;
-  const dirPath = deps.joinPath(deps.home.layout.backupsDir, ...relDir);
-  // `<name>.<stamp>.<seq>.bak`, then the temp suffix the atomic write adds.
-  // The pid is budgeted at its widest rather than read: this is a question
-  // about the longest name this call could produce, and a 7-digit pid on the
-  // next run must not turn a backup that fit into one that throws.
-  const leaf = `${originalName}.${"0".repeat(STAMP_CHARS)}.00.bak`;
-  const temp = tempName(leaf, WIDEST_PID, "0000");
-  return `${dirPath}/${temp}`.length <= limit;
-}

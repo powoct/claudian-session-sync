@@ -350,7 +350,7 @@ describe("the workspace scan", () => {
 
 // ── backups ────────────────────────────────────────────────────────────────
 
-function writer(stateRoot: string, keep: number, maxPathChars?: number) {
+function writer(stateRoot: string, keep: number) {
   const store = home(stateRoot);
   return {
     store,
@@ -365,7 +365,6 @@ function writer(stateRoot: string, keep: number, maxPathChars?: number) {
       })(),
       randomSuffix: () => "abcd",
       keep,
-      ...(maxPathChars === undefined ? {} : { maxPathChars }),
     }),
   };
 }
@@ -528,18 +527,23 @@ describe("retention does not bind for a provider that rewrites whole records", (
   });
 });
 
-describe("a backup path that will not fit (2026-09-09)", () => {
-  // Codex began naming a reverted thread's rollout `<threadId>_<rolloutId>`,
-  // which is 37 more characters in the backup leaf — against a deepest
-  // measured Windows path of 239 of 259. The old code neither checked nor
-  // survived it: `mkdirp` threw, and because `deps.backup(...)` is called
-  // outside the engine's try block while `runPass` has only try/finally, one
-  // over-long name took down the whole pass for every provider.
-  const LONG = `rollout-2026-08-06T12-43-59-${"a".repeat(36)}_${"b".repeat(36)}.jsonl`;
+describe("a backup that cannot be written (2026-09-09)", () => {
+  // ADR-54 already decided this: the backup fails and cancels the overwrite,
+  // "the safe direction". But it credited the check to PathGuard, and
+  // `mintStatePath` tests only NUL bytes and containment — nothing measured
+  // the path — so the over-long case reached `mkdirp` and THREW. Because
+  // `deps.backup(...)` is called outside the engine's try block and `runPass`
+  // has only try/finally, that took down the whole pass for EVERY provider.
+  // Codex made it likely by naming a reverted thread's rollout
+  // `<threadId>_<rolloutId>`: 37 characters more than before.
+  // Longer than NAME_MAX on every filesystem this runs on (255 on Linux and
+  // macOS, 255 for a Windows component), so the write is impossible
+  // everywhere rather than only on the platform that happens to run CI.
+  const IMPOSSIBLE = "d".repeat(300);
 
-  async function backupOf(maxPathChars: number, name: string) {
+  it("returns instead of throwing when the path is impossible", async () => {
     const root = makeRoot();
-    const { store, backup } = writer(root, 3, maxPathChars);
+    const { store, backup } = writer(root, 3);
     await store.saveMachine({
       schemaVersion: STATE_SCHEMA_VERSION,
       machineId: MACHINE,
@@ -548,9 +552,46 @@ describe("a backup path that will not fit (2026-09-09)", () => {
       identity: { hostname: "h", platform: "linux", homedir: "D:\\elsewhere" },
       superseded: [],
     });
+    const source = path.join(root, "rollout.jsonl");
+    await fsp.writeFile(source, "one\n");
+
+    // A logicalId far past any filesystem's component limit: the write cannot
+    // succeed, and the only question under test is HOW it fails.
+    const outcome = await backup.backup({
+      sourcePath: source,
+      workspaceId: "ws-0000",
+      providerId: "codex",
+      logicalId: IMPOSSIBLE as never,
+      remote: false,
+      action: "PULL_OVERWRITE",
+    });
+
+    expect(outcome.path, "no backup, no overwrite").toBeNull();
+    expect(outcome.reason, "and it says which errno, not just that it failed").toMatch(
+      /^backup-failed:/,
+    );
+  });
+
+  it("keeps the session segment rather than flattening to make room", async () => {
+    // Dropping `<logicalId>` would buy 37 characters and reintroduce exactly
+    // what ADR-54 added it to remove: in a shared provider directory,
+    // rotation's candidates are scoped by file name, which identifies a
+    // session for Codex but not for Grok, whose member names repeat.
+    const root = makeRoot();
+    const { store, backup } = writer(root, 3);
+    await store.saveMachine({
+      schemaVersion: STATE_SCHEMA_VERSION,
+      machineId: MACHINE,
+      machineLabel: "m",
+      createdAt: "2026-08-06T00:00:00.000Z",
+      identity: { hostname: "h", platform: "linux", homedir: "D:\\elsewhere" },
+      superseded: [],
+    });
+    const name = `rollout-2026-08-06T12-43-59-${"a".repeat(36)}_${"b".repeat(36)}.jsonl`;
     const source = path.join(root, name);
     await fsp.writeFile(source, "one\n");
-    return backup.backup({
+
+    const outcome = await backup.backup({
       sourcePath: source,
       workspaceId: "ws-0000",
       providerId: "codex",
@@ -558,27 +599,7 @@ describe("a backup path that will not fit (2026-09-09)", () => {
       remote: false,
       action: "PULL_OVERWRITE",
     });
-  }
 
-  it("drops the session segment rather than failing, when that is enough", async () => {
-    // The leaf already carries the id, which is the whole reason the segment
-    // exists — so it is the right thing to give up first.
-    const outcome = await backupOf(220, LONG);
-    expect(outcome.path, "a backup was still taken").not.toBeNull();
-    expect(outcome.path).not.toContain(`${path.sep}${"b".repeat(36)}${path.sep}`);
-    expect(outcome.path).toContain(`${path.sep}codex${path.sep}`);
-  });
-
-  it("cancels the overwrite instead of throwing, when even flat will not fit", async () => {
-    // The contract that matters: a RETURN, not a throw. A throw here reaches
-    // `runPass`, which has no catch, and kills the pass for every provider.
-    const outcome = await backupOf(80, LONG);
-    expect(outcome.path, "no backup, no overwrite").toBeNull();
-    expect(outcome.reason).toBe("backup-path-too-long");
-  });
-
-  it("keeps the nested layout when there is room", async () => {
-    const outcome = await backupOf(4096, "rollout-short.jsonl");
     expect(outcome.path).toContain(`${path.sep}${"b".repeat(36)}${path.sep}`);
   });
 });

@@ -239,13 +239,17 @@ describe("backups written by an earlier layout (§9.3.2, ADR-54)", () => {
     const nested = (await a.runtime.backups()).find((entry) => !entry.remote);
     expect(nested, "fixture must produce a backup to relocate").toBeDefined();
 
-    // Move it up one level, which is exactly where the old writer put it.
-    const legacy = path.join(
-      path.dirname(path.dirname(nested?.path as string)),
-      path.basename(nested?.path as string),
-    );
-    await fsp.rename(nested?.path as string, legacy);
-    expect(path.dirname(legacy)).not.toBe(path.dirname(nested?.path as string));
+    // Put it where the old writer put it: `backups/<ws>/<provider>/<name>`,
+    // with no session segment. Derived from the provider directory rather than
+    // by going up one level, because the writer may ALREADY have written it
+    // flat — it drops that segment when the nested path would not fit, and a
+    // deep temp root on Windows CI is enough to trigger exactly that. Assuming
+    // a depth here is how this test failed on one platform and not the others.
+    const dir = path.dirname(nested?.path as string);
+    const providerDir = path.basename(dir) === "claude-code" ? dir : path.dirname(dir);
+    const legacy = path.join(providerDir, path.basename(nested?.path as string));
+    if (legacy !== nested?.path) await fsp.rename(nested?.path as string, legacy);
+    expect(path.basename(path.dirname(legacy)), "flat: no session segment").toBe("claude-code");
     expect(legacy.startsWith(flatDir)).toBe(true);
 
     const listed = (await a.runtime.backups()).find((entry) => entry.path === legacy);
