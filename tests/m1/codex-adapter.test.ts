@@ -441,3 +441,77 @@ describe("a reverted thread reaches the candidate set at all", () => {
     expect(await adapter.listSessions()).toEqual([]);
   });
 });
+
+describe("the census that would have caught this one (OQ-32)", () => {
+  // The 2026-09-09 defect was not that we got a name wrong — it was that we
+  // said nothing. A skipped file produces no report row, so there was nothing
+  // for a warning to hang on, and the pass said "up to date" while a
+  // conversation's live history sat unsynced. The same had already happened
+  // once, when Claudian moved its records into devices/. So this counts what
+  // the parser refuses without asking why: it fires for shapes nobody has seen
+  // yet, which is the only kind that matters.
+  const warn = async (adapter: Awaited<ReturnType<typeof world>>["adapter"]) => {
+    const health = await adapter.healthCheck();
+    return (health.ok ? (health.warnings ?? []) : []).join(" ");
+  };
+
+  it("names a file it cannot parse, and says the conversation is not travelling", async () => {
+    const { adapter, sessions } = await world({ recorded: [SID] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, "rollout-2026-08-06T12-43-59-somethingnew.jsonl"), "{}\n");
+
+    const text = await warn(adapter);
+
+    expect(text).toContain("does not recognise");
+    expect(text).toContain("somethingnew");
+    expect(text, "the consequence, not just the fact").toContain("not travelling");
+  });
+
+  it("fires for a compressed sibling, which is the next shape upstream will ship", async () => {
+    // `local_thread_store_compression` is off by default today, but when it is
+    // turned on the rollout becomes `.jsonl.zst` and the plain file is
+    // deleted. That must arrive as a sentence, not as silence.
+    const { adapter, sessions } = await world({ recorded: [SID] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.zst`), "z");
+
+    expect(await warn(adapter)).toContain("does not recognise");
+  });
+
+  it("says nothing when every file is one it knows", async () => {
+    // A warning that is always on is one nobody reads.
+    const { adapter, plant } = await world({ recorded: [SID] });
+    await plant(SID);
+
+    expect(await warn(adapter)).toBe("");
+  });
+
+  it("stays quiet about a sync tool's conflict copy and our own temp files", async () => {
+    // Expected company in that directory. Counting them would make the census
+    // permanent noise on exactly the setups this plugin is built for.
+    const { adapter, plant, sessions } = await world({ recorded: [SID] });
+    await plant(SID);
+    const dir = path.join(sessions, "2026", "08", "06");
+    // The real Dropbox shape carries the machine name and a date; a bare
+    // "(conflicted copy)" is not what any client writes.
+    await fsp.writeFile(
+      path.join(dir, `rollout-2026-08-06T12-43-59-${SID} (mbp's conflicted copy 2026-08-06).jsonl`),
+      "{}\n",
+    );
+    await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.aiss-tmp-42-abcd`), "{}\n");
+
+    expect(await warn(adapter)).toBe("");
+  });
+
+  it("ignores Codex's own indexes and databases at the root", async () => {
+    // Those live above YYYY/MM/DD and were never rollouts.
+    const { adapter, plant, sessions } = await world({ recorded: [SID] });
+    await plant(SID);
+    await fsp.writeFile(path.join(sessions, "session_index.jsonl"), "{}\n");
+    await fsp.writeFile(path.join(sessions, "state_5.sqlite"), "x");
+
+    expect(await warn(adapter)).toBe("");
+  });
+});

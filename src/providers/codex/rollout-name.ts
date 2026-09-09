@@ -20,6 +20,7 @@
  * keeping path safety elsewhere is what makes that leniency free.
  */
 import type { LogicalId } from "../../domain/types";
+import { classifyExternalArtifact } from "../../domain/external-artifacts";
 
 /** Lowercase UUID, the form both Claude Code and Codex use for session ids. */
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -89,3 +90,49 @@ export function rolloutLogicalId(name: string): LogicalId | null {
 
 /** Codex ids are the shared session-uuid shape; the check lives with the store reader. */
 export { isSessionUuid as isCodexSessionId } from "../vault-scope";
+
+/**
+ * Names under `YYYY/MM/DD` that this version does not recognise as a rollout.
+ *
+ * A **census, not an enumeration**: it counts what the parser refuses without
+ * asking why. That is the whole point. The 2026-09-09 defect was upstream
+ * renaming a file — `rollout-<ts>-<threadId>_<rolloutId>.jsonl` after a revert
+ * — and the failure was not that we got it wrong, it was that we said nothing:
+ * the file was skipped, no report line existed to attach a warning to, and the
+ * pass said "up to date" while a conversation's live history sat unsynced. The
+ * same thing had already happened once, when Claudian moved its records into
+ * `devices/` (ADR-66). A detector that only knows the shapes we have already
+ * seen would have caught neither on the day it mattered.
+ *
+ * So this fires for the `_` form, for a `.jsonl.zst` compressed sibling when
+ * upstream turns that on, and for whatever comes next.
+ *
+ * Names another program is *known* to own are excluded rather than counted:
+ * a sync tool's conflict copy and this plugin's own temp files are expected
+ * company in that directory, and a warning that is always on is one nobody
+ * reads. Everything else counts, including things we could guess at — being
+ * wrong about the reason costs a sentence, being silent costs a conversation.
+ */
+export function unrecognisedRolloutNames(names: readonly string[]): string[] {
+  return names.filter(
+    (name) =>
+      rolloutIds(name) === null &&
+      classifyExternalArtifact(name, names).kind === "unknown" &&
+      !name.includes(TEMP_MARKER),
+  );
+}
+
+/** The plugin's own in-flight writes (`fs-gateway`'s `tempName`). */
+const TEMP_MARKER = ".aiss-tmp-";
+
+/** The sentence an adapter hands `healthCheck` for the names it skipped. */
+export function describeUnrecognised(names: readonly string[]): string[] {
+  if (names.length === 0) return [];
+  const shown = names.slice(0, 2).join(", ");
+  const rest = names.length > 2 ? ` and ${names.length - 2} more` : "";
+  return [
+    `Codex's sessions folder has ${names.length} file(s) this version does not recognise ` +
+      `and will not sync (${shown}${rest}). If Codex has been updated, this plugin probably ` +
+      "needs to catch up — the conversations in them are not travelling.",
+  ];
+}
