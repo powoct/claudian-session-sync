@@ -83,7 +83,40 @@ export function createBackupWriter(deps: BackupWriterDeps) {
      * holding a session in memory would be a poor trade at these sizes
      * (`maxFileSizeMB` caps it).
      */
+    /**
+     * Never throws, and that is the contract rather than a courtesy.
+     *
+     * `deps.backup(...)` is called from the engine OUTSIDE its try block, and
+     * `runPass` wraps the body in `try/finally` with no catch — so anything
+     * thrown here does not fail one file, it takes down the whole pass for
+     * every provider. That was reachable: ADR-54 assumed PathGuard refused an
+     * over-long path, but `mintStatePath` checks only NUL bytes and
+     * containment, so a long name reached `mkdirp` and threw ENAMETOOLONG.
+     * Codex made it likely by naming a reverted thread's rollout
+     * `<threadId>_<rolloutId>`, 37 characters more than before.
+     *
+     * The filesystem is left as the authority on its own limits rather than a
+     * budget being computed here. A predicted limit is a guess about the
+     * platform — Windows refuses at 260 only when long paths are disabled —
+     * and guessing low refuses backups that would have worked, which cancels
+     * overwrites and silently stops those files syncing. Asking and handling
+     * the answer is the same rule the readiness probe already follows.
+     */
     async backup(request: BackupRequest): Promise<BackupOutcome> {
+      try {
+        return await write(request);
+      } catch (error) {
+        // Every reason ends up as a cancelled overwrite, which is I1's rule:
+        // no backup, no overwrite. The code is carried so a user reading the
+        // report can tell "the path is too long for this filesystem" from "the
+        // disk is full".
+        return { path: null, reason: `backup-failed:${codeOf(error)}` };
+      }
+    },
+
+  };
+
+  async function write(request: BackupRequest): Promise<BackupOutcome> {
       const bytes = await readOrNull(deps.fs, request.sourcePath);
       if (bytes === null) {
         // Nothing there to preserve. Not an error in itself — but the caller
@@ -92,6 +125,7 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         return { path: null, reason: "source-unreadable" };
       }
 
+      const originalName = baseNameOf(request.sourcePath);
       const relDir = backupDirFor({
         workspaceId: request.workspaceId,
         providerId: request.providerId,
@@ -103,7 +137,6 @@ export function createBackupWriter(deps: BackupWriterDeps) {
       if (!dir.ok) return { path: null, reason: `backup-dir-rejected:${dir.violation}` };
       await deps.fs.mkdirp(dir.value, DIR_MODE);
 
-      const originalName = baseNameOf(request.sourcePath);
       const existing = new Set(
         (await deps.fs.readDir(dirPath).catch(() => [])).map((entry) => entry.name),
       );
@@ -134,10 +167,15 @@ export function createBackupWriter(deps: BackupWriterDeps) {
         action: request.action,
       });
 
-      const rotation = await rotate(deps, dirPath, originalName, bytes, name, request.protectName);
-      return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
-    },
-  };
+    const rotation = await rotate(deps, dirPath, originalName, bytes, name, request.protectName);
+    return { path: target.value, ...(rotation.deferred ? { rotationDeferred: true } : {}) };
+  }
+}
+
+/** The errno a failed write carries, for a report a person can act on. */
+function codeOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : "unknown";
 }
 
 /**
@@ -294,3 +332,4 @@ function hashPrefixOf(hash: string): string {
   const bare = hash.startsWith("sha256:") ? hash.slice(7) : hash;
   return bare.slice(0, 8);
 }
+

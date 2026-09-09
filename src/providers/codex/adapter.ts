@@ -31,6 +31,9 @@ import {
   CODEX_DATE_SEGMENT,
   CODEX_LOGICAL_ID_PATTERN,
   isCodexSessionId,
+  describeUnrecognised,
+  unrecognisedRolloutNames,
+  rolloutIds,
   rolloutLogicalId,
 } from "./rollout-name";
 import { describeUnreadDirs, readVaultScope } from "../vault-scope";
@@ -53,6 +56,38 @@ export interface CodexAdapterDeps {
 }
 
 export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
+  /**
+   * Names only — no `stat`, no read, no vault scope.
+   *
+   * Deliberately not filtered by what this vault has records for: a file
+   * this version cannot even parse has no id to check against the scope, so
+   * asking would silently drop the very names the census exists to surface.
+   */
+  async function unrecognised(): Promise<string[]> {
+    const found: string[] = [];
+    await walkNames(deps.providerRoot, 0);
+    return found;
+
+    async function walkNames(dir: string, depth: number): Promise<void> {
+      const entries = await deps.listDir(dir).catch(() => []);
+      // Judged per directory, because a sync tool's conflict copy is only
+      // recognisable next to the file it copied.
+      if (depth === DATE_DEPTH) {
+        const names = entries.filter((entry) => entry.isFile).map((entry) => entry.name);
+        found.push(...unrecognisedRolloutNames(names));
+        return;
+      }
+      for (const entry of entries) {
+        // Only `YYYY/MM/DD/<file>`. The root holds Codex's own indexes and its
+        // SQLite databases, which are not rollouts and never were.
+        if (entry.isFile) continue;
+        if (!CODEX_DATE_SEGMENT.test(entry.name)) continue;
+        await walkNames(deps.joinPath(dir, entry.name), depth + 1);
+      }
+    }
+  }
+
+
   return {
     id: CODEX_PROVIDER_ID,
     // Tier A *shape*, still an unmeasured tier on this platform: OQ-2 measured
@@ -74,7 +109,13 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         // like a broken install.
         return { ok: false, reason: "no Claudian conversation records in this vault" };
       }
-      return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
+      return {
+        ok: true,
+        warnings: [
+          ...describeUnreadDirs(scope.unreadDirs),
+          ...describeUnrecognised(await unrecognised()),
+        ],
+      };
     },
 
     async listSessions() {
@@ -89,8 +130,12 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         for (const entry of await deps.listDir(dir).catch(() => [])) {
           if (entry.isFile) {
             if (depth !== DATE_DEPTH) continue; // Only `YYYY/MM/DD/<file>`.
-            const logicalId = rolloutLogicalId(entry.name);
-            if (logicalId === null || !scope.sessionIds.has(logicalId)) continue;
+            // Admitted by THREAD id, identified by ROLLOUT id. Claudian's
+            // conversation record knows only the thread; the two are the same
+            // string until the thread is reverted.
+            const ids = rolloutIds(entry.name);
+            if (ids === null || !scope.sessionIds.has(ids.threadId)) continue;
+            const logicalId = ids.rolloutId;
 
             const absPath = deps.joinPath(dir, entry.name);
             const stat = await deps.statFile(absPath);
