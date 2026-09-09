@@ -31,6 +31,7 @@ import {
   CODEX_DATE_SEGMENT,
   CODEX_LOGICAL_ID_PATTERN,
   isCodexSessionId,
+  rolloutIds,
   rolloutLogicalId,
 } from "./rollout-name";
 import { describeUnreadDirs, readVaultScope } from "../vault-scope";
@@ -89,8 +90,12 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         for (const entry of await deps.listDir(dir).catch(() => [])) {
           if (entry.isFile) {
             if (depth !== DATE_DEPTH) continue; // Only `YYYY/MM/DD/<file>`.
-            const logicalId = rolloutLogicalId(entry.name);
-            if (logicalId === null || !scope.sessionIds.has(logicalId)) continue;
+            // Admitted by THREAD id, identified by ROLLOUT id. Claudian's
+            // conversation record knows only the thread; the two are the same
+            // string until the thread is reverted.
+            const ids = rolloutIds(entry.name);
+            if (ids === null || !scope.sessionIds.has(ids.threadId)) continue;
+            const logicalId = ids.rolloutId;
 
             const absPath = deps.joinPath(dir, entry.name);
             const stat = await deps.statFile(absPath);

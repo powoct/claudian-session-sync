@@ -31,6 +31,7 @@ import {
   emptyBinding,
 } from "../infra/home-store";
 import { createBackupWriter } from "../infra/backup-writer";
+import { WINDOWS_MAX_PATH } from "../infra/backup-store";
 import type { PathGuardDeps } from "../infra/path-guard";
 import { mintStatePath, probeCaseSensitivity, splitPathSegments } from "../infra/path-guard";
 import { type MachineFile, STATE_SCHEMA_VERSION } from "../infra/state-store";
@@ -997,6 +998,7 @@ export class PluginRuntime {
         nowMs: () => this.host.clock.nowMs(),
         randomSuffix: () => this.host.ids.token(4),
         keep: this.settings.backupKeep,
+        ...(this.host.platform === "win32" ? { maxPathChars: WINDOWS_MAX_PATH } : {}),
       });
       const published = await home.loadSharedRecords(workspaceId, deviceKey);
       const outcome = await shareOwnConversations({
@@ -1091,6 +1093,7 @@ export class PluginRuntime {
       nowMs: () => this.host.clock.nowMs(),
       randomSuffix: () => this.host.ids.token(4),
       keep: this.settings.backupKeep,
+        ...(this.host.platform === "win32" ? { maxPathChars: WINDOWS_MAX_PATH } : {}),
     });
 
     return {
