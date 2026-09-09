@@ -25,7 +25,9 @@ import {
   settingsCreated,
 } from "../helpers/obsidian-stub";
 import { AiSessionSyncSettingTab } from "../../src/ui/settings-tab";
-import { ConflictModal, describeOutcome } from "../../src/ui/conflict-modal";
+import { ConflictModal, describeOutcome, describeStanding } from "../../src/ui/conflict-modal";
+import type { ConflictEntry } from "../../src/orchestration/conflict-commands";
+import type { PluginRuntime } from "../../src/orchestration/plugin-runtime";
 import { ReportModal, summaryLine } from "../../src/ui/report-modal";
 import { RuntimeHarness } from "../helpers/runtime-harness";
 
@@ -383,12 +385,13 @@ describe("every refusal has a sentence, not a code", () => {
         inSyncFolder: true,
       },
     ],
-    superseded: false,
+    standing: "in-dispute" as const,
     reason: null,
     externalCopy: null,
   } as const;
 
   it.each([
+    ["sides-agree", "nothing to overwrite"],
     ["branch-moved", "changed since this list was drawn"],
     ["remote-not-ready", "not ready"],
     ["backup-failed", "nothing was overwritten"],
@@ -506,5 +509,97 @@ describe("a vault with two identity files", () => {
 
     expect(named("Status")?.desc).toContain("conflict copy");
     expect(h.runtime.currentStatus().phase).toBe("identity-blocked");
+  });
+});
+
+/**
+ * What the panel says, and offers, once a conflict has ended.
+ *
+ * The measured failure was not only a wrong flag: the row asserted a live fork
+ * while its own branch line three rows above said the version was on both
+ * sides. So the sentences are pinned here, not just the buttons.
+ */
+describe("the conflict panel's four standings", () => {
+  const branch = (over: Record<string, unknown>) => ({
+    hash: "sha256:aaaa",
+    hashPrefix: "aaaaaaaa",
+    size: 10,
+    lineCount: 1,
+    copyName: "branch-aaaaaaaa.jsonl",
+    onThisMachine: false,
+    inSyncFolder: false,
+    ...over,
+  });
+
+  const entry = (standing: ConflictEntry["standing"], branches: unknown[]) =>
+    ({
+      conflictId: "abc123",
+      providerId: "claude-code",
+      logicalId: SID,
+      logicalIdPrefix: "3f2504e0",
+      detectedAt: "2026-08-08T00:00:00.000Z",
+      directory: "/q/abc123",
+      neutralRel: `claude-code/${SID}.jsonl`,
+      branches,
+      standing,
+      reason: null,
+      externalCopy: null,
+    }) as unknown as ConflictEntry;
+
+  const settled = entry("settled", [
+    branch({ onThisMachine: true, inSyncFolder: true }),
+    branch({ hash: "sha256:bbbb", hashPrefix: "bbbbbbbb", copyName: "branch-bbbbbbbb.jsonl" }),
+  ]);
+
+  it("tells a settled row there is nothing to choose, and names the version", () => {
+    const text = describeStanding(settled);
+    expect(text).toContain("both hold version aaaaaaaa");
+    expect(text).toContain("nothing to choose");
+    // The old sentence is gone, not reused: it claimed neither version was on
+    // either side, which is the opposite of what settled means.
+    expect(text).not.toContain("Neither of these versions is on either side");
+    // "this file", never "this session" — a Grok session is a folder whose
+    // other members can still be forked, each as its own entry.
+    expect(text).not.toContain("this session");
+  });
+
+  it("does not claim a moved-on pair's disagreement is over", () => {
+    // Both sides moved past this pair — but they may well still disagree with
+    // each other, under a different id.
+    const text = describeStanding(entry("moved-on", [branch({}), branch({})])) ?? "";
+    expect(text).toContain("both sides have moved on");
+    expect(text).not.toContain("this disagreement is over");
+  });
+
+  it("says a pair it could not read is undecidable, and where to look", () => {
+    const text = describeStanding(entry("unreadable", [branch({}), branch({})])) ?? "";
+    expect(text).toContain("Neither version could be read where this machine expects them");
+    expect(text).toContain("switched off in settings");
+    expect(text).toContain("Show me both");
+    expect(text, "never an all-clear").not.toContain("moved on");
+  });
+
+  it("adds no sentence to a live fork", () => {
+    expect(describeStanding(entry("in-dispute", [branch({ onThisMachine: true })]))).toBeNull();
+  });
+
+  it("greys both keeps on a settled row and keeps reveal alive", async () => {
+    // Correcting the verdict alone would print "nothing to choose here"
+    // directly above two enabled buttons: a settled row has one branch with
+    // both flags true, which is exactly what used to enable them.
+    const modal = new ConflictModal(
+      makeStubApp() as unknown as App,
+      { conflicts: async () => [settled] } as unknown as PluginRuntime,
+      () => undefined,
+    );
+    await modal.onOpen();
+
+    const buttons = asFake(modal.contentEl)
+      .descendants()
+      .filter((node) => node.tag === "button");
+    const byLabel = (label: string) => buttons.find((b) => b.textContent === label);
+    expect(byLabel("Keep this machine's version")?.disabled).toBe(true);
+    expect(byLabel("Keep the other machine's version")?.disabled).toBe(true);
+    expect(byLabel("Show me both")?.disabled).toBe(false);
   });
 });

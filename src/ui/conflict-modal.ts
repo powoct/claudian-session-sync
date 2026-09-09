@@ -59,7 +59,9 @@ export class ConflictModal extends Modal {
         "is no way to merge them. Usually that means both machines added to the session " +
         "separately. Both versions are kept whichever you choose — the one you do not pick " +
         "stays in the quarantine folder and in your backups. A conflict is settled per " +
-        "machine: if the other machine has it too, it will ask once there as well.",
+        "machine: if the other machine has it too, it will ask once there as well. " +
+        "Entries stay listed after they are settled — the copies are deliberately never " +
+        "deleted — so some rows below may have nothing left to decide.",
     });
 
     for (const conflict of conflicts) {
@@ -78,25 +80,26 @@ export class ConflictModal extends Modal {
     }
     const cause = describeCause(conflict);
     if (cause) block.createEl("p", { text: cause });
-    if (conflict.superseded) {
-      block.createEl("p", {
-        text:
-          "Neither of these versions is on either side any more — this disagreement is over " +
-          "(resolved, or replaced by a newer one shown above after a sync). Kept for reference.",
-      });
-    }
+    const standingText = describeStanding(conflict);
+    if (standingText) block.createEl("p", { text: standingText });
 
     const buttons = block.createDiv();
-    const hasLocal = conflict.branches.some((branch) => branch.onThisMachine);
-    const hasRemote = conflict.branches.some((branch) => branch.inSyncFolder);
+    // Gated on `settled` as well, and that is not decoration: a converged entry
+    // has one branch that is on *both* sides, so both flags below are true and
+    // correcting the verdict alone would print "nothing to choose here"
+    // directly above two live buttons — worse than the screen it replaced.
+    const settled = conflict.standing === "settled";
+    const hasLocal = !settled && conflict.branches.some((branch) => branch.onThisMachine);
+    const hasRemote = !settled && conflict.branches.some((branch) => branch.inSyncFolder);
     this.addChoice(buttons, conflict, "keep-local", "Keep this machine's version", hasLocal);
     this.addChoice(buttons, conflict, "keep-remote", "Keep the other machine's version", hasRemote);
     this.addChoice(buttons, conflict, "reveal", "Show me both", true);
-    if (!conflict.superseded && (!hasLocal || !hasRemote)) {
+    if (conflict.standing === "in-dispute" && (!hasLocal || !hasRemote)) {
       buttons.createEl("p", {
         text:
-          "A greyed-out choice means that side has changed since this conflict was recorded. " +
-          "Run a sync — the current disagreement will appear as its own entry.",
+          "A greyed-out choice means that side has changed since this conflict was recorded, " +
+          "or could not be read just now. Run a sync and reopen this — if the two sides still " +
+          "disagree, the current disagreement appears as its own entry.",
       });
     }
   }
@@ -191,6 +194,16 @@ export function describeOutcome(
         "Only keeping this machine's version writes to the sync folder — keeping the other " +
         "machine's version writes here and is still available."
       );
+    case "sides-agree":
+      // Reached from the palette, which acts on a list that may be a minute
+      // old and reads no entry flag; in the panel these buttons are already
+      // greyed. Says what did *not* happen, because "nothing changed" alone
+      // reads as a failure to a user who expected a resolution.
+      return (
+        "This machine and the sync folder already hold the same version, so there was nothing " +
+        "to overwrite and nothing was changed. The other version is still in the quarantine " +
+        "folder and in your backups — \"Show me both\" opens them."
+      );
     case "backup-failed":
       return "The backup could not be written, so nothing was overwritten.";
     case "kept-unreadable":
@@ -272,4 +285,51 @@ export function describeCause(conflict: ConflictEntry): string | null {
     "Your sync tool had two versions of this file and set this machine's aside." +
     `${where} Nothing here was overwritten — both versions are still on disk.`
   );
+}
+
+/**
+ * What this row's standing means, in the user's terms.
+ *
+ * Three of the four states get a sentence; `in-dispute` gets none, because the
+ * branch lines above it already say what is on each side and a fourth
+ * paragraph restating that is noise.
+ *
+ * The sentence this replaces — "Neither of these versions is on either side any
+ * more — this disagreement is over" — is gone rather than reused. It was false
+ * for a converged entry (the panel's own branch line prints "on this machine
+ * and in the sync folder" three rows above it), and it was already false for a
+ * pair whose two sides had each moved on to something *different*, where the
+ * archived pair is over but the disagreement is not.
+ */
+export function describeStanding(conflict: ConflictEntry): string | null {
+  const both = conflict.branches.find(
+    (branch) => branch.onThisMachine && branch.inSyncFolder,
+  );
+  switch (conflict.standing) {
+    case "settled":
+      // "this file", never "this session": one entry covers one path, and a
+      // Grok session is a folder whose other members can still be forked.
+      return (
+        `This machine and the sync folder both hold version ${both?.hashPrefix ?? "?"} of this ` +
+        "file right now, so there is nothing to choose here — either button would write the " +
+        "bytes that are already there. The other version stays in the quarantine folder and in " +
+        "your backups. If the other machine still holds its own version, it will ask once there."
+      );
+    case "moved-on":
+      return (
+        "Neither of these two versions is on this machine or in the sync folder any more — " +
+        "both sides have moved on. This pair is kept for reference. If the two sides still " +
+        "disagree, the current disagreement appears as its own entry after a sync."
+      );
+    case "unreadable":
+      return (
+        "Neither version could be read where this machine expects them. That happens when the " +
+        "session has been deleted, when this provider is switched off in settings, when the " +
+        "sync folder is unavailable or still filling in, or when your sync tool has these " +
+        "files briefly locked. Nothing here can be decided until one of them can be read — " +
+        "both versions are still in the quarantine folder, and \"Show me both\" opens it."
+      );
+    default:
+      return null;
+  }
 }

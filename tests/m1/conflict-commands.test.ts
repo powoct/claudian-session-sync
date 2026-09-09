@@ -85,7 +85,7 @@ describe("a fork becomes a conflict, and the conflict can be ended", () => {
     // during the M1 acceptance run.
     expect(only?.branches.filter((branch) => branch.onThisMachine)).toHaveLength(1);
     expect(only?.branches.filter((branch) => branch.inSyncFolder)).toHaveLength(1);
-    expect(only?.superseded).toBe(false);
+    expect(only?.standing).toBe("in-dispute");
     expect(JSON.stringify(only?.branches)).not.toContain('"text"');
   }, SLOW);
 
@@ -315,7 +315,7 @@ describe("the heading that has to identify a conflict (acceptance r4, F-4)", () 
       directory: "/q",
       neutralRel: "claude-code/3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl",
       branches: [],
-      superseded: false,
+      standing: "in-dispute" as const,
       reason: null,
       externalCopy: null,
       ...over,
@@ -366,7 +366,7 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
       directory: "/q",
       neutralRel: `claudian/conv-1787925819663-qj5gp9vhq.${kind}.json`,
       branches: [],
-      superseded: false,
+      standing: "in-dispute" as const,
       reason: null,
       externalCopy: null,
     }) as ConflictEntry;
@@ -385,7 +385,7 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
   it("still abbreviates a uuid, and still names the file when the name needs it", () => {
     // The three providers whose ids are uuids must read exactly as before.
     const uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], superseded: false, reason: null, externalCopy: null };
+    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], standing: "in-dispute" as const, reason: null, externalCopy: null };
     expect(
       describeConflict({
         ...base, providerId: "claude-code", logicalId: uuid, logicalIdPrefix: "3f2504e0",
@@ -406,7 +406,7 @@ describe("the sentence for a conflict the standing paragraph would describe wron
     ({
       conflictId: "c", providerId: "claudian", logicalId: "conv-1-a.meta",
       logicalIdPrefix: "conv-1-a", detectedAt: "", directory: "/q",
-      neutralRel: "claudian/conv-1-a.meta.json", branches: [], superseded: false,
+      neutralRel: "claudian/conv-1-a.meta.json", branches: [], standing: "in-dispute" as const,
       reason: null, externalCopy: null, ...over,
     }) as ConflictEntry;
 
