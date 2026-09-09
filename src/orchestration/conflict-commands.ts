@@ -30,6 +30,16 @@ import { readJson } from "../infra/json-file";
 import type { BackupRequest } from "../infra/backup-writer";
 import type { MintOutcome } from "./sync-engine";
 
+/**
+ * Every name the engine has ever given a quarantined copy.
+ *
+ * `branch-<hash8>` is current (`domain/conflict.ts`); `local-`/`remote-` are
+ * the pre-fix pair a directory on a real machine may still hold, and the
+ * regression test for those exists because such directories must keep
+ * resolving. Anything else in the directory came from somewhere else.
+ */
+const COPY_PREFIXES = ["branch-", "local-", "remote-"] as const;
+
 export const QUARANTINE_DIR = ".quarantine";
 
 export interface ConflictBranchView {
@@ -66,13 +76,34 @@ export interface ConflictEntry {
   /** The sync tool's own copy of this file, when that was the evidence. */
   readonly externalCopy: string | null;
   /**
-   * Neither live side matches any branch — the disagreement this directory
-   * froze is over (resolved, or superseded by a fresh pair the next pass will
-   * quarantine under its own id). Kept listable for `reveal`; the keep
-   * buttons cannot act on it.
+   * Where this frozen pair stands against what is on disk right now.
+   *
+   * Replaces a boolean called `superseded`, whose sole clause — no branch on
+   * either side — got the commonest ending exactly backwards. A resolved
+   * conflict *converges*, and the surviving bytes are by definition equal to
+   * one of the archived branches, so the branch matched a live side and the
+   * entry stayed "unresolved" forever. Convergence was the very condition that
+   * kept it in the list. Measured 2026-09-09: 47 directories had converged
+   * byte-for-byte on both sides and every one still offered live buttons,
+   * while the status bar — counting what passes judged — correctly said 1.
+   *
+   * Nothing is stored. The verdict is per-machine and reversible: the same
+   * directory is `settled` here and `in-dispute` on the peer that still holds
+   * the other branch, and flips back if that peer pushes it. A marker written
+   * into the directory would suppress a genuine recurrence under the same id.
    */
-  readonly superseded: boolean;
+  readonly standing: ConflictStanding;
 }
+
+export type ConflictStanding =
+  /** A branch is live on one side or the other, and they do not agree. */
+  | "in-dispute"
+  /** One archived branch is on *both* sides: there is nothing left to choose. */
+  | "settled"
+  /** Both sides were read, and neither holds either branch any more. */
+  | "moved-on"
+  /** Neither side could be read, so nothing at all is known about them. */
+  | "unreadable";
 
 export interface ConflictCommandDeps {
   readonly fs: FsGateway;
@@ -118,6 +149,15 @@ export type ResolveFailure =
    * changed" retries differently from one told "a file was briefly locked".
    */
   | "kept-unreadable"
+  /**
+   * Both sides already hold the same version, so there is nothing to overwrite.
+   *
+   * The panel greys these buttons, but the palette commands read the same list
+   * and no entry flag at all — so without this the click still took a backup,
+   * rotated one away, rewrote identical bytes, bumped an mtime the sync tool
+   * then re-transfers, and reported success.
+   */
+  | "sides-agree"
   | "remote-not-ready"
   /** A pass is applying right now — the same lock a pass takes (§9.4). */
   | "sync-in-progress"
@@ -168,6 +208,12 @@ export async function resolveConflict(
 
   const action = resolutionAction(resolution);
   if (action === null) return { ok: true, action: "REVEAL", directory: entry.directory };
+
+  // From the freshly re-listed entry above, never from what the panel drew: a
+  // list a minute old is exactly what the palette commands act on. Placed
+  // before the readiness gate deliberately — sending someone off to fix sync
+  // readiness for a write that would change nothing is the worse refusal.
+  if (entry.standing === "settled") return { ok: false, reason: "sides-agree" };
 
   const keepingLocal = resolution === "keep-local";
   // Keeping local means writing into the sync directory, and that is only
@@ -261,7 +307,20 @@ async function readEntry(
   }
   if (byHash.size < 2) return null; // Half-transported or tampered; not resolvable.
 
-  const extension = extensionOf([...byHash.values()][0]?.copyName ?? "");
+  // Only the engine's own copies, and only when the path was not recorded.
+  // `readDir` is unsorted, so "the first entry" could be a `.DS_Store` — which
+  // Finder writes into this very directory the moment someone clicks "Show me
+  // both" — and `extensionOf(".DS_Store")` returns ".DS_Store", producing a
+  // neutralRel that resolves nowhere and dropping a live conflict into the
+  // unreadable bucket.
+  const extension =
+    recordedRel === null
+      ? extensionOf(
+          [...byHash.values()].find((copy) =>
+            COPY_PREFIXES.some((prefix) => copy.copyName.startsWith(prefix)),
+          )?.copyName ?? "",
+        )
+      : "";
   const neutralRel = recordedRel ?? `${providerId}/${logicalId}${extension}`;
   const localPath = await deps.localPathFor(providerId, neutralRel);
   const localHash = await hashOf(deps, localPath);
@@ -295,8 +354,52 @@ async function readEntry(
     directory,
     neutralRel,
     branches,
-    superseded: !branches.some((branch) => branch.onThisMachine || branch.inSyncFolder),
+    standing: standingOf(branches, localHash, remoteHash),
   };
+}
+
+/**
+ * The four endings, in the only order that is correct.
+ *
+ * **`settled` must be tested first.** A converged entry's surviving branch also
+ * satisfies the `in-dispute` clause below, so testing that first calls
+ * convergence a live fork — which is precisely the bug this replaces.
+ *
+ * **Written over the branch flags, never over `localHash === remoteHash`.**
+ * That spelling is the obvious refactor and it is unsafe twice over. `hashOf`
+ * collapses *absent*, *unreadable* (the state `kept-unreadable` exists for),
+ * *provider switched off on this machine* (`localPathFor` returns null before
+ * any I/O) and *this rel does not resolve here* into one null — and in the
+ * worst case both nulls come from a single cause, so `null === null` would
+ * announce that two files it cannot even find agree. Going through the flags
+ * also rules out the pair of zero-byte reads a dehydrating cloud client
+ * produces, since `hash(empty) === hash(empty)` is a real, equal, non-null
+ * hash but matches no archived branch.
+ *
+ * What `settled` proves is worth stating exactly, because it is the whole
+ * safety argument for greying the buttons: if a branch is on both sides then
+ * `localHash === remoteHash === branch.hash`, and `resolveConflict` writes the
+ * bytes it read from the kept side onto the other — which already holds them.
+ * No keep button can change a byte in this state, so disabling them removes no
+ * remedy. A torn read (local at t1, remote at t2) can only reach a false
+ * `settled` by the CLI appending locally after t1, which lands on the
+ * one-side-moved shape where keep-local would refuse `branch-moved` anyway and
+ * keep-remote would truncate a longer file. Harmless, not impossible.
+ */
+function standingOf(
+  branches: readonly ConflictBranchView[],
+  localHash: string | null,
+  remoteHash: string | null,
+): ConflictStanding {
+  if (branches.some((branch) => branch.onThisMachine && branch.inSyncFolder)) return "settled";
+  if (branches.some((branch) => branch.onThisMachine || branch.inSyncFolder)) return "in-dispute";
+  // Split apart on purpose. One sentence used to cover both "both sides moved
+  // past this pair" (observed) and "neither side could be read" (nothing
+  // observed), and the second is where the old code told a user with a live
+  // fork on disk that it was over — a schema-2 directory under a nested
+  // provider rebuilds a path that resolves to nothing, so both reads come back
+  // null while both files sit there disagreeing.
+  return localHash === null || remoteHash === null ? "unreadable" : "moved-on";
 }
 
 async function hashOf(deps: ConflictCommandDeps, target: string | null): Promise<string | null> {

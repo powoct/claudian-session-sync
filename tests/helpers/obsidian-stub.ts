@@ -15,6 +15,13 @@ export class FakeElement {
   readonly listeners = new Map<string, Array<() => unknown>>();
   detached = false;
   tag = "div";
+  /**
+   * Real elements have it and the conflict panel sets it, so a test can only
+   * check "this button is greyed out" if the stub carries it too. Left
+   * undeclared, the assertion has to cast, and a cast is how a UI test stops
+   * failing when the UI stops disabling things.
+   */
+  disabled = false;
 
   setText(text: string): this {
     this.textContent = text;

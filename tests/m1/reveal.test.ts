@@ -67,7 +67,7 @@ const conflictEntry = {
       inSyncFolder: false,
     },
   ],
-  superseded: false,
+  standing: "in-dispute" as const,
     reason: null,
     externalCopy: null,
 } as ConflictEntry;

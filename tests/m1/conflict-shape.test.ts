@@ -6,7 +6,7 @@
  * For a provider whose file name merely *contains* the id and whose layout is
  * nested — Codex — the rebuilt path points at nothing, and the failure is
  * worse than an error: both live branches read as absent, so the entry is
- * reported `superseded` and the dialog tells the user the disagreement is over
+ * reported as needing no decision, and the dialog tells the user so
  * while both versions are sitting there.
  *
  * These run against the commands directly with injected dependencies, because
@@ -103,7 +103,7 @@ describe("a nested provider's conflict", () => {
     const { deps } = await world(metaV3);
     const [entry] = await listConflicts(deps);
 
-    expect(entry?.superseded).toBe(false);
+    expect(entry?.standing).toBe("in-dispute");
     expect(entry?.branches.filter((b) => b.onThisMachine)).toHaveLength(1);
     expect(entry?.branches.filter((b) => b.inSyncFolder)).toHaveLength(1);
   });
@@ -124,13 +124,16 @@ describe("a nested provider's conflict", () => {
     expect(new Uint8Array(await fsp.readFile(localPath))).toEqual(BRANCH_B);
   });
 
-  it("was unresolvable before the path was recorded — and said so wrongly", async () => {
+  it("was unresolvable before the path was recorded — and now says it cannot see them", async () => {
     // The regression this guards. Not "it fails", but *how* it failed: a false
-    // all-clear, which is the one report a user acts on by walking away.
+    // all-clear, which is the one report a user acts on by walking away. Both
+    // live files are sitting there forked; only the rebuilt path is wrong. It
+    // now reads `unreadable`, whose sentence sends the user to look, rather
+    // than sharing one verdict with "both sides moved past this pair".
     const { deps } = await world(metaV2);
     const [entry] = await listConflicts(deps);
 
-    expect(entry?.superseded).toBe(true);
+    expect(entry?.standing).toBe("unreadable");
     expect(await resolveConflict(deps, CONFLICT_ID, "keep-local")).toEqual({
       ok: false,
       reason: "kept-unreadable",
@@ -183,7 +186,112 @@ describe("a flat provider's conflict, written before schema 3", () => {
     };
 
     const [entry] = await listConflicts(deps);
-    expect(entry?.superseded).toBe(false);
+    expect(entry?.standing).toBe("in-dispute");
     expect(await resolveConflict(deps, CONFLICT_ID, "keep-local")).toMatchObject({ ok: true });
+  });
+});
+
+/**
+ * The 2026-09-09 conflict storm: a resolved conflict never left the list.
+ *
+ * A resolution *converges* the two sides, and the surviving bytes are by
+ * definition one of the archived branches — so the old predicate ("no branch is
+ * on either side") saw a branch on both sides and reported a live fork. On the
+ * reporting machine 47 directories had converged byte-for-byte and every one
+ * still offered buttons that would rewrite identical bytes.
+ */
+describe("a conflict whose two sides now agree", () => {
+  const settledWorld = async () => {
+    const built = await world(metaV3);
+    // What a completed resolution looks like on disk: both sides hold BRANCH_A.
+    await fsp.writeFile(built.remotePath, BRANCH_A);
+    return built;
+  };
+
+  it("is settled, and names the version both sides hold", async () => {
+    const { deps } = await settledWorld();
+    const [entry] = await listConflicts(deps);
+
+    expect(entry?.standing).toBe("settled");
+    const both = entry?.branches.filter((b) => b.onThisMachine && b.inSyncFolder);
+    expect(both, "one branch is on both sides").toHaveLength(1);
+  });
+
+  it("still lists, so the other version stays reachable", async () => {
+    // Flagged, never filtered: the copies are deliberately never deleted, and
+    // "Show me both" is the only route to them.
+    const { deps } = await settledWorld();
+    expect(await listConflicts(deps)).toHaveLength(1);
+    expect(await resolveConflict(deps, CONFLICT_ID, "reveal")).toMatchObject({
+      ok: true,
+      action: "REVEAL",
+    });
+  });
+
+  it("refuses the keep buttons instead of rewriting identical bytes", async () => {
+    // The panel greys these, but the palette commands act on the same list and
+    // read no flag at all — so the refusal has to live in the action.
+    const { deps, localPath, remotePath } = await settledWorld();
+    for (const choice of ["keep-local", "keep-remote"] as const) {
+      expect(await resolveConflict(deps, CONFLICT_ID, choice)).toEqual({
+        ok: false,
+        reason: "sides-agree",
+      });
+    }
+    expect(new Uint8Array(await fsp.readFile(localPath))).toEqual(BRANCH_A);
+    expect(new Uint8Array(await fsp.readFile(remotePath))).toEqual(BRANCH_A);
+  });
+
+  it("flips back if the other machine pushes its version again", async () => {
+    // Nothing is stored, and that is the point: a marker in the directory
+    // would suppress a genuine recurrence under the same conflictId.
+    const { deps, remotePath } = await settledWorld();
+    expect((await listConflicts(deps))[0]?.standing).toBe("settled");
+
+    await fsp.writeFile(remotePath, BRANCH_B);
+    expect((await listConflicts(deps))[0]?.standing).toBe("in-dispute");
+  });
+
+  it("is not confused by a file the OS drops in the directory", async () => {
+    // Finder writes `.DS_Store` here precisely when someone clicks "Show me
+    // both", so it arrives on the entries a user is looking at.
+    const { deps } = await settledWorld();
+    const [before] = await listConflicts(deps);
+    await fsp.writeFile(
+      path.join(before?.directory as string, ".DS_Store"),
+      enc("not a session version"),
+    );
+
+    const [after] = await listConflicts(deps);
+    expect(after?.standing).toBe("settled");
+    expect(after?.branches).toHaveLength(3);
+  });
+});
+
+describe("two sides that cannot be read are not two sides that agree", () => {
+  it("does not call a pair of empty reads a convergence", async () => {
+    // A cloud client dehydrating both files makes them read as zero bytes, and
+    // `hash(empty) === hash(empty)` is a real, equal, non-null hash. Going
+    // through the branch flags is what rules it out: neither empty file
+    // matches an archived version.
+    const { deps, localPath, remotePath } = await world(metaV3);
+    for (const target of [localPath, remotePath]) await fsp.writeFile(target, enc(""));
+
+    expect((await listConflicts(deps))[0]?.standing).toBe("moved-on");
+  });
+
+  it("says it cannot see them, not that they moved on", async () => {
+    const { deps, localPath, remotePath } = await world(metaV3);
+    for (const target of [localPath, remotePath]) await fsp.rm(target);
+
+    expect((await listConflicts(deps))[0]?.standing).toBe("unreadable");
+  });
+
+  it("calls it moved-on only when both sides were actually read", async () => {
+    const { deps, localPath, remotePath } = await world(metaV3);
+    await fsp.writeFile(localPath, enc("a third thing\n"));
+    await fsp.writeFile(remotePath, enc("a fourth thing\n"));
+
+    expect((await listConflicts(deps))[0]?.standing).toBe("moved-on");
   });
 });
