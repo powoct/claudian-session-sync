@@ -37,6 +37,9 @@ export interface HarnessOptions {
 }
 
 export class RuntimeHarness {
+  /** Mutable so a test can rename this machine mid-run. */
+  hostname = "test-machine";
+
   readonly root: string;
   readonly homedir: string;
   readonly vaultRoot: string;
@@ -100,6 +103,7 @@ export class RuntimeHarness {
         }
       : real;
 
+    const readHostname = () => this.hostname;
     const host: RuntimeHost = {
       fs: fs as typeof real,
       clock: this.clock,
@@ -108,7 +112,11 @@ export class RuntimeHarness {
       dirnameOf: (target) => path.dirname(target),
       hashBytes: sha256,
       platform: process.platform,
-      hostname: options.hostname ?? "test-machine",
+      // Read through a closure, so a test can rename the machine between
+      // passes — which is what macOS does on its own when `HostName` is unset.
+      get hostname() {
+        return readHostname();
+      },
       homedir: this.homedir,
       vaultRoot: this.vaultRoot,
       pid: process.pid,

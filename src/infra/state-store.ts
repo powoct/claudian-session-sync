@@ -299,56 +299,52 @@ export function gcObservations(file: ObservationsFile, nowMs: number): Observati
 
 export type DriftReason = "hostname-drift" | "platform-drift";
 
-/**
- * Has this machine's fingerprint changed since the id was minted?
- *
- * A cloned home directory, a roaming profile and a renamed computer are
- * indistinguishable from here, so all three are treated as the worst case: this
- * id may now be in use by another machine. Hostname comparison is trimmed and
- * case-insensitive, because a case change is a display detail, not a new host.
- *
- * `homedir` is deliberately not compared — a moved home is still this machine.
- */
-export function detectIdentityDrift(
-  recorded: MachineIdentity,
-  current: MachineIdentity,
-): DriftReason | null {
-  if (recorded.platform !== current.platform) return "platform-drift";
-  if (recorded.hostname.trim().toLowerCase() !== current.hostname.trim().toLowerCase()) {
-    return "hostname-drift";
-  }
-  return null;
-}
+export type IdentityVerdict = "same" | "renamed" | "foreign-platform";
 
 /**
- * Retires the current id and adopts a new one.
+ * Is this the machine the id was minted on?
  *
- * Always safe, by design: machineId may never take part in a decision (§10.3),
- * so the entire cost of rotating is one more line in an audit list. That is
- * what allows the drift response to be "give way, silently" rather than a
- * dialog the user cannot act on. Two machines detecting a collision at the same
- * time both give way and converge within one round.
+ * **The id is minted once and never re-minted.** It used to rotate whenever the
+ * hostname changed, on the reasoning that a clone, a roaming profile and a
+ * rename are indistinguishable from here, so all three should be treated as the
+ * worst case. Measured 2026-09-14, that reasoning had the cost backwards.
+ *
+ * A hostname is not an identity. It is user-editable by design, and on macOS
+ * with `HostName` unset it flips between the computer name and the Bonjour name
+ * as the network changes — nine rotations on one machine in one day. Meanwhile
+ * rotating is *not* the free audit line the architecture claimed: a new id makes
+ * `parseObservations` report `machine-id-mismatch`, which discards the whole
+ * observation ledger — the quiet-window state, `remoteHadNonZeroSize`, and
+ * `lastConvergedHash`/`convergedSize`, which is the base ADR-61's shrink guard
+ * needs to tell a deliberate rewind from a file that fell behind. So every
+ * network switch silently disarmed a data-safety protection.
+ *
+ * A rename is therefore just a rename: the label is updated, the id stays.
+ *
+ * `platform` is still identity, and still fails closed: a state directory that
+ * turns up under a different OS is a copy, not a rename, and the paths recorded
+ * in it do not describe this machine.
+ *
+ * `homedir` is deliberately not compared — a moved home is still this machine.
+ *
+ * **Not a hardware UUID.** It would be stable, but it cannot be read without
+ * spawning a process on macOS and Windows, in a bundle that has never spawned
+ * one; and `machineId` is written into the *shared* folder as `lastWriter`,
+ * `createdBy` and `detectedBy`, so keying it to hardware would publish a stable
+ * hardware identifier into a folder other people can read. A minted random id
+ * is stable for the same purpose and says nothing about the machine.
  */
-export function rotateMachineId(
-  file: MachineFile,
-  next: { readonly machineId: MachineId; readonly identity: MachineIdentity; readonly nowIso: string },
-  reason: SupersededIdentity["reason"],
-): MachineFile {
-  const retired: SupersededIdentity = {
-    machineId: file.machineId,
-    retiredAt: next.nowIso,
-    reason,
-    identity: file.identity,
-  };
-  return {
-    ...file,
-    machineId: next.machineId,
-    identity: next.identity,
-    // Newest first, oldest dropped: this is an audit aid, not a record anything
-    // depends on.
-    superseded: [retired, ...file.superseded].slice(0, MAX_SUPERSEDED),
-  };
+export function judgeIdentity(
+  recorded: MachineIdentity,
+  current: MachineIdentity,
+): IdentityVerdict {
+  if (recorded.platform !== current.platform) return "foreign-platform";
+  // Trimmed and case-insensitive: a case change was never a new host either.
+  return recorded.hostname.trim().toLowerCase() === current.hostname.trim().toLowerCase()
+    ? "same"
+    : "renamed";
 }
+
 
 export function parseMachineFile(raw: unknown): LoadOutcome<MachineFile> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
