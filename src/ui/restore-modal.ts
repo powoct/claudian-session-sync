@@ -191,6 +191,22 @@ function describeNextSync(backup: BackupEntry): string {
         "the next sync raises a conflict where both are kept and you choose. This is the case " +
         "restoring is for."
       );
+    case "equivalent":
+      // Neither a continuation nor a fork, so neither of the sentences above
+      // is true of it: the two files carry the same records with the object
+      // members written in a different order (ADR-75). What the user needs to
+      // know is that the choice does not matter, not which way the bytes go.
+      return backup.remote
+        ? (
+            "This machine holds the same records written in a different order — nothing in " +
+            "the conversation differs between the two. The next sync may copy this version " +
+            "over to line the bytes up; no record is gained or lost either way."
+          )
+        : (
+            "The sync folder holds the same records written in a different order — nothing in " +
+            "the conversation differs between the two. The next sync may put its copy back " +
+            "over this one to line the bytes up; no record is gained or lost either way."
+          );
     case "whole-file":
       return (
         "This provider stores whole records rather than appended lines, so the next sync " +

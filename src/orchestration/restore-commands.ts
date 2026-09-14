@@ -36,6 +36,7 @@ import { parseBackupName } from "../infra/backup-store";
 import type { LogicalId } from "../domain/types";
 import type { MintOutcome } from "./sync-engine";
 import type { ProviderAdapter } from "../providers/provider-adapter";
+import { compareRecordwise } from "../domain/equivalence";
 
 /** Only ever compared and displayed as a prefix (§11.1). */
 export interface BackupEntry {
@@ -86,6 +87,8 @@ export interface BackupEntry {
     | "will-propagate"
     | "will-conflict"
     | "whole-file"
+    /** Same records, different member order (ADR-75) — neither a fork nor news. */
+    | "equivalent"
     | "unknown";
 }
 
@@ -533,6 +536,11 @@ function predict(
   if (mode !== "append-jsonl") return "whole-file";
   if (bytes.length < other.length && isPrefix(bytes, other)) return "will-be-undone";
   if (other.length < bytes.length && isPrefix(other, bytes)) return "will-propagate";
+  // Asked with the engine's own function rather than a second opinion about
+  // the same bytes. A row that says "raises a conflict" about a pair rule 7b
+  // resolves silently is not a smaller mistake than the reverse: the user
+  // restores a version to force a choice they are never offered.
+  if (compareRecordwise(bytes, other) === "equivalent") return "equivalent";
   return "will-conflict";
 }
 

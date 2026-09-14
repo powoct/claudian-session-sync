@@ -160,6 +160,13 @@ export class PluginRuntime {
   private unknownSettings: Readonly<Record<string, unknown>> = {};
   private status: RuntimeStatus = IDLE;
   private machine: MachineFile | null = null;
+  /**
+   * The identity write the last `refresh` declined to make, as a sentence.
+   *
+   * Recomputed on every refresh rather than consumed, so it always describes
+   * the current state: null the moment an identity is loaded or persisted.
+   */
+  private identityWithheld: string | null = null;
   private binding: WorkspaceBinding | null = null;
   private identity: IdentityOutcome | null = null;
   private lastReport: PassReport | null = null;
@@ -209,14 +216,22 @@ export class PluginRuntime {
     return () => this.listeners.delete(listener);
   }
 
-  /** Reads state and recomputes the status. Safe to call repeatedly. */
-  async refresh(): Promise<RuntimeStatus> {
+  /**
+   * Reads state and recomputes the status. Safe to call repeatedly.
+   *
+   * `persistIdentity: false` is how a dry run gets its machine identity without
+   * writing one (§7.6). It is a parameter rather than a setting because
+   * `dryRun` is decided per pass, and this is the only write `refresh` makes.
+   */
+  async refresh(options: { readonly persistIdentity?: boolean } = {}): Promise<RuntimeStatus> {
     const settings = parseSettings(await this.host.loadSettings());
     this.settings = settings.settings;
     this.unknownSettings = settings.unknown;
 
     const home = await this.homeStore();
-    this.machine = await this.loadOrCreateMachine(home);
+    const identity = await this.loadOrCreateMachine(home, options.persistIdentity ?? true);
+    this.machine = identity.machine;
+    this.identityWithheld = identity.withheld;
 
     // The vault answers "which workspace is this" (§5.2.3); this machine's
     // binding answers "and where does it sync to". Both, or nothing happens.
@@ -240,7 +255,7 @@ export class PluginRuntime {
    * there for the caller that does.
    */
   async syncNow(options: { dryRun?: boolean; verifyAll?: boolean } = {}): Promise<RuntimeStatus> {
-    const prepared = await this.prepare();
+    const prepared = await this.prepare({ dryRun: options.dryRun ?? false });
     if (!prepared.ok) return this.publish(prepared.status);
     if (this.passInFlight) return this.status;
 
@@ -261,7 +276,13 @@ export class PluginRuntime {
         msSinceLastStartupScrub: this.host.clock.nowMs() - this.startedAtMs,
       });
       this.firstPassDone = true;
-      this.lastReport = outcome.report;
+      // Folded in the way `pass-runner` folds its ledger notice: decided
+      // before the pass began, from a step the report would otherwise have no
+      // word for. A dry run that silently declines to write its own identity
+      // file is a dry run whose report is not the whole story.
+      this.lastReport = this.identityWithheld
+        ? { ...outcome.report, notices: [this.identityWithheld, ...outcome.report.notices] }
+        : outcome.report;
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -617,14 +638,29 @@ export class PluginRuntime {
   }
 
   /**
-   * Loads this machine's identity, creating or rotating it as needed (§10.3).
+   * Loads this machine's identity, creating or renaming it as needed (§10.3).
    *
-   * Rotation is silent by design: `machineId` never takes part in a decision,
+   * A rename is silent by design: `machineId` never takes part in a decision,
    * so the entire cost of giving way is one line in an audit list — and a
    * dialog asking the user to adjudicate a hostname change is a dialog nobody
    * can answer.
+   *
+   * `persist: false` makes it **absolutely read-only**, which is what §7.6
+   * promises of a dry run: the state directory is one of the five trees a dry
+   * run may not touch, and this was the only write left in it. The identity is
+   * still produced, in memory, because a pass needs one — and a provisional id
+   * changes nothing it decides (§10.3). What it does change is the observation
+   * ledger, which a real pass would invalidate in exactly the same way when
+   * the identity file is missing (ADR-74), so the dry run's report stays a
+   * true account of what the real pass would do.
+   *
+   * The withheld write is returned rather than logged, so the caller can put
+   * it in the report instead of leaving the user to notice the difference.
    */
-  private async loadOrCreateMachine(home: HomeStore): Promise<MachineFile | null> {
+  private async loadOrCreateMachine(
+    home: HomeStore,
+    persist: boolean,
+  ): Promise<{ machine: MachineFile | null; withheld: string | null }> {
     const identity = {
       hostname: this.host.hostname,
       platform: this.host.platform as MachineFile["identity"]["platform"],
@@ -640,18 +676,27 @@ export class PluginRuntime {
         identity,
         superseded: [],
       };
+      if (!persist) {
+        return {
+          machine: created,
+          withheld:
+            "dry run: this machine has no identity file yet, and none was created. A real pass " +
+            "creates one; until then this pass has no memory of earlier passes to compare with, " +
+            "so everything below reads as first sight.",
+        };
+      }
       await home.saveMachine(created);
-      return created;
+      return { machine: created, withheld: null };
     }
 
     const verdict = judgeIdentity(load.value.identity, identity);
-    if (verdict === "same") return load.value;
+    if (verdict === "same") return { machine: load.value, withheld: null };
     if (verdict === "foreign-platform") {
       // A state directory under a different OS is a copy, not a rename: the
       // paths recorded in it do not describe this machine. Fail closed (ADR-21)
       // — `prepare()` aborts the pass on a missing machine file, so refusing
       // here is a refusal to sync rather than a refusal to load.
-      return null;
+      return { machine: null, withheld: null };
     }
     // A rename is a rename. The id is minted once and never re-minted, so the
     // observation ledger — and with it ADR-61's shrink-guard base — survives
@@ -661,8 +706,17 @@ export class PluginRuntime {
       machineLabel: this.host.hostname,
       identity,
     };
+    if (!persist) {
+      return {
+        machine: renamed,
+        withheld:
+          "dry run: this machine has been renamed since it last synced, and the recorded name " +
+          "was left as it was. A real pass updates it; the machine id is unchanged either way, " +
+          "so nothing this pass decided depended on it.",
+      };
+    }
     await home.saveMachine(renamed);
-    return renamed;
+    return { machine: renamed, withheld: null };
   }
 
   /**
@@ -721,11 +775,14 @@ export class PluginRuntime {
   }
 
   /** Assembles the pass, or explains why it cannot be assembled. */
-  private async prepare(): Promise<
+  private async prepare(options: { readonly dryRun: boolean }): Promise<
     { ok: true; deps: PassRunnerArgs } | { ok: false; status: RuntimeStatus }
   > {
     if (!this.machine || !this.identity) {
-      const status = await this.refresh();
+      // The one path on which a pass can reach `loadOrCreateMachine`, and so
+      // the one place the dry-run promise could be broken by it: a first run,
+      // or any run whose identity file has gone missing.
+      const status = await this.refresh({ persistIdentity: !options.dryRun });
       if (!this.machine || !this.identity) return { ok: false, status };
     }
     if (this.identity.status !== "ok" || !this.identity.file) {
@@ -854,7 +911,9 @@ export class PluginRuntime {
     busy: T,
     body: (mayWriteRemote: () => boolean) => Promise<T>,
   ): Promise<T> {
-    const prepared = await this.prepare();
+    // Never a dry run: everything behind this gate is a write the user asked
+    // for by name, and one of them is "put this version back".
+    const prepared = await this.prepare({ dryRun: false });
     if (!prepared.ok) return busy;
     const lock = prepared.deps.lock;
     const acquired = await lock?.acquire();

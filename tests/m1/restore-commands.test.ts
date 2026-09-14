@@ -53,6 +53,16 @@ async function withBackups() {
   return { a, b };
 }
 
+/** The same records with their members rotated — ADR-75's shape. */
+function permuted(order: 0 | 1, records = 6): string {
+  let text = "";
+  for (let i = 0; i < records; i++) {
+    const members = [`"uuid":"r${i}"`, `"type":"user"`, `"text":"line ${i}"`];
+    text += `{${[...members.slice(order), ...members.slice(0, order)].join(",")}}\n`;
+  }
+  return text;
+}
+
 describe("listing what was kept", () => {
   it("finds the version an overwrite destroyed, with enough to identify it", async () => {
     const { a } = await withBackups();
@@ -84,6 +94,32 @@ describe("listing what was kept", () => {
     // with — which holds the longer version A just pulled.
     expect(local?.outcome).toBe("will-be-undone");
     expect(local?.neutralRel).toBe(`claude-code/${SID}.jsonl`);
+  }, 30_000);
+
+  it("does not call an equivalent pair a conflict (ADR-75)", async () => {
+    // The row has to agree with the engine about the same two files. If it
+    // says "raises a conflict" about a pair rule 7b resolves silently, the
+    // user restores a version to force a choice they are never offered — and
+    // the restore is undone on the next pass with no explanation.
+    const a = await RuntimeHarness.create();
+    machines.push(a);
+    // `appendSession` leaves the Claudian record admission needs (ADR-47);
+    // zero lines asks for the record and nothing else, so the bytes below are
+    // exactly the ones under test.
+    await a.appendSession(SID, 0);
+    await a.appendRaw(SID, permuted(0));
+    await a.configure();
+    await a.settle();
+
+    const b = await RuntimeHarness.createPeer(a);
+    machines.push(b);
+    await b.appendSession(SID, 0);
+    await b.appendRaw(SID, permuted(1));
+    await b.settle(); // adopts A's serialisation, backing up its own
+
+    const own = (await b.runtime.backups()).find((entry) => !entry.remote);
+    expect(own?.liveRelation).toBe("differs");
+    expect(own?.outcome).toBe("equivalent");
   }, 30_000);
 
   it("survives an unreadable index — recovery never depends on it", async () => {

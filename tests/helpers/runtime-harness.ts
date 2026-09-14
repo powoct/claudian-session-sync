@@ -50,7 +50,17 @@ export class RuntimeHarness {
   /** `<home>/.grok/sessions`, and this vault's project directory inside it. */
   readonly grokRoot: string;
   readonly grokProjectDir: string;
-  readonly runtime: PluginRuntime;
+  /**
+   * Mutable for `restart()` only.
+   *
+   * A test that needs a runtime which has *not* yet read the state directory
+   * cannot get one by deleting a file: the in-memory copy outlives it, and
+   * every path that would re-read also re-creates. Modelling the restart is
+   * the only honest way to reach that state, and it is not an exotic one —
+   * it is what every Obsidian launch does.
+   */
+  runtime: PluginRuntime;
+  private readonly host: RuntimeHost;
 
   private stored: unknown = null;
   /** Folders the plugin asked the desktop to open, for the §9.3.4 tests. */
@@ -129,7 +139,13 @@ export class RuntimeHarness {
         this.stored = value;
       },
     };
+    this.host = host;
     this.runtime = new PluginRuntime(host);
+  }
+
+  /** A fresh runtime over the same directories — an Obsidian restart. */
+  restart(): void {
+    this.runtime = new PluginRuntime(this.host);
   }
 
   static async create(options: HarnessOptions = {}): Promise<RuntimeHarness> {

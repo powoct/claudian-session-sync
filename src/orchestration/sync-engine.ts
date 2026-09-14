@@ -29,6 +29,7 @@ import {
   planOpaque,
   shrankBelowConvergedBase,
 } from "../domain/planner";
+import { compareRecordwise } from "../domain/equivalence";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
 import { type E0Signature, judgeStability, signaturesEqual } from "../domain/stability";
 import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
@@ -560,7 +561,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // ── P4 plan ──────────────────────────────────────────────────────────
       const localFacts = facts(deps, localO2, localBytes, localStable.stable && readStillValid);
       const remoteFacts = facts(deps, remoteO2, remoteBytes, remoteStable.stable && readStillValid);
-      const relation = relate(localBytes, remoteBytes);
+      // `relate` stays a statement about two byte arrays — it is the sole
+      // producer of `PrefixRelation`, and keeping it provider-free is what
+      // stops one provider's quirk becoming the append table's business. The
+      // policy lives here instead: only this merge mode, and only under the
+      // size limit, because `plan()`'s own size rule fires *after* this and
+      // `readBytes` has no cap of its own.
+      const bytewise = relate(localBytes, remoteBytes);
+      const relation: PlanInput["relation"] =
+        bytewise === "divergent" &&
+        file.mode === "append-jsonl" &&
+        localBytes !== null &&
+        remoteBytes !== null &&
+        localBytes.length <= deps.settings.maxFileSizeBytes
+          ? compareRecordwise(localBytes, remoteBytes)
+          : bytewise;
 
       const input: PlanInput = {
         remote: deps.remoteReadiness,
@@ -590,6 +605,13 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
             otherSize: localFacts.size,
             convergedSize: deps.ledger.convergedSize(file.neutralRel),
           }),
+          // ADR-75's churn stop. The remote holding exactly the bytes this
+          // machine last converged on means an equivalent verdict now is the
+          // *local* side having been re-serialised since — the peer has said
+          // nothing. Read only by rule 7b, and only ever to withhold a write.
+          equivalenceAlreadyAdopted:
+            remoteFacts.observedHash !== "" &&
+            remoteFacts.observedHash === deps.ledger.converged(file.neutralRel),
         },
       };
       let witness: WitnessOutcome = { found: false, copyRel: null, unreadable: null };
@@ -756,7 +778,17 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // Opaque records keep the counted per-provider line: they are rewritten
       // every turn, so naming each one is noise (ADR-48). A conversation
       // history is named, because it is the one the user might be typing into.
-      if (decision.action === "PULL_OVERWRITE" && applied.result === "APPLIED") {
+      // `equivalent-serialisation` is deliberately not counted as a
+      // replacement. The notice tells the user their history was replaced with
+      // the other machine's version and to quit and resume before typing —
+      // true and important for a real pull, and a false alarm here on the
+      // loudest channel this plugin has, because the records are the same ones
+      // and nothing they can perceive has changed.
+      if (
+        decision.action === "PULL_OVERWRITE" &&
+        applied.result === "APPLIED" &&
+        decision.reason !== "equivalent-serialisation"
+      ) {
         if (file.mode === "opaque-file") {
           replacedByPeer.set(adapter.id, (replacedByPeer.get(adapter.id) ?? 0) + 1);
         } else {
@@ -884,11 +916,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   // every backup defers, and a notice per record would be noise instead of
   // news. What the user needs to know is that the number they set is not
   // bounding anything for that provider, and why.
+  //
+  // The sentence names the rule rather than the provider. It used to say "this
+  // provider rewrites whole records", which was the only way rotation could
+  // defer when it was written and stopped being true with ADR-75: a session
+  // this machine adopted a re-serialisation of leaves behind a copy that no
+  // later version contains either, on an append-only provider, and a notice
+  // that explains the problem with something the user knows is false about
+  // Codex is worse than one that explains nothing.
   for (const providerId of rotationDeferredFor) {
     notices.push(
       `${providerId}: backups are being kept past the retention limit because none of the older ` +
-        "versions can be reproduced from a newer one — this provider rewrites whole records, so " +
-        "nothing is ever redundant. The folder will keep growing; prune it by hand if it matters.",
+        "versions can be reproduced from a newer one — rotation only deletes a copy some " +
+        "surviving version provably contains. That is never true of a provider which rewrites " +
+        "whole records, and not true of a session that was re-serialised rather than appended " +
+        "to. The folder will keep growing; prune it by hand if it matters.",
     );
   }
 
