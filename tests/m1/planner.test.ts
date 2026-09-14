@@ -48,6 +48,7 @@ const input = (overrides: Partial<PlanInput> = {}): PlanInput => ({
     truncatedTailPasses: 0,
     localShrankBelowConverged: false,
     remoteShrankBelowConverged: false,
+    equivalenceAlreadyAdopted: false,
   },
   ...overrides,
 });
@@ -145,7 +146,7 @@ describe("§5.2.2 tail integrity (U-11)", () => {
     const result = plan(
       input({
         local: L({ tail: "truncated" }),
-        history: { truncatedTailPasses: MALFORMED_TAIL_PASSES , localShrankBelowConverged: false, remoteShrankBelowConverged: false},
+        history: { truncatedTailPasses: MALFORMED_TAIL_PASSES, localShrankBelowConverged: false, remoteShrankBelowConverged: false, equivalenceAlreadyAdopted: false },
       }),
     );
     expect(result.action).toBe("DEFER");
@@ -214,11 +215,25 @@ describe("§5.2.3 zero-byte files (U-12)", () => {
     expect(actionOf({ remoteSide: R({ size: 0 }), relation: "divergent" })).toBe("PUSH_OVERWRITE");
   });
 
+  it("overrides a caller that claims a zero-byte side is an equivalent pair", () => {
+    // Equivalence is computed only between two equal-length non-empty sides
+    // (ADR-75), so this claim is as impossible as the one above — and it is the
+    // one that matters more, because "equivalent" is the single relation in the
+    // table that authorises overwriting bytes the two sides do not share. The
+    // empty side is a prefix, and the prefix rules decide.
+    expect(actionOf({ local: L({ size: 0 }), relation: "equivalent" })).toBe("PULL_OVERWRITE");
+    expect(actionOf({ remoteSide: R({ size: 0 }), relation: "equivalent" })).toBe("PUSH_OVERWRITE");
+    expect(
+      actionOf({ local: L({ size: 0 }), remoteSide: R({ size: 0 }), relation: "equivalent" }),
+    ).toBe("NOOP_EMPTY");
+  });
+
   it("a zero-byte side never produces CONFLICT, whatever relation is claimed", () => {
     // Absolute assertion: zero bytes is a prefix of every possible file, so
     // divergence is not a thing it can be in. Asserted against a caller that
     // insists otherwise.
-    for (const relation of ["equal", "divergent", "l-extends-r", "r-extends-l"] as const) {
+    const claims = ["equal", "divergent", "equivalent", "l-extends-r", "r-extends-l"] as const;
+    for (const relation of claims) {
       expect(actionOf({ local: L({ size: 0 }), relation })).not.toBe("CONFLICT");
       expect(actionOf({ remoteSide: R({ size: 0 }), relation })).not.toBe("CONFLICT");
       expect(
@@ -243,6 +258,7 @@ describe("§5.2.6 a side that fell below the last convergence (OQ-14, ADR-61)", 
         truncatedTailPasses: 0,
         localShrankBelowConverged: true,
         remoteShrankBelowConverged: false,
+        equivalenceAlreadyAdopted: false,
       },
       ...overrides,
     });
@@ -275,6 +291,7 @@ describe("§5.2.6 a side that fell below the last convergence (OQ-14, ADR-61)", 
           truncatedTailPasses: 0,
           localShrankBelowConverged: false,
           remoteShrankBelowConverged: true,
+          equivalenceAlreadyAdopted: false,
         },
       }),
     );
@@ -297,6 +314,7 @@ describe("§5.2.6 a side that fell below the last convergence (OQ-14, ADR-61)", 
             truncatedTailPasses: 0,
             localShrankBelowConverged: false,
             remoteShrankBelowConverged: true,
+            equivalenceAlreadyAdopted: false,
           },
         }),
       ).reason,
@@ -488,7 +506,7 @@ describe("§5.2.7 exhaustive combinations", () => {
     remote: ["ready", "not-ready", "unsupported-format"] as const,
     lExists: [true, false],
     rExists: [true, false],
-    relation: ["equal", "l-extends-r", "r-extends-l", "divergent", "n/a"] as const,
+    relation: ["equal", "l-extends-r", "r-extends-l", "divergent", "equivalent", "n/a"] as const,
     lStable: [true, false],
     rStable: [true, false],
     size: ["ok", "l-too-large", "r-too-large"] as const,
@@ -534,10 +552,14 @@ describe("§5.2.7 exhaustive combinations", () => {
 
                         // Also physically impossible: zero bytes is the empty
                         // prefix of every file, so a zero-byte side cannot have
-                        // diverged from anything. The planner recomputes the
-                        // relation rather than trusting such a claim — asserted
-                        // separately below.
-                        if ((lZero || rZero) && relation === "divergent") continue;
+                        // diverged from anything — nor be a member-order
+                        // permutation of anything, since equivalence is only
+                        // ever computed between two equal-length non-empty
+                        // sides. The planner recomputes the relation rather
+                        // than trusting either claim, asserted separately
+                        // below.
+                        if ((lZero || rZero) && (relation === "divergent" || relation === "equivalent"))
+                          continue;
 
                         // A placeholder is a file that exists but whose bytes
                         // are not local; it cannot be claimed for a side that
@@ -567,7 +589,19 @@ describe("§5.2.7 exhaustive combinations", () => {
                           conflictKnown,
                           maxFileSizeBytes: MAX_BYTES,
                           hints: { remoteHadNonZeroSize: hadContent },
-                          history: { truncatedTailPasses: 0 , localShrankBelowConverged: false, remoteShrankBelowConverged: false},
+                          history: {
+                            truncatedTailPasses: 0,
+                            localShrankBelowConverged: false,
+                            remoteShrankBelowConverged: false,
+                            // Held at the permissive value on purpose. The
+                            // flag can only ever turn a write into a NOOP, so
+                            // `false` is the value every "never writes X"
+                            // property here is hardest to satisfy under — and
+                            // a second dimension would double 22,032 runs to
+                            // assert the easier half. Its own behaviour is a
+                            // point test.
+                            equivalenceAlreadyAdopted: false,
+                          },
                         };
                       }
   }
@@ -575,11 +609,12 @@ describe("§5.2.7 exhaustive combinations", () => {
   const ALL = [...combinations()];
 
   it("generates a meaningful number of combinations", () => {
-    // 20,736 as of ADR-70, down from twice that: the fast-path dimension was
-    // binary and it is gone. The floor is deliberately just under the current
-    // number, so removing another dimension trips this rather than quietly
-    // halving the matrix again.
-    expect(ALL.length).toBeGreaterThan(20_000);
+    // 22,032 as of ADR-75, which added the `equivalent` relation to a
+    // dimension ADR-70 had shrunk to 20,736. The floor is deliberately just
+    // under the current number, so dropping a dimension — or quietly dropping
+    // `equivalent` back out of the relation set — trips this rather than
+    // halving the matrix in silence.
+    expect(ALL.length).toBeGreaterThan(21_000);
   });
 
   it("always produces exactly one action", () => {
@@ -654,6 +689,18 @@ describe("§5.2.7 exhaustive combinations", () => {
     }
   });
 
+  it("never pushes an equivalent pair, whatever else is true (ADR-75)", () => {
+    // The companion to the divergence assertion above, and the property the
+    // anti-ping-pong argument rests on: an equivalent verdict may adopt the
+    // shared copy, never publish over it. If this can push, the loop is back.
+    for (const combo of ALL) {
+      if (combo.relation !== "equivalent") continue;
+      expect(["PUSH_OVERWRITE", "PUSH_NEW"], JSON.stringify(combo)).not.toContain(
+        plan(combo).action,
+      );
+    }
+  });
+
   it("never turns a remote regression into a push", () => {
     // A remote file that once had content and is now empty is a symptom of the
     // sync tool, not permission to declare this machine authoritative.
@@ -687,9 +734,75 @@ describe("§5.2.7 exhaustive combinations", () => {
 
 describe("relation is a closed set", () => {
   it("handles every declared relation without falling through", () => {
-    const relations: PrefixRelation[] = ["equal", "l-extends-r", "r-extends-l", "divergent", "n/a"];
+    const relations: PrefixRelation[] = [
+      "equal",
+      "l-extends-r",
+      "r-extends-l",
+      "divergent",
+      "equivalent",
+      "n/a",
+    ];
     for (const relation of relations) {
       expect(() => plan(input({ relation }))).not.toThrow();
     }
+  });
+});
+
+describe("ADR-75: the same records in a different member order", () => {
+  it("adopts the shared copy, and only ever the shared copy", () => {
+    // The whole anti-ping-pong property. A rule that never writes into the
+    // sync folder cannot hand a peer a new variant to disagree with, so the
+    // shared slot is an absorbing state and any number of machines converge on
+    // it with one local write each. Electing a winner by content hash would
+    // push about half the time and keep the loop alive.
+    const result = plan(input({ relation: "equivalent" }));
+
+    expect(result.action).toBe("PULL_OVERWRITE");
+    expect(result.reason).toBe("equivalent-serialisation");
+  });
+
+  it("adopts once, then leaves the pair alone", () => {
+    // The churn stop. A second equivalent verdict against the bytes this
+    // machine already took means the *local* side was re-serialised since —
+    // a CLI rewriting the file on every launch, not a peer with news — and
+    // adopting again would only undo that rewrite and spend a backup slot.
+    const history = {
+      truncatedTailPasses: 0,
+      localShrankBelowConverged: false,
+      remoteShrankBelowConverged: false,
+      equivalenceAlreadyAdopted: true,
+    };
+    const result = plan(input({ relation: "equivalent", history }));
+
+    expect(result.action).toBe("NOOP");
+    expect(result.reason).toBe("equivalent-left-as-is");
+  });
+
+  it("stops only the equivalent branch, never a real difference", () => {
+    // The flag is a veto on one rule, and the failure worth catching is it
+    // leaking into the ladder and silencing a fork or a fast-forward.
+    const history = {
+      truncatedTailPasses: 0,
+      localShrankBelowConverged: false,
+      remoteShrankBelowConverged: false,
+      equivalenceAlreadyAdopted: true,
+    };
+    expect(actionOf({ relation: "divergent", history })).toBe("CONFLICT");
+    expect(actionOf({ relation: "l-extends-r", history })).toBe("PUSH_OVERWRITE");
+    expect(actionOf({ relation: "r-extends-l", history })).toBe("PULL_OVERWRITE");
+  });
+
+  it("still yields to everything above it in the ladder", () => {
+    // Readiness, the size cap, placeholders, a truncated tail and the quiet
+    // window all outrank it, so it cannot act on an unread, oversized,
+    // half-written or moving file.
+    expect(actionOf({ relation: "equivalent", remote: "not-ready" })).toBe("SKIP_REMOTE_NOT_READY");
+    expect(
+      actionOf({ relation: "equivalent", local: L({ isPlaceholder: true }) }),
+    ).toBe("SKIP_PLACEHOLDER");
+    expect(actionOf({ relation: "equivalent", remoteSide: R({ stable: false }) })).toBe("DEFER");
+    expect(
+      actionOf({ relation: "equivalent", local: L({ tail: "truncated" }) }),
+    ).toBe("DEFER");
   });
 });
