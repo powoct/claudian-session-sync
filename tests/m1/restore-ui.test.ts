@@ -75,6 +75,9 @@ describe("what a row promises before it is clicked", () => {
     ["will-propagate" as const, "on to your other machines"],
     ["will-conflict" as const, "raises a conflict"],
     ["whole-file" as const, "no way to merge"],
+    // ADR-75. Says the quiet part: neither copy is wrong, so the row must not
+    // borrow "undoes this" or "raises a conflict" from its neighbours.
+    ["equivalent" as const, "no record is gained or lost"],
   ])("%s says what the next sync does", (outcome, fragment) => {
     expect(describeWhatFollows(entry({ outcome }))).toContain(fragment);
   });

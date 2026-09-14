@@ -36,7 +36,19 @@ export type Action =
 export type RemoteReadiness = "ready" | "not-ready" | "unsupported-format";
 
 /** How the two sides' bytes relate. "n/a" when one of them is absent. */
-export type PrefixRelation = "equal" | "l-extends-r" | "r-extends-l" | "divergent" | "n/a";
+export type PrefixRelation =
+  | "equal"
+  | "l-extends-r"
+  | "r-extends-l"
+  | "divergent"
+  /**
+   * The same records at the same byte offsets, with object members in a
+   * different order (ADR-75). A distinct relation rather than a flag on
+   * `divergent`, because "a divergence never overwrites" is a safety statement
+   * this codebase asserts over the whole decision table, and it must stay true.
+   */
+  | "equivalent"
+  | "n/a";
 
 export type PlanFlag =
   /** A remote file that once had content is now zero bytes (§9.6 input). */
@@ -103,6 +115,11 @@ export interface LocalHistory {
    */
   readonly localShrankBelowConverged: boolean;
   readonly remoteShrankBelowConverged: boolean;
+  /**
+   * The remote still holds the exact bytes this machine last converged on
+   * (ADR-75's churn stop). A flag, not the hash, for the reason above.
+   */
+  readonly equivalenceAlreadyAdopted: boolean;
 }
 
 /**
@@ -234,6 +251,45 @@ export function plan(input: PlanInput): PlanResult {
   // 7 — nothing to do.
   if (local.exists && remote.exists && local.observedHash === remote.observedHash) {
     return result("NOOP", "content-identical", flags);
+  }
+
+  // 7b — the same records, serialised in a different member order (ADR-75).
+  //
+  // Not a merge, and not a pick between two versions: both sides carry the same
+  // records, and one of them is already the copy every other machine compares
+  // against. **Adopting the shared copy is the whole anti-ping-pong property.**
+  // A rule that never writes into the sync folder cannot hand a peer a new
+  // variant to disagree with, so the shared slot is an absorbing state and any
+  // number of machines converge on it, each with one local write. Electing a
+  // winner by content hash would instead push about half the time — two writes,
+  // two backups, and an atomic write into a directory a third-party sync tool
+  // is also writing.
+  //
+  // Placed after rule 7 and before rule 8 deliberately. Everything above still
+  // binds: readiness, the size limit, placeholders, a truncated tail and the
+  // quiet window all fire first, so this is unreachable for an unread,
+  // oversized, half-written or moving file. The two guards below are provably
+  // vacuous here — `shrankBelowConvergedBase` needs one side to be smaller, and
+  // an equivalent pair is equal-length; `remote-regressed-to-empty` needs a
+  // zero-byte remote, which the zero-byte normalisation above has already
+  // turned into something else. So inserting here removes no protection.
+  if (relation === "equivalent") {
+    // The churn stop. Adopting writes the sync folder's bytes over a live
+    // session file, and once is all it takes to end the disagreement. A second
+    // time against *the same remote bytes* means something rewrote the local
+    // side into another permutation after the last adoption — a CLI that
+    // re-serialises the file on every launch, not a peer with news — so
+    // adopting again would undo that rewrite and spend a backup slot on a
+    // difference that carries no records.
+    //
+    // A remembered hash turning a write into a NOOP: the only direction EV-1
+    // lets one push. And leaving two equivalent files unequal costs nothing by
+    // definition — they are the same conversation, they stay readable on both
+    // machines, and a later real difference is still a divergence.
+    if (history.equivalenceAlreadyAdopted) {
+      return result("NOOP", "equivalent-left-as-is", flags);
+    }
+    return result("PULL_OVERWRITE", "equivalent-serialisation", flags);
   }
 
   // 8 — genuinely forked. Neither side may overwrite the other, whichever is
