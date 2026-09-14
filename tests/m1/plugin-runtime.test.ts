@@ -314,6 +314,68 @@ describe("dry run", () => {
     expect(after).toEqual(before);
   }, SLOW);
 
+  it("does not mint this machine's identity, and says it did not (§7.6)", async () => {
+    // The gap every other dry-run test walked past: they all `configure()`
+    // first, so the identity file already exists by the time the snapshot is
+    // taken and the one write `refresh()` makes is invisible. A fresh install
+    // is the case that matters — the user sets a sync folder they are not sure
+    // about, ticks dry run, and the plugin writes into the state directory
+    // before deciding anything, which is one of the five trees §7.6 promises
+    // it will not touch.
+    const h = await makeHarness();
+    await h.appendSession(SID, 6);
+    await h.configure();
+    await h.settle();
+
+    await fsp.rm(path.join(h.homedir, ".claudian-session-sync", "machine.json"));
+    h.restart(); // …and a runtime that has not read one, as on launch
+
+    const before = await fiveTrees(h);
+    await h.runtime.syncNow({ dryRun: true });
+    const after = await fiveTrees(h);
+
+    expect(after).toEqual(before);
+    // Silence would be worse than the write: a dry run that quietly declines
+    // to do something is a dry run whose report is not the whole account.
+    expect(h.runtime.lastPassReport()?.notices.join(" ")).toContain("no identity file yet");
+  }, SLOW);
+
+  it("still creates the identity on a real pass, so the dry run is the exception", async () => {
+    const h = await makeHarness();
+    await h.appendSession(SID, 6);
+    await h.configure();
+    await h.settle();
+
+    const machineFile = path.join(h.homedir, ".claudian-session-sync", "machine.json");
+    await fsp.rm(machineFile);
+    h.restart();
+
+    await h.runtime.syncNow();
+    expect(await exists(machineFile)).toBe(true);
+    expect(h.runtime.lastPassReport()?.notices.join(" ")).not.toContain("no identity file yet");
+  }, SLOW);
+
+  it("does not record a rename either, and says so (§7.6)", async () => {
+    // The second write in the same function, and the one macOS makes happen on
+    // its own: with `HostName` unset the hostname moves between values as the
+    // network changes (ADR-74). A dry run that lands on one of those moments
+    // must still leave the state directory alone.
+    const h = await makeHarness();
+    await h.appendSession(SID, 6);
+    await h.configure();
+    await h.settle();
+
+    h.hostname = "renamed-machine";
+    h.restart();
+
+    const before = await fiveTrees(h);
+    await h.runtime.syncNow({ dryRun: true });
+    const after = await fiveTrees(h);
+
+    expect(after).toEqual(before);
+    expect(h.runtime.lastPassReport()?.notices.join(" ")).toContain("renamed since it last synced");
+  }, SLOW);
+
   it("still reports what it would have done", async () => {
     const h = await makeHarness();
     await h.appendSession(SID, 6);
