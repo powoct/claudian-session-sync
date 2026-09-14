@@ -34,7 +34,7 @@ import { createBackupWriter } from "../infra/backup-writer";
 import type { PathGuardDeps } from "../infra/path-guard";
 import { mintStatePath, probeCaseSensitivity, splitPathSegments } from "../infra/path-guard";
 import { type MachineFile, STATE_SCHEMA_VERSION } from "../infra/state-store";
-import { detectIdentityDrift, rotateMachineId } from "../infra/state-store";
+import { judgeIdentity } from "../infra/state-store";
 import { createSyncDirStore, newRootFile } from "../infra/sync-dir-store";
 import { PROVIDERS, providerById } from "../providers/registry";
 import {
@@ -624,7 +624,7 @@ export class PluginRuntime {
    * dialog asking the user to adjudicate a hostname change is a dialog nobody
    * can answer.
    */
-  private async loadOrCreateMachine(home: HomeStore): Promise<MachineFile> {
+  private async loadOrCreateMachine(home: HomeStore): Promise<MachineFile | null> {
     const identity = {
       hostname: this.host.hostname,
       platform: this.host.platform as MachineFile["identity"]["platform"],
@@ -644,15 +644,25 @@ export class PluginRuntime {
       return created;
     }
 
-    const drift = detectIdentityDrift(load.value.identity, identity);
-    if (drift === null) return load.value;
-    const rotated = rotateMachineId(
-      load.value,
-      { machineId: this.host.ids.uuid() as MachineId, identity, nowIso: this.nowIso() },
-      drift,
-    );
-    await home.saveMachine(rotated);
-    return rotated;
+    const verdict = judgeIdentity(load.value.identity, identity);
+    if (verdict === "same") return load.value;
+    if (verdict === "foreign-platform") {
+      // A state directory under a different OS is a copy, not a rename: the
+      // paths recorded in it do not describe this machine. Fail closed (ADR-21)
+      // — `prepare()` aborts the pass on a missing machine file, so refusing
+      // here is a refusal to sync rather than a refusal to load.
+      return null;
+    }
+    // A rename is a rename. The id is minted once and never re-minted, so the
+    // observation ledger — and with it ADR-61's shrink-guard base — survives
+    // every hostname change. Only the label and the recorded fingerprint move.
+    const renamed: MachineFile = {
+      ...load.value,
+      machineLabel: this.host.hostname,
+      identity,
+    };
+    await home.saveMachine(renamed);
+    return renamed;
   }
 
   /**

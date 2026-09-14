@@ -626,3 +626,45 @@ describe("a machine with more than one vault (OQ-19, ADR-59)", () => {
     expect(status.detail.toLowerCase()).toContain("identity");
   }, SLOW);
 });
+
+describe("a renamed machine is the same machine (2026-09-14)", () => {
+  // The machine id used to rotate whenever the hostname changed. On macOS with
+  // `HostName` unset the hostname flips with the network — nine rotations on
+  // one machine in one day — and a rotation is not the free audit line the
+  // architecture claimed: `parseObservations` refuses a ledger written under a
+  // different id, which discards the quiet-window state, `remoteHadNonZeroSize`
+  // and `lastConvergedHash`. So every network switch silently disarmed ADR-61's
+  // shrink guard.
+  it("keeps its id, and only updates the label", async () => {
+    const h = await makeHarness();
+    await h.configure();
+    const before = h.runtime.currentStatus().machineLabel;
+
+    h.hostname = "renamed-by-the-network";
+    await h.runtime.refresh();
+
+    expect(h.runtime.currentStatus().machineLabel, "the label follows the rename").toBe(
+      "renamed-by-the-network",
+    );
+    expect(before, "and it really did change").not.toBe("renamed-by-the-network");
+  });
+
+  it("does not report the ledger as another machine's after a rename", async () => {
+    // The ledger is the point. Losing it disarmed the shrink guard; keeping it
+    // is the whole reason for this change. The notice is the tell: it fires
+    // only when the ledger was genuinely written under a different identity.
+    const h = await makeHarness();
+    await h.configure();
+    await h.appendSession(SID, 3);
+    await h.settle();
+
+    h.hostname = "renamed-mid-session";
+    await h.runtime.refresh();
+    await h.settle();
+
+    expect(
+      h.runtime.lastPassReport()?.notices.join(" ") ?? "",
+      "a rename is not a foreign ledger",
+    ).not.toContain("different machine identity");
+  }, SLOW);
+});

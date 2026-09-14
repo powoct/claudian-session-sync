@@ -540,3 +540,24 @@ describe("the globals the bundle expects from the renderer (§12.2b)", () => {
     expect(realFs.readFileSync(BUNDLE, "utf8")).not.toMatch(/globalThis\./);
   });
 });
+
+describe("what the bundle is never allowed to reach for (§10.3)", () => {
+  it("spawns no processes", () => {
+    // This is where the 2026-09-14 machine-identity decision is written down.
+    // A hardware UUID would be a stable machine identity, but on macOS and
+    // Windows it can only be read by running `ioreg` or `reg query` — and a
+    // sync plugin that executes commands is a different proposition in the
+    // community store review than one that reads files. It is also unnecessary:
+    // the machineId is already a minted random UUID, and the churn came from
+    // ROTATING it on a hostname, not from the id being unstable.
+    //
+    // There is a second reason, and it is the stronger one: machineId is
+    // written into the SHARED folder as `lastWriter`, `createdBy` and
+    // `detectedBy`. Keying it to hardware would publish a stable hardware
+    // identifier into a folder other people can read.
+    const source = realFs.readFileSync(BUNDLE, "utf8");
+    for (const forbidden of [/child_process/, /execSync/, /spawnSync/, /\bspawn\(/]) {
+      expect(source, `bundle reaches for ${forbidden}`).not.toMatch(forbidden);
+    }
+  });
+});

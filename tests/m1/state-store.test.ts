@@ -10,18 +10,15 @@ import { describe, expect, it } from "vitest";
 import type { MachineId, WorkspaceId } from "../../src/domain/types";
 import {
   LEDGER_GC_AGE_MS,
-  MAX_SUPERSEDED,
-  type MachineFile,
   type MachineIdentity,
   checkWorkspaceIdentity,
-  detectIdentityDrift,
+  judgeIdentity,
   emptyObservations,
   findIdentityConflictCopies,
   findNonPortableValues,
   gcObservations,
   parseMachineFile,
   parseObservations,
-  rotateMachineId,
 } from "../../src/infra/state-store";
 
 const MACHINE_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301" as MachineId;
@@ -144,60 +141,47 @@ describe("observations ledger — GC", () => {
 describe("machine identity (§10.3)", () => {
   const identity: MachineIdentity = { hostname: "ct-mbp", platform: "darwin", homedir: "/Users/testuser" };
 
-  it("sees no drift when nothing moved", () => {
-    expect(detectIdentityDrift(identity, identity)).toBeNull();
+  it("is the same machine when nothing moved", () => {
+    expect(judgeIdentity(identity, identity)).toBe("same");
   });
 
   it("ignores hostname case and surrounding space", () => {
-    expect(detectIdentityDrift(identity, { ...identity, hostname: "  CT-MBP " })).toBeNull();
+    expect(judgeIdentity(identity, { ...identity, hostname: "  CT-MBP " })).toBe("same");
   });
 
   it("ignores a moved home directory, which is still this machine", () => {
-    expect(detectIdentityDrift(identity, { ...identity, homedir: "/Users/testuser/moved-vault-home" })).toBeNull();
+    expect(judgeIdentity(identity, { ...identity, homedir: "/Users/testuser/moved" })).toBe("same");
   });
 
-  it("detects a renamed host", () => {
-    expect(detectIdentityDrift(identity, { ...identity, hostname: "ct-mbp-2" })).toBe("hostname-drift");
+  it("calls a renamed host renamed, not a different machine", () => {
+    // This is the change. A hostname is user-editable, and on macOS with
+    // HostName unset it flips with the network — nine changes on one machine
+    // in one day. Treating that as a new machine discarded the observation
+    // ledger every time, and with it ADR-61's shrink-guard base.
+    expect(judgeIdentity(identity, { ...identity, hostname: "ct-mbp-2" })).toBe("renamed");
   });
 
-  it("detects a cloned home landing on another platform", () => {
-    expect(detectIdentityDrift(identity, { ...identity, platform: "win32" })).toBe("platform-drift");
+  it("still refuses a state directory that turns up under another OS", () => {
+    // Not a rename: the paths recorded in it do not describe this machine.
+    expect(judgeIdentity(identity, { ...identity, platform: "win32" })).toBe("foreign-platform");
   });
 
-  it("retires the old id, newest first", () => {
-    const file = {
-      schemaVersion: 1,
-      machineId: MACHINE_ID,
-      machineLabel: "ct-mbp",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      identity,
-      superseded: [],
-    };
-    const rotated = rotateMachineId(
-      file,
-      { machineId: OTHER_ID, identity: { ...identity, hostname: "renamed" }, nowIso: "2026-08-07T00:00:00.000Z" },
-      "hostname-drift",
-    );
-
-    expect(rotated.machineId).toBe(OTHER_ID);
-    expect(rotated.superseded[0]).toMatchObject({ machineId: MACHINE_ID, reason: "hostname-drift" });
-  });
-
-  it("keeps the retired list bounded", () => {
-    // It is an audit aid, not a record anything depends on — rotating is always
-    // safe because machineId may never take part in a decision.
-    let file: MachineFile = {
+  it("keeps the retired list readable, so old files still parse", () => {
+    // Nothing writes to `superseded` any more, but machines that rotated before
+    // this change have entries in it and their file must still load.
+    const parsed = parseMachineFile({
       schemaVersion: 1,
       machineId: MACHINE_ID,
       machineLabel: "m",
       createdAt: "",
       identity,
-      superseded: [],
-    };
-    for (let i = 0; i < MAX_SUPERSEDED + 5; i++) {
-      file = rotateMachineId(file, { machineId: OTHER_ID, identity, nowIso: "x" }, "hostname-drift");
-    }
-    expect(file.superseded).toHaveLength(MAX_SUPERSEDED);
+      superseded: [
+        { machineId: OTHER_ID, retiredAt: "2026-09-14T02:16:00.000Z", reason: "hostname-drift", identity },
+      ],
+    });
+
+    expect(parsed.status).toBe("loaded");
+    expect(parsed.status === "loaded" && parsed.value.superseded).toHaveLength(1);
   });
 
   it("refuses a machine file whose id is not a lowercase UUID", () => {

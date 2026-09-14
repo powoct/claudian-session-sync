@@ -178,6 +178,21 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     machineId: deps.machineId,
     syncDirFingerprint: fingerprint,
   });
+  // The replacement for rotating the machine id. A ledger written under a
+  // different id is still refused — it describes another machine's files — but
+  // that refusal used to be the routine cost of a hostname change, so nobody
+  // could have noticed it meaning something. Now that the id is minted once and
+  // never re-minted, this can only be a state directory two computers share,
+  // which is worth a sentence: the pass silently starts over otherwise, and
+  // starting over is what disarms the shrink guard.
+  const ledgerNotices =
+    loaded.outcome.status === "unusable" && loaded.outcome.reason === "machine-id-mismatch"
+      ? [
+          "This machine's sync history was written under a different machine identity, so it is " +
+            "being rebuilt. If two computers share this home directory, each needs its own — " +
+            "until then every pass starts from nothing.",
+        ]
+      : [];
 
   // ── readiness (§9.6) ─────────────────────────────────────────────────────
   const previous = await deps.home.loadRemote(deps.workspaceId, deps.binding.syncDirPath);
@@ -373,8 +388,16 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
   }
 
   // The share step's notices are already in the report: `runPass` pushes them
-  // as it runs, now that it owns the call.
-  return { report, readiness: record };
+  // as it runs, now that it owns the call. The ledger notice is not — it is
+  // decided before the pass begins, from a load the pass would otherwise
+  // discard without a word.
+  return {
+    report:
+      ledgerNotices.length > 0
+        ? { ...report, notices: [...ledgerNotices, ...report.notices] }
+        : report,
+    readiness: record,
+  };
 }
 
 /** Just enough to know which roots exist and how to compare paths. */
