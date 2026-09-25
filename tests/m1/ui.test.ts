@@ -641,7 +641,7 @@ describe("Claudian 2.3.3: the pane says which switched-on feature it breaks", ()
     makeTab(h).display();
 
     expect(warnings()).toHaveLength(1);
-    expect(warnings()[0]?.desc).toContain("comes back after Obsidian restarts");
+    expect(warnings()[0]?.desc).toContain("comes back after you delete it here and restart Obsidian");
     const index = settingsCreated.findIndex((s) => s.name === COMPAT_WARNING_NAME);
     expect(settingsCreated[index - 1]?.name).toBe("Claudian conversation records");
   }, SLOW);
@@ -658,6 +658,50 @@ describe("Claudian 2.3.3: the pane says which switched-on feature it breaks", ()
       expect(warnings(), `${version} ${JSON.stringify(features)}`).toHaveLength(0);
     }
   }, SLOW * 3);
+
+  it("shows the warning the moment the sharing switch is flipped", async () => {
+    // Read at the moment of deciding is the point of putting it under the
+    // switch — so flipping it must redraw, and must re-read the version, since
+    // Obsidian can have updated Claudian since the pane last looked.
+    const h = await withClaudian("2.3.2", {});
+    await h.installClaudian("2.3.3"); // updated in place, no restart, no pass since
+    resetStubSettings();
+    makeTab(h).display();
+    expect(warnings()).toHaveLength(0);
+
+    await containing("Share this device's conversations")?.toggles[0]?.toggle(true);
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.desc).toContain("Claudian 2.3.3");
+  }, SLOW);
+
+  it("knows the version from refresh alone, before any pass has run", async () => {
+    // The launch notice fires between refresh and the first pass, and the
+    // first pass can be refused outright (no sync folder yet): refresh is then
+    // the only read there is.
+    const h = await newHarness();
+    await h.appendSession(SID, 3);
+    await h.configure();
+    await h.runtime.setShareConversations(true);
+    await h.installClaudian("2.3.3");
+
+    await h.runtime.refresh();
+
+    expect(h.runtime.compatibilityWarnings().sharing).toContain("Claudian 2.3.3");
+  }, SLOW);
+
+  it("reads Obsidian's config folder rather than assuming .obsidian", async () => {
+    const h = await RuntimeHarness.create({ configDir: ".obsidian-work" });
+    machines.push(h);
+    await h.appendSession(SID, 3);
+    await h.configure();
+    await h.runtime.setShareConversations(true);
+    await h.installClaudian("2.3.3"); // lands under .obsidian-work/plugins
+
+    await h.runtime.refresh();
+
+    expect(h.runtime.compatibilityWarnings().sharing).toContain("Claudian 2.3.3");
+  }, SLOW);
 
   it("says Assign is unsupported whenever sharing is described, version or not", async () => {
     // The maintainer's decision (2026-09-25): not fixed, documented. So it is
@@ -679,8 +723,15 @@ describe("Claudian 2.3.3: every sync report leads with the warning while it appl
     await h.installClaudian("2.3.3");
     await h.runtime.setShareConversations(true);
 
+    // A provider whose folder does not exist, so the pass has a notice of its
+    // own — without one, "first" and "last" are the same position and the
+    // ordering this promises is not being tested at all.
+    await h.runtime.setProvider("codex", { enabled: true });
+
     await h.runtime.syncNow();
-    expect(h.runtime.lastPassReport()?.notices[0]).toContain("sharing relied on");
+    const first = h.runtime.lastPassReport()?.notices ?? [];
+    expect(first.length, "the pass must have a notice of its own").toBeGreaterThan(1);
+    expect(first[0]).toContain("sharing relied on");
     await h.runtime.syncNow();
     expect(h.runtime.lastPassReport()?.notices[0], "every pass, not once").toContain(
       "sharing relied on",

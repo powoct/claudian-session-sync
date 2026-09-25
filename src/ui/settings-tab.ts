@@ -183,10 +183,13 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
           "you next restart Obsidian; each sync folds that copy forward, and where it cannot " +
           "tell which version should win it leaves both and asks you — see \"Repair shared " +
           "conversation records\". Turning this back off stops further moves but does not " +
-          "bring back what has already been shared. And Claudian's \"Assign to this device\" " +
-          "is not supported while this is on: the next sync moves the conversation back into " +
-          "the shared layer. To keep one conversation on a single device, turn this off first. " +
-          "Off by default, and set per machine.",
+          "bring back what has already been shared. Claudian's \"Assign to this device\" is " +
+          "not supported while this is on — with Claudian 2.3.3 or later on any of your " +
+          "devices, the next sync moves the conversation back into the shared layer. To keep " +
+          "a conversation on one device, turn this off and leave it off: turning it back on " +
+          "shares it again. And if any of your machines runs Claudian 2.2.6 or earlier, a " +
+          "shared conversation also carries the folders it was given access to as absolute " +
+          "paths, which may mean something else there. Off by default, and set per machine.",
       )
       .addToggle((toggle) =>
         toggle.setValue(this.runtime.sharesConversations()).onChange(async (value) => {

@@ -76,21 +76,33 @@ export function compatWarnings(input: CompatInput): CompatWarnings {
   if (!isMarkerless(input.claudianVersion)) return { recordsProvider: null, sharing: null };
   const version = input.claudianVersion as string;
   return {
+    // Scoped to the shared layer because that is all this provider carries:
+    // a record Claudian filed under this device's own folder is not in the
+    // sync folder, so deleting it works. Saying otherwise invites the user to
+    // test the warning on a new conversation and conclude it is wrong.
     recordsProvider: input.recordsProvider
       ? `Claudian ${version} deletes a conversation without leaving the marker that ` +
-        "“Claudian conversation records” relied on. While it is on, a conversation you " +
-        "delete on this machine comes back after Obsidian restarts: the next sync restores " +
-        "its record from the sync folder. Your other devices keep it either way. Until this " +
-        "plugin is updated for it, turn this off unless your vault sync cannot carry " +
-        ".claudian/ — and if you keep it on, expect deleted conversations to return."
+        "“Claudian conversation records” relied on. While it is on, a conversation whose " +
+        "record is in the shared layer — an older one, or one that sharing moved there — " +
+        "comes back after you delete it here and restart Obsidian: the next sync restores " +
+        "its record from the sync folder. Your other devices keep it either way, and " +
+        "conversations deleted under an older Claudian can reappear after upgrading. Until " +
+        "this plugin is updated for it, turn this off unless your vault sync cannot carry " +
+        ".claudian/."
       : null,
+    // The condition is "Claudian's save target for it is still this device's
+    // folder", which a user cannot see; these are the two ways it happens.
     sharing: input.sharing
       ? `Claudian ${version} no longer leaves the deletion and assignment markers that ` +
-        "sharing relied on. While it is on, a conversation you delete in the same Obsidian " +
-        "session it was shared in can come back after a restart, and a conversation another " +
-        "device has deleted or assigned to itself can be shared again from this one. Nothing " +
-        "is lost either way; if a conversation you deleted comes back, deleting it again " +
-        "normally removes it."
+        "sharing relied on. While it is on, a conversation you delete can come back after " +
+        "a restart if it was started in this Obsidian session or used shortly before " +
+        "Obsidian was last closed, and a conversation another device has deleted or " +
+        "assigned to itself can be shared again from this one. Keep every device on the " +
+        "same Claudian version while sharing is on. " +
+        (input.recordsProvider
+          ? "With “Claudian conversation records” also on, a conversation that comes back " +
+            "keeps coming back — see that setting."
+          : "If one comes back, deleting it again normally removes it.")
       : null,
   };
 }

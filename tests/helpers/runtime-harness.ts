@@ -34,6 +34,12 @@ export interface HarnessOptions {
    * in a fixture that would have to lie about something else instead.
    */
   readonly failWrite?: (target: string) => boolean;
+  /**
+   * Obsidian's config folder name. `.obsidian` unless a test is about the
+   * "Override config folder" setting, which is the reason the runtime is told
+   * rather than assuming it.
+   */
+  readonly configDir?: string;
 }
 
 export class RuntimeHarness {
@@ -41,6 +47,7 @@ export class RuntimeHarness {
   hostname = "test-machine";
 
   readonly root: string;
+  readonly configDir: string;
   readonly homedir: string;
   readonly vaultRoot: string;
   readonly syncDir: string;
@@ -69,6 +76,7 @@ export class RuntimeHarness {
 
   private constructor(root: string, options: HarnessOptions) {
     this.root = root;
+    this.configDir = options.configDir ?? ".obsidian";
     this.homedir = path.join(root, "home");
     this.vaultRoot = path.join(root, "vault");
     this.syncDir = path.join(root, "sync");
@@ -131,7 +139,7 @@ export class RuntimeHarness {
       vaultRoot: this.vaultRoot,
       // Always set, as Obsidian always sets it: with no Claudian installed the
       // plugins folder is simply absent, which is the silent case.
-      configDir: ".obsidian",
+      configDir: this.configDir,
       pid: process.pid,
       openFolder: async (target: string) => {
         this.opened.push(target);
@@ -275,7 +283,7 @@ export class RuntimeHarness {
    * which is why the reader checks the id inside rather than the path.
    */
   async installClaudian(version: string, folder = "realclaudian"): Promise<void> {
-    const dir = path.join(this.vaultRoot, ".obsidian", "plugins", folder);
+    const dir = path.join(this.vaultRoot, this.configDir, "plugins", folder);
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(
       path.join(dir, "manifest.json"),

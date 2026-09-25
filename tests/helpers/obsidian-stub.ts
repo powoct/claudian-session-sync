@@ -202,6 +202,8 @@ export interface StubAppOptions {
    * anything else.
    */
   basePath?: string;
+  /** `vault.configDir`; Obsidian's default unless a test is about overriding it. */
+  configDir?: string;
 }
 
 export function makeStubApp(options: StubAppOptions = {}): StubApp {
@@ -222,7 +224,7 @@ export function makeStubApp(options: StubAppOptions = {}): StubApp {
     },
     vault: {
       getName: () => "test-vault",
-      configDir: ".obsidian",
+      configDir: options.configDir ?? ".obsidian",
       adapter: options.basePath === undefined ? {} : { getBasePath: () => options.basePath as string },
     },
   };

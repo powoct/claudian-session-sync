@@ -1039,6 +1039,10 @@ export class PluginRuntime {
     const home = await this.homeStore();
     await home.saveBinding(next);
     this.binding = next;
+    // The pane redraws from what this leaves behind, and the warning under
+    // this switch is meant for the moment it is flipped. `setProvider` gets
+    // the same through its refresh; this one has to ask.
+    await this.detectClaudian();
   }
 
   /**

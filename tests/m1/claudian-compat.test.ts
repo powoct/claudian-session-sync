@@ -74,12 +74,33 @@ describe("what is said, and when", () => {
     const warnings = compatWarnings({ claudianVersion: "2.3.3", ...on });
 
     expect(warnings.recordsProvider).toContain("Claudian 2.3.3");
-    expect(warnings.recordsProvider).toContain("comes back after Obsidian restarts");
+    expect(warnings.recordsProvider).toContain("comes back after you delete it here and restart Obsidian");
     expect(warnings.recordsProvider).toContain("turn this off");
 
     expect(warnings.sharing).toContain("Claudian 2.3.3");
     expect(warnings.sharing).toContain("can come back after a restart");
     expect(warnings.sharing).toContain("deleted or assigned to itself");
+  });
+
+  it("does not promise a second delete works while the records provider is also on", () => {
+    // With the provider on, the flat record is restored from the sync folder
+    // after every delete, so "deleting it again removes it" would be false in
+    // exactly the setup that turns both features on.
+    const alone = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: false, sharing: true });
+    expect(alone.sharing).toContain("deleting it again normally removes it");
+
+    const both = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: true, sharing: true });
+    expect(both.sharing).not.toContain("deleting it again");
+    expect(both.sharing).toContain("keeps coming back");
+  });
+
+  it("scopes the records warning to the shared layer it actually carries", () => {
+    // A record in this device's own folder is not in the sync folder, so
+    // deleting it works; an unscoped warning is one a user disproves in a
+    // minute and then stops believing.
+    const warning = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: true, sharing: false });
+    expect(warning.recordsProvider).toContain("record is in the shared layer");
+    expect(warning.recordsProvider).toContain("deleted under an older Claudian");
   });
 
   it("warns only about what is switched on", () => {
@@ -154,6 +175,23 @@ describe("reading the version Obsidian loads", () => {
       "claudian-main": { id: "realclaudian", version: "2.4.1" },
     });
     expect(await read(dir)).toBe("2.4.1");
+  });
+
+  it("finds it through a linked folder, as Obsidian loads it", async () => {
+    // A plugin installed from a working copy is usually linked in, and Obsidian
+    // loads it. A junction on Windows needs no privilege, so the test runs on
+    // every CI platform.
+    const dir = await plugins({});
+    const elsewhere = path.join(root, "src", "claudian");
+    await fsp.mkdir(elsewhere, { recursive: true });
+    await fsp.writeFile(
+      path.join(elsewhere, "manifest.json"),
+      JSON.stringify({ id: "realclaudian", version: "2.3.3" }),
+    );
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.symlink(elsewhere, path.join(dir, "claudian"), "junction");
+
+    expect(await read(dir)).toBe("2.3.3");
   });
 
   it("does not trust a folder name whose manifest says otherwise", async () => {

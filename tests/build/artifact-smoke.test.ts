@@ -499,6 +499,27 @@ describe("onload does not block Obsidian startup (§12.2c)", () => {
     app.workspace.layoutReadyCallbacks[0]?.();
   });
 
+  it("tells the runtime Obsidian's config folder, so it can read which Claudian runs", async () => {
+    // ADR-77. The runtime tests supply `configDir` themselves, so only the
+    // bundle can show that main.ts passes it on. Without it the version is
+    // always unknown, unknown is silence, and the settings warning, the report
+    // notice and the launch notice would all vanish together with every other
+    // test still green. A non-default folder, so a hard-coded ".obsidian"
+    // cannot pass either.
+    const app = makeStubApp({ basePath: sandboxVault, configDir: ".obsidian-custom" });
+    const plugin = instantiate(app);
+    await plugin.onload();
+    const expected = path.join(sandboxVault, ".obsidian-custom", "plugins", "realclaudian", "manifest.json");
+
+    recording = true;
+    try {
+      app.workspace.layoutReadyCallbacks[0]?.();
+      expect(await waitUntil(() => fsCalls.some((call) => call.target === expected))).toBe(true);
+    } finally {
+      recording = false;
+    }
+  });
+
   it("still does no synchronous filesystem work when the layout is already ready", async () => {
     // Enabling the plugin from the settings pane hits this path: the callback
     // runs inline, inside onload(). Deferring to onLayoutReady is therefore not

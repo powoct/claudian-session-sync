@@ -204,8 +204,11 @@ export default class AiSessionSyncPlugin extends Plugin {
     const runtime = this.getRuntime();
     await runtime.refresh();
     this.rescheduleIfNeeded();
-    await this.sync();
+    // Before the pass, not after: refresh has already read the version and
+    // the switches, and the first pass can be long — or throw — on a sync
+    // folder that is slow to answer.
     this.announceIncompatibility();
+    await this.sync();
   }
 
   /**
