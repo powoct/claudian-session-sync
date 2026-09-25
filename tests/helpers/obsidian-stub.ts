@@ -181,7 +181,7 @@ export interface StubApp {
     /** Callbacks the stub ran immediately because the layout was already ready. */
     readonly layoutReadyRanInline: Array<() => void>;
   };
-  vault: { getName(): string; adapter: { getBasePath?: () => string } };
+  vault: { getName(): string; configDir: string; adapter: { getBasePath?: () => string } };
 }
 
 export interface StubAppOptions {
@@ -202,6 +202,8 @@ export interface StubAppOptions {
    * anything else.
    */
   basePath?: string;
+  /** `vault.configDir`; Obsidian's default unless a test is about overriding it. */
+  configDir?: string;
 }
 
 export function makeStubApp(options: StubAppOptions = {}): StubApp {
@@ -222,6 +224,7 @@ export function makeStubApp(options: StubAppOptions = {}): StubApp {
     },
     vault: {
       getName: () => "test-vault",
+      configDir: options.configDir ?? ".obsidian",
       adapter: options.basePath === undefined ? {} : { getBasePath: () => options.basePath as string },
     },
   };

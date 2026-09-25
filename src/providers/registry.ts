@@ -107,11 +107,13 @@ export const CLAUDIAN: ProviderDescriptor = {
     "Claudian's own records inside this vault, normally <vault>/.claudian/sessions. " +
     "There is rarely a reason to override this.",
   scopeNote:
-    "Carries the conversation *records* (titles, which CLI session belongs to which " +
-    "conversation) so the other machine's Claudian shows them. Enable ONLY if your vault " +
-    "sync does not already carry .claudian/ — git and Syncthing usually do, Obsidian Sync " +
-    "does not. Two transports over one folder hand your sync tool conflicts to manufacture " +
-    "copies from.",
+    "Carries the conversation *records* in the shared layer of .claudian/sessions (titles, " +
+    "which CLI session belongs to which conversation) so the other machine's Claudian can " +
+    "list them. Since Claudian 2.2.5 a new conversation's record stays in its own device's " +
+    "folder until the sharing switch above moves it, so on its own this carries older " +
+    "records only. Enable ONLY if your vault sync does not already carry .claudian/ — git " +
+    "and Syncthing usually do, Obsidian Sync does not. Two transports over one folder hand " +
+    "your sync tool conflicts to manufacture copies from.",
   // The one root that lives inside the vault, by definition — these files ARE
   // the vault-side records every other provider's admission reads (ADR-47/48).
   defaultRoot: ({ vaultRealPath }, joinPath) => joinPath(vaultRealPath, ".claudian", "sessions"),

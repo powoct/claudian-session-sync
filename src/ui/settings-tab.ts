@@ -183,15 +183,21 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
           "you next restart Obsidian; each sync folds that copy forward, and where it cannot " +
           "tell which version should win it leaves both and asks you — see \"Repair shared " +
           "conversation records\". Turning this back off stops further moves but does not " +
-          "bring back what has already been shared. And a shared conversation carries any " +
-          "folders it had been given access to, as absolute paths — on the other machine " +
-          "those paths may mean something else. Off by default, and set per machine.",
+          "bring back what has already been shared. Claudian's \"Assign to this device\" is " +
+          "not supported while this is on — with Claudian 2.3.3 or later on any of your " +
+          "devices, the next sync moves the conversation back into the shared layer. To keep " +
+          "a conversation on one device, turn this off and leave it off: turning it back on " +
+          "shares it again. And if any of your machines runs Claudian 2.2.6 or earlier, a " +
+          "shared conversation also carries the folders it was given access to as absolute " +
+          "paths, which may mean something else there. Off by default, and set per machine.",
       )
       .addToggle((toggle) =>
         toggle.setValue(this.runtime.sharesConversations()).onChange(async (value) => {
           await this.runtime.setShareConversations(value);
+          this.redraw();
         }),
       );
+    this.renderCompatWarning(containerEl, this.runtime.compatibilityWarnings().sharing);
 
     new Setting(containerEl).setName("Agent CLIs").setHeading();
 
@@ -217,6 +223,9 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
             this.redraw();
           }),
         );
+      if (provider.id === "claudian") {
+        this.renderCompatWarning(containerEl, this.runtime.compatibilityWarnings().recordsProvider);
+      }
 
       new Setting(containerEl)
         .setName(`${provider.label} storage folder`)
@@ -311,6 +320,16 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
       );
   }
 
+  /**
+   * Directly under the switch it is about, so the sentence is read at the
+   * moment the decision is made — and absent entirely when there is nothing
+   * to say, so its presence means something.
+   */
+  private renderCompatWarning(containerEl: HTMLElement, warning: string | null): void {
+    if (warning === null) return;
+    new Setting(containerEl).setName(COMPAT_WARNING_NAME).setDesc(warning);
+  }
+
   private isEnabled(providerId: string): boolean {
     return this.runtime.providerEnabled(providerId);
   }
@@ -328,6 +347,9 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
  * and its lifecycle measured on one platform only. Saying which is which is
  * the difference between an informed choice and a surprise.
  */
+/** The heading every compatibility warning in this pane uses. */
+export const COMPAT_WARNING_NAME = "⚠ Not yet compatible with your Claudian version";
+
 function describeProvider(provider: ProviderDescriptor): string {
   const tier =
     provider.tier === "A"

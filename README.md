@@ -32,7 +32,8 @@ Only conversations **this vault's Claudian knows about**: the plugin reads the
 conversation records Claudian keeps inside the vault (`.claudian/sessions/`) and syncs
 exactly those sessions. A session you started with a bare `claude` or `codex` in a
 terminal has no Claudian record and is not synced. Conversations you deleted in Claudian
-stop syncing. Old records that carry no session ID (conversations from older Claudian
+stop syncing (but see [Claudian 2.3.3](#claudian-233-and-later) if you use either optional
+records feature). Old records that carry no session ID (conversations from older Claudian
 versions, or ones that never got a first reply) cannot be matched to a CLI file and are
 skipped — continuing that conversation in Claudian once usually fixes this.
 
@@ -109,10 +110,13 @@ On each machine:
 > which version should win it keeps both and asks you — the command **Repair shared
 > conversation records** lists those with both sizes and dates, one at a time. Turning the
 > setting back off stops further moves but **does not un-share what has already moved**.
-> And a shared conversation carries
-> any folders it had been given access to as absolute paths, which on the other machine may
-> point at something else — the same exposure every conversation had before Claudian 2.2.5,
-> when all records lived in that layer.
+> Claudian's **Assign to this device is not supported while it is on** — with Claudian
+> 2.3.3 or later on any of your devices, the next sync moves the conversation back into the
+> shared layer. To keep a conversation on one device, turn the setting off **and leave it
+> off**: turning it back on shares it again. (If any of your machines still runs Claudian
+> 2.2.6 or earlier, a shared conversation also carries the folders it had been given access
+> to as absolute paths, which on the other machine may point at something else; Claudian
+> 2.2.7 removed that feature.)
 >
 > **Claudian 2.2.5 and later: the conversation may not be *listed* on the other machine,
 > even though resuming works.** From 2.2.5 each new conversation's record is filed under
@@ -121,8 +125,11 @@ On each machine:
 > still carries the session file, so `claude --resume <id>` / `codex resume <id>` work
 > normally; what is missing is the entry in Claudian's sidebar. The **Assign to this
 > device** button does not help here: it promotes a record from the *top level*, not from
-> another device's folder. Moving (or copying) that one `conv-*.meta.json` up to
-> `.claudian/sessions/` makes the conversation listed and assignable again.
+> another device's folder. Moving that one `conv-*.meta.json` up to
+> `.claudian/sessions/` makes the conversation listed and assignable again. Move it, do not
+> copy it, and do it while Obsidian is closed on the machine that created the conversation
+> (or restart Obsidian there before using it again): Claudian keeps writing to whichever
+> copy it loaded at startup, and deleting the conversation there removes only that copy.
 
 ## ⚠️ Keep `.claudian/` in your vault sync
 
@@ -142,6 +149,38 @@ safely is planned work). So:
   left alone, a one-sided change fast-forwards (with a backup), and anything else becomes
   a conflict for you to settle. Do **not** enable it if your vault sync already carries
   `.claudian/` — two transports over one folder feed your sync tool conflicts.
+
+### Claudian 2.3.3 and later
+
+Claudian 2.3.3 changed how it deletes a conversation: it now removes the record and
+leaves no deletion marker, and *Assign to this device* no longer leaves an assignment
+marker either. **The default setup is not affected** — a deleted conversation's record is
+gone, so its session file simply stops syncing.
+
+Two optional features, both off by default, relied on those markers and are **not yet
+compatible**:
+
+- **Claudian records** provider: a conversation whose record is in the shared layer (an
+  older conversation, or one the sharing setting moved there) comes back after you delete
+  it and restart Obsidian, because the next sync restores its record from the sync folder.
+  Your other devices keep it either way. Conversations you deleted under an older Claudian
+  can also reappear once you upgrade.
+- **Share this device's conversations**: a conversation you delete can come back after a
+  restart if it was started in that Obsidian session or used shortly before Obsidian was
+  last closed, and one another device deleted or assigned to itself can be shared again
+  from this machine. This starts as soon as **any** device syncing the vault runs Claudian
+  2.3.3, including while the others are still on an older version — so upgrade all of them
+  together, or turn sharing off on the ones you have not upgraded yet.
+
+No session file is ever deleted and every overwrite is backed up, so no conversation is
+lost — but deleted ones may reappear.
+
+When this plugin detects Claudian 2.3.3 or later *on the same device* with either feature
+on, it says so in its settings, at the top of every sync report, and once per launch. A
+device still running an older Claudian cannot tell that another one has upgraded, so it
+stays silent. The version is read from Claudian's `manifest.json`; Obsidian Sync carries
+that file but not Claudian itself (it is over Obsidian Sync's size limit), so update
+Claudian on every device and the two will agree.
 
 ## How your data is protected
 
@@ -176,9 +215,9 @@ touches is a short list:
 
 | | |
 |---|---|
-| **Reads** | the session files of the providers *you* switch on (all off by default), and Claudian's conversation records inside your vault |
+| **Reads** | the session files of the providers *you* switch on (all off by default), Claudian's conversation records inside your vault, and the `manifest.json` files in the vault's plugins folder (only to learn which Claudian version is installed) |
 | **Writes** | your sync folder, those same session files when pulling a conversation from another machine, and its own state under `~/.claudian-session-sync` |
-| **Never** | anything else. Every path is resolved segment by segment and rejected if it escapes a known root or passes through a symlink; files it does not recognise are reported and left alone; credentials (`auth.json`, `config.toml`, `.credentials.json`) are excluded by name and never read |
+| **Never** | anything else. Every path is resolved segment by segment and rejected if it escapes a known root or passes through a symlink; files it does not recognise are reported and left alone; credentials (`auth.json`, `config.toml`, `.credentials.json`) are excluded by name and never read. The one exception to the symlink rule is reading Claudian's `manifest.json`, which follows a linked plugin folder the way Obsidian does, because a plugin installed from a working copy is usually linked there |
 
 **"Persists data in localStorage instead of the Obsidian plugin data APIs."** This one is a
 false positive, and the distinction matters. This plugin's own settings go through

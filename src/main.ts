@@ -13,6 +13,7 @@ import { ReportModal } from "./ui/report-modal";
 import { OrphanModal } from "./ui/orphan-modal";
 import { SharingModal } from "./ui/sharing-modal";
 import { RestoreModal } from "./ui/restore-modal";
+import { launchNotice } from "./domain/claudian-compat";
 
 /**
  * Assembly, and nothing else.
@@ -161,6 +162,7 @@ export default class AiSessionSyncPlugin extends Plugin {
       hostname: hostname(),
       homedir: homedir(),
       vaultRoot: this.vaultRoot(),
+      configDir: this.app.vault.configDir,
       pid: process.pid,
       // Claudian keeps its installation seed in localStorage, and Obsidian
       // gives every plugin the same renderer, so this machine can derive its
@@ -202,8 +204,27 @@ export default class AiSessionSyncPlugin extends Plugin {
     const runtime = this.getRuntime();
     await runtime.refresh();
     this.rescheduleIfNeeded();
+    // Before the pass, not after: refresh has already read the version and
+    // the switches, and the first pass can be long — or throw — on a sync
+    // folder that is slow to answer.
+    this.announceIncompatibility();
     await this.sync();
   }
+
+  /**
+   * Once per launch, and only when a feature switched on here is affected.
+   *
+   * The details live in the settings pane and at the top of every sync
+   * report; this only has to make sure someone looks. Every launch rather
+   * than once ever, because the thing it warns about — a deleted conversation
+   * coming back — happens on a later launch, long after a one-time notice was
+   * dismissed and forgotten.
+   */
+  private announceIncompatibility(): void {
+    const message = launchNotice(this.getRuntime().compatibilityWarnings());
+    if (message !== null) new Notice(message, 20_000);
+  }
+
 
   private async sync(options: { dryRun?: boolean; verifyAll?: boolean } = {}): Promise<void> {
     const runtime = this.getRuntime();
