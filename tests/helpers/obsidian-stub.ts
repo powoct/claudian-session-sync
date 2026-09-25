@@ -181,7 +181,7 @@ export interface StubApp {
     /** Callbacks the stub ran immediately because the layout was already ready. */
     readonly layoutReadyRanInline: Array<() => void>;
   };
-  vault: { getName(): string; adapter: { getBasePath?: () => string } };
+  vault: { getName(): string; configDir: string; adapter: { getBasePath?: () => string } };
 }
 
 export interface StubAppOptions {
@@ -222,6 +222,7 @@ export function makeStubApp(options: StubAppOptions = {}): StubApp {
     },
     vault: {
       getName: () => "test-vault",
+      configDir: ".obsidian",
       adapter: options.basePath === undefined ? {} : { getBasePath: () => options.basePath as string },
     },
   };

@@ -32,7 +32,8 @@ Only conversations **this vault's Claudian knows about**: the plugin reads the
 conversation records Claudian keeps inside the vault (`.claudian/sessions/`) and syncs
 exactly those sessions. A session you started with a bare `claude` or `codex` in a
 terminal has no Claudian record and is not synced. Conversations you deleted in Claudian
-stop syncing. Old records that carry no session ID (conversations from older Claudian
+stop syncing (but see [Claudian 2.3.3](#claudian-233-and-later) if you use either optional
+records feature). Old records that carry no session ID (conversations from older Claudian
 versions, or ones that never got a first reply) cannot be matched to a CLI file and are
 skipped — continuing that conversation in Claudian once usually fixes this.
 
@@ -109,10 +110,12 @@ On each machine:
 > which version should win it keeps both and asks you — the command **Repair shared
 > conversation records** lists those with both sizes and dates, one at a time. Turning the
 > setting back off stops further moves but **does not un-share what has already moved**.
-> And a shared conversation carries
-> any folders it had been given access to as absolute paths, which on the other machine may
-> point at something else — the same exposure every conversation had before Claudian 2.2.5,
-> when all records lived in that layer.
+> And Claudian's **Assign to this device is not supported while it is on**: the next sync
+> moves the conversation back into the shared layer. To keep a conversation on one device,
+> turn the setting off first. (If any of your machines still runs Claudian 2.2.6 or
+> earlier, a shared conversation also carries the folders it had been given access to as
+> absolute paths, which on the other machine may point at something else; Claudian 2.2.7
+> removed that feature.)
 >
 > **Claudian 2.2.5 and later: the conversation may not be *listed* on the other machine,
 > even though resuming works.** From 2.2.5 each new conversation's record is filed under
@@ -121,8 +124,10 @@ On each machine:
 > still carries the session file, so `claude --resume <id>` / `codex resume <id>` work
 > normally; what is missing is the entry in Claudian's sidebar. The **Assign to this
 > device** button does not help here: it promotes a record from the *top level*, not from
-> another device's folder. Moving (or copying) that one `conv-*.meta.json` up to
-> `.claudian/sessions/` makes the conversation listed and assignable again.
+> another device's folder. Moving that one `conv-*.meta.json` up to
+> `.claudian/sessions/` makes the conversation listed and assignable again. Move it, do not
+> copy it: a copy left behind is the one Claudian keeps writing to on that machine, and
+> deleting the conversation there removes only that copy.
 
 ## ⚠️ Keep `.claudian/` in your vault sync
 
@@ -142,6 +147,29 @@ safely is planned work). So:
   left alone, a one-sided change fast-forwards (with a backup), and anything else becomes
   a conflict for you to settle. Do **not** enable it if your vault sync already carries
   `.claudian/` — two transports over one folder feed your sync tool conflicts.
+
+### Claudian 2.3.3 and later
+
+Claudian 2.3.3 changed how it deletes a conversation: it now removes the record and
+leaves no deletion marker, and *Assign to this device* no longer leaves an assignment
+marker either. **The default setup is not affected** — a deleted conversation's record is
+gone, so its session file simply stops syncing.
+
+Two optional features, both off by default, relied on those markers and are **not yet
+compatible**:
+
+- **Claudian records** provider: a conversation you delete comes back after Obsidian
+  restarts, because the next sync restores its record from the sync folder. Your other
+  devices keep it either way.
+- **Share this device's conversations**: a conversation deleted in the same Obsidian
+  session it was shared in can come back after a restart, and one another device deleted
+  or assigned to itself can be shared again from this machine.
+
+No session file is ever deleted and every overwrite is backed up, so conversations are not
+lost — but deleted ones may reappear, and with the records provider on, a title or pin you
+changed just before closing Obsidian can occasionally revert. When this plugin detects Claudian 2.3.3 or
+later with either feature on, it says so in its settings, at the top of every sync report,
+and once per launch.
 
 ## How your data is protected
 

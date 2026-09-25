@@ -24,7 +24,7 @@ import {
   resetStubSettings,
   settingsCreated,
 } from "../helpers/obsidian-stub";
-import { AiSessionSyncSettingTab } from "../../src/ui/settings-tab";
+import { AiSessionSyncSettingTab, COMPAT_WARNING_NAME } from "../../src/ui/settings-tab";
 import { ConflictModal, describeOutcome, describeStanding } from "../../src/ui/conflict-modal";
 import type { ConflictEntry } from "../../src/orchestration/conflict-commands";
 import type { PluginRuntime } from "../../src/orchestration/plugin-runtime";
@@ -602,4 +602,107 @@ describe("the conflict panel's four standings", () => {
     expect(byLabel("Keep the other machine's version")?.disabled).toBe(true);
     expect(byLabel("Show me both")?.disabled).toBe(false);
   });
+});
+
+describe("Claudian 2.3.3: the pane says which switched-on feature it breaks", () => {
+  /**
+   * Configured, synced once, with the given Claudian installed. The warnings
+   * are read on refresh and before every pass, so one pass is enough for the
+   * pane to know the version.
+   */
+  async function withClaudian(version: string | null, features: { sharing?: boolean; records?: boolean }) {
+    const h = await newHarness();
+    await h.appendSession(SID, 3);
+    await h.configure();
+    if (version !== null) await h.installClaudian(version);
+    if (features.sharing) await h.runtime.setShareConversations(true);
+    if (features.records) await h.runtime.setProvider("claudian", { enabled: true });
+    await h.runtime.syncNow();
+    return h;
+  }
+
+  const warnings = () => settingsCreated.filter((setting) => setting.name === COMPAT_WARNING_NAME);
+
+  it("puts the sharing warning directly under the sharing switch", async () => {
+    const h = await withClaudian("2.3.3", { sharing: true });
+    resetStubSettings();
+    makeTab(h).display();
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.desc).toContain("Claudian 2.3.3");
+    // Directly under the switch it is about: read at the moment of deciding.
+    const index = settingsCreated.findIndex((s) => s.name === COMPAT_WARNING_NAME);
+    expect(settingsCreated[index - 1]?.name).toContain("Share this device's conversations");
+  }, SLOW);
+
+  it("puts the records warning directly under that provider's switch", async () => {
+    const h = await withClaudian("2.4.0", { records: true });
+    resetStubSettings();
+    makeTab(h).display();
+
+    expect(warnings()).toHaveLength(1);
+    expect(warnings()[0]?.desc).toContain("comes back after Obsidian restarts");
+    const index = settingsCreated.findIndex((s) => s.name === COMPAT_WARNING_NAME);
+    expect(settingsCreated[index - 1]?.name).toBe("Claudian conversation records");
+  }, SLOW);
+
+  it("says nothing for an older Claudian, or none at all, or with both features off", async () => {
+    for (const [version, features] of [
+      ["2.3.2", { sharing: true, records: true }],
+      [null, { sharing: true, records: true }],
+      ["2.3.3", {}],
+    ] as const) {
+      const h = await withClaudian(version, features);
+      resetStubSettings();
+      makeTab(h).display();
+      expect(warnings(), `${version} ${JSON.stringify(features)}`).toHaveLength(0);
+    }
+  }, SLOW * 3);
+
+  it("says Assign is unsupported whenever sharing is described, version or not", async () => {
+    // The maintainer's decision (2026-09-25): not fixed, documented. So it is
+    // in the switch's own description rather than behind the version check.
+    const h = await withClaudian(null, {});
+    resetStubSettings();
+    makeTab(h).display();
+    expect(containing("Share this device's conversations")?.desc).toContain(
+      "\"Assign to this device\" is not supported while this is on",
+    );
+  }, SLOW);
+});
+
+describe("Claudian 2.3.3: every sync report leads with the warning while it applies", () => {
+  it("puts it first, every pass, and drops it once the feature is off", async () => {
+    const h = await newHarness();
+    await h.appendSession(SID, 3);
+    await h.configure();
+    await h.installClaudian("2.3.3");
+    await h.runtime.setShareConversations(true);
+
+    await h.runtime.syncNow();
+    expect(h.runtime.lastPassReport()?.notices[0]).toContain("sharing relied on");
+    await h.runtime.syncNow();
+    expect(h.runtime.lastPassReport()?.notices[0], "every pass, not once").toContain(
+      "sharing relied on",
+    );
+
+    await h.runtime.setShareConversations(false);
+    await h.runtime.syncNow();
+    expect(h.runtime.lastPassReport()?.notices.join(" ")).not.toContain("sharing relied on");
+  }, SLOW);
+
+  it("notices an update to Claudian without a restart", async () => {
+    // Obsidian updates plugins in place, so the version is re-read per pass.
+    const h = await newHarness();
+    await h.appendSession(SID, 3);
+    await h.configure();
+    await h.installClaudian("2.3.2");
+    await h.runtime.setShareConversations(true);
+    await h.runtime.syncNow();
+    expect(h.runtime.lastPassReport()?.notices.join(" ")).not.toContain("sharing relied on");
+
+    await h.installClaudian("2.3.3");
+    await h.runtime.syncNow();
+    expect(h.runtime.lastPassReport()?.notices[0]).toContain("Claudian 2.3.3");
+  }, SLOW);
 });

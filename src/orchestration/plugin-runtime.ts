@@ -19,6 +19,7 @@ import {
   serialiseSettings,
 } from "../domain/settings";
 import type { ConflictResolution } from "../domain/conflict";
+import { type CompatWarnings, compatNotices, compatWarnings } from "../domain/claudian-compat";
 import type { NotReadyReason, ReadinessObservation, ReadinessState } from "../domain/readiness";
 import type { LogicalId, MachineId, WorkspaceId } from "../domain/types";
 import type { Clock, IdGen } from "../infra/clock";
@@ -31,6 +32,7 @@ import {
   emptyBinding,
 } from "../infra/home-store";
 import { createBackupWriter } from "../infra/backup-writer";
+import { readClaudianVersion } from "../infra/claudian-version";
 import type { PathGuardDeps } from "../infra/path-guard";
 import { mintStatePath, probeCaseSensitivity, splitPathSegments } from "../infra/path-guard";
 import { type MachineFile, STATE_SCHEMA_VERSION } from "../infra/state-store";
@@ -90,6 +92,13 @@ export interface RuntimeHost {
   readonly homedir: string;
   /** Realpath of the vault. Resolved by the caller, which owns the host API. */
   readonly vaultRoot: string;
+  /**
+   * Obsidian's config folder name (`app.vault.configDir`, normally `.obsidian`).
+   *
+   * Only used to read which Claudian is installed. Optional: without it the
+   * version is unknown, and unknown means no compatibility warning at all.
+   */
+  readonly configDir?: string;
   readonly pid: number;
   /** Obsidian's `loadData` / `saveData`; the vault-side portable settings. */
   loadSettings(): Promise<unknown>;
@@ -167,6 +176,14 @@ export class PluginRuntime {
    * the current state: null the moment an identity is loaded or persisted.
    */
   private identityWithheld: string | null = null;
+  /**
+   * Claudian's manifest version as last read, or null when it could not be.
+   *
+   * Re-read before every pass as well as on refresh: Obsidian updates plugins
+   * without a restart, and the warning it feeds is about the version running
+   * now.
+   */
+  private claudianVersion: string | null = null;
   private binding: WorkspaceBinding | null = null;
   private identity: IdentityOutcome | null = null;
   private lastReport: PassReport | null = null;
@@ -232,6 +249,7 @@ export class PluginRuntime {
     const identity = await this.loadOrCreateMachine(home, options.persistIdentity ?? true);
     this.machine = identity.machine;
     this.identityWithheld = identity.withheld;
+    await this.detectClaudian();
 
     // The vault answers "which workspace is this" (§5.2.3); this machine's
     // binding answers "and where does it sync to". Both, or nothing happens.
@@ -258,6 +276,7 @@ export class PluginRuntime {
     const prepared = await this.prepare({ dryRun: options.dryRun ?? false });
     if (!prepared.ok) return this.publish(prepared.status);
     if (this.passInFlight) return this.status;
+    await this.detectClaudian();
 
     this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
@@ -280,9 +299,19 @@ export class PluginRuntime {
       // before the pass began, from a step the report would otherwise have no
       // word for. A dry run that silently declines to write its own identity
       // file is a dry run whose report is not the whole story.
-      this.lastReport = this.identityWithheld
-        ? { ...outcome.report, notices: [this.identityWithheld, ...outcome.report.notices] }
-        : outcome.report;
+      //
+      // The compatibility warnings go first and go every pass: the report is
+      // where a user looks when something came back that should not have, and
+      // the answer has to be there on the day they look, not only on the day
+      // it was first noticed.
+      const leading = [
+        ...compatNotices(this.compatInput()),
+        ...(this.identityWithheld ? [this.identityWithheld] : []),
+      ];
+      this.lastReport =
+        leading.length > 0
+          ? { ...outcome.report, notices: [...leading, ...outcome.report.notices] }
+          : outcome.report;
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -970,6 +999,36 @@ export class PluginRuntime {
   /** Is this machine moving its conversation records into the shared layer? */
   sharesConversations(): boolean {
     return this.binding?.shareConversations === true;
+  }
+
+  /**
+   * What the installed Claudian breaks in the features switched on here.
+   *
+   * From the last version read, so the settings pane can render it without
+   * touching the disk; refresh and every pass keep it current.
+   */
+  compatibilityWarnings(): CompatWarnings {
+    return compatWarnings(this.compatInput());
+  }
+
+  private compatInput() {
+    return {
+      claudianVersion: this.claudianVersion,
+      recordsProvider: this.providerEnabled("claudian"),
+      sharing: this.sharesConversations(),
+    };
+  }
+
+  private async detectClaudian(): Promise<void> {
+    const configDir = this.host.configDir;
+    this.claudianVersion =
+      configDir === undefined || configDir.length === 0
+        ? null
+        : await readClaudianVersion({
+            fs: this.host.fs,
+            joinPath: this.host.joinPath,
+            pluginsDir: this.host.joinPath(this.host.vaultRoot, configDir, "plugins"),
+          });
   }
 
   /** Machine-local consent, so it never travels with the vault (ADR-69). */
