@@ -624,40 +624,36 @@ describe("what does not end a hold", () => {
 });
 
 describe("an unreadable memory", () => {
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "lands nothing it cannot place, and is not overwritten",
-    async () => {
-      const a = await machine();
-      await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
-      await a.settle();
-      await deleteRecord(a, CONV);
-      await restarts(a, 1);
+  it("lands nothing it cannot place, and is not overwritten", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
 
-      const ws = (await a.runtime.refresh()).workspaceId as string;
-      const memory = path.join(a.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json");
-      const before = await fsp.readFile(memory, "utf8");
-      // Thirty-one quiet days: the ledger has forgotten the record, so only
-      // the memory knows it was deleted here.
-      a.advanceClock(31 * DAY_MS);
-      await restarts(a, 1);
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    const memory = path.join(a.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json");
+    const before = await fsp.readFile(memory, "utf8");
+    // Thirty-one quiet days: the ledger has forgotten the record, so only
+    // the memory knows it was deleted here.
+    a.advanceClock(31 * DAY_MS);
+    await restarts(a, 1);
 
-      await fsp.chmod(memory, 0o000);
-      let report: PassReport;
-      try {
-        ({ report } = await pass(a));
-        ({ report } = await pass(a));
-      } finally {
-        await fsp.chmod(memory, 0o600);
-      }
-      expect(report.notices.some((n) => n.includes("could not be opened"))).toBe(true);
-      expect(await exists(local(a, `${CONV}.meta.json`)), "landed while the memory was unreadable").toBe(false);
-      expect(await fsp.readFile(memory, "utf8"), "a rebuild was saved over it").toBe(before);
+    // A path that is there and cannot be read as a file — the portable
+    // stand-in for EBUSY or EACCES, which no CI platform produces on demand.
+    await fsp.rm(memory);
+    await fsp.mkdir(memory);
+    const { report } = await pass(a);
+    await pass(a);
+    expect(report.notices.some((n) => n.includes("could not be opened"))).toBe(true);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "landed while the memory was unreadable").toBe(false);
+    expect((await fsp.lstat(memory)).isDirectory(), "a rebuild was saved over it").toBe(true);
 
-      await restarts(a, 1);
-      expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
-    },
-    90_000,
-  );
+    await fsp.rmdir(memory);
+    await fsp.writeFile(memory, before);
+    await restarts(a, 1);
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 90_000);
 });
 
 describe("the restore screen, for a record held here", () => {

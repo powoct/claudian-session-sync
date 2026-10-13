@@ -220,16 +220,12 @@ describe("on disk", () => {
     expect((await home.loadClaudianRecords(WS)).status).toBe("unusable");
 
     // A file that is there and cannot be read is not a file that is broken:
-    // rebuilding over it would lose every hold the ledger no longer knows.
-    if (process.platform !== "win32" && process.getuid?.() !== 0) {
-      await fsp.writeFile(target, "{}");
-      await fsp.chmod(target, 0o000);
-      try {
-        expect((await home.loadClaudianRecords(WS)).status).toBe("unreadable");
-      } finally {
-        await fsp.chmod(target, 0o600);
-      }
-    }
+    // rebuilding over it would lose every hold the ledger no longer knows. A
+    // directory in its place is the portable way to make the read fail.
+    await fsp.rm(target);
+    await fsp.mkdir(target);
+    expect((await home.loadClaudianRecords(WS)).status).toBe("unreadable");
+    await fsp.rmdir(target);
 
     await fsp.writeFile(target, JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, records: {} }));
     expect((await home.loadClaudianRecords(WS)).status).toBe("newer");
