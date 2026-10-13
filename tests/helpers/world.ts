@@ -42,6 +42,7 @@ import {
   type LedgerEntryView,
   type LedgerView,
   type MintOutcome,
+  type PassLock,
   runPass,
 } from "../../src/orchestration/sync-engine";
 import {
@@ -281,6 +282,9 @@ export class Machine {
       extraAdapters?: readonly ProviderAdapter[];
       localQuietMs?: number;
       remoteQuietMs?: number;
+      /** A lock of the test's own, for asserting what happens inside it. */
+      lock?: PassLock;
+      claudianRecords?: EngineDeps["claudianRecords"];
     } = {},
   ): Promise<PassReport> {
     // Load, run, write back — the real shape of a pass, and the reason this is
@@ -288,7 +292,12 @@ export class Machine {
     // manifest has to be genuinely read from and written to disk for that test
     // to be testing anything.
     const cache = await this.loadEvidence();
-    const deps = { ...this.engineDeps(options), evidence: cache };
+    const deps = {
+      ...this.engineDeps(options),
+      evidence: cache,
+      ...(options.lock ? { lock: options.lock } : {}),
+      ...(options.claudianRecords ? { claudianRecords: options.claudianRecords } : {}),
+    };
 
     let report: PassReport;
     if (!options.withLock) {
@@ -695,7 +704,12 @@ export class FakeCli {
   }
 
   /**
-   * Marks the conversation deleted, the way Claudian's markDeleted does.
+   * Marks the conversation deleted, the way Claudian 2.3.2 and older did.
+   *
+   * Only for admission and for mixed-version fleets. It keeps the meta file,
+   * which no Claudian version actually does (2.2.4 measured: Delete removed
+   * the record and left the tombstone), and Claudian 2.3.3+ writes no marker
+   * at all — for those, see `tests/helpers/claudian-2320.ts`.
    *
    * `device` writes the marker inside that device's directory instead of at
    * the top level, which is the distinction upstream draws:

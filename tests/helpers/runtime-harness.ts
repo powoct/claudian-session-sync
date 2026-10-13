@@ -40,6 +40,17 @@ export interface HarnessOptions {
    * rather than assuming it.
    */
   readonly configDir?: string;
+  /**
+   * This machine's Claudian installation key, as `main.ts` would derive it.
+   * Absent means Claudian has not run here, which switches sharing off.
+   */
+  readonly claudianDeviceKey?: string;
+  /**
+   * Runs before every directory listing the plugin makes — the one seam that
+   * lets a test act *during* a pass (steal its lock, say) at a point the pass
+   * itself chooses.
+   */
+  readonly beforeReadDir?: (target: string) => Promise<void>;
 }
 
 export class RuntimeHarness {
@@ -104,9 +115,19 @@ export class RuntimeHarness {
       return error;
     };
     const fail = options.failWrite;
-    const fs = fail
+    const beforeReadDir = options.beforeReadDir;
+    const listing = beforeReadDir
       ? {
           ...real,
+          readDir: async (target: string) => {
+            await beforeReadDir(target);
+            return real.readDir(target);
+          },
+        }
+      : real;
+    const fs = fail
+      ? {
+          ...listing,
           writeFileAtomic: async (target: string, ...rest: never[]) => {
             if (fail(target)) throw refuse(target);
             return (real.writeFileAtomic as (...a: unknown[]) => Promise<void>)(target, ...rest);
@@ -119,7 +140,7 @@ export class RuntimeHarness {
             );
           },
         }
-      : real;
+      : listing;
 
     const readHostname = () => this.hostname;
     const host: RuntimeHost = {
@@ -140,6 +161,7 @@ export class RuntimeHarness {
       // Always set, as Obsidian always sets it: with no Claudian installed the
       // plugins folder is simply absent, which is the silent case.
       configDir: this.configDir,
+      ...(options.claudianDeviceKey ? { claudianDeviceKey: () => options.claudianDeviceKey ?? null } : {}),
       pid: process.pid,
       openFolder: async (target: string) => {
         this.opened.push(target);

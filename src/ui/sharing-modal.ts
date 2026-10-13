@@ -7,6 +7,10 @@
  * other machine. What the pass can do it already did — this screen exists only
  * for what is left.
  *
+ * Since ADR-78 a row can also be a shared copy that is *gone*: Claudian 2.3.3+
+ * deletes and assigns by removing the shared file, so a record this machine
+ * shared and then found missing was someone's decision, not a gap to refill.
+ *
  * Two rules shape it. **One at a time**: each row is an independent fork and a
  * decision about one carries no information about the next, so there is no
  * "publish all" button however tempting the count makes it. And **the losing
@@ -56,17 +60,21 @@ export class SharingModal extends Modal {
 
     contentEl.createEl("p", {
       text:
-        "Each of these exists twice: once on this device, and once in the layer your other " +
-        "devices read. They no longer match, and the shared one is not the copy this machine " +
-        "last published — so something else wrote it, and choosing for you would mean " +
-        "overwriting whatever that was. Your other devices are currently reading the shared " +
-        "version, which may be older than what you see here.",
+        "Each of these is on this device, and the copy in the layer your other devices read " +
+        "is not one this machine can safely replace. Either it differs — something else wrote " +
+        "it, and choosing for you would mean overwriting whatever that was — or it was removed: " +
+        "deleted, or assigned to a device, after this machine shared it. Your other " +
+        "devices are reading the shared version where there is one, which may be older than what " +
+        "you see here.",
     });
     contentEl.createEl("p", {
       text:
-        "Publishing replaces the shared version with this device's. The version it replaces is " +
-        "copied to your backups first, so this is reversible. Decide one at a time — these are " +
-        "separate conversations and what is right for one says nothing about the next.",
+        "Publishing puts this device's version in the shared layer. A shared version it replaces " +
+        "is copied to your backups first, so this is reversible; publishing a removed one undoes " +
+        "that delete, or an assignment to this device, for every device. One assigned to another " +
+        "device cannot be published from here — that device keeps reading its own copy. Decide " +
+        "one at a time — these are separate conversations and what is right for one says nothing " +
+        "about the next.",
     });
 
     for (const hold of holds) {
@@ -109,10 +117,11 @@ export class SharingModal extends Modal {
  */
 export function describePublish(outcome: PublishOutcome): string {
   if (outcome.ok) {
-    return (
-      "Published. Your other devices will show this version once the vault syncs; the one it " +
-      "replaced is in your backups."
-    );
+    return outcome.replaced
+      ? "Published. Your other devices will show this version once the vault syncs; the one it " +
+          "replaced is in your backups."
+      : "Published again. Your other devices will list this conversation once the vault syncs " +
+          "and Claudian restarts there; nothing was replaced.";
   }
   switch (outcome.reason) {
     case "sync-in-progress":

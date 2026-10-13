@@ -141,6 +141,21 @@ export interface PassReport {
    * choosing not to carry, on evidence it does not have.
    */
   readonly unprovenOmissions: readonly UnprovenOmissionEntry[];
+  /**
+   * ADR-78's news from this pass, as counts — the notices name the records,
+   * and this is what the host turns into a pop-up. Absent when the `claudian`
+   * provider is off.
+   */
+  readonly claudianRecords?: ClaudianRecordsSummary;
+}
+
+export interface ClaudianRecordsSummary {
+  /** Deleted-here holds that have now lasted long enough to be announced. */
+  readonly newlyHeld: number;
+  /** Held records another device changed since they were deleted here. */
+  readonly changedSinceDeleted: number;
+  /** Records restored because Claudian, not the user, had removed them. */
+  readonly restoredHistoryMissing: number;
 }
 
 export interface UnprovenOmissionEntry {

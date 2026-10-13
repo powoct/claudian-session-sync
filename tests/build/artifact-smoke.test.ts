@@ -40,6 +40,7 @@ const EXPECTED_COMMAND_IDS = [
   "open-backups-folder",
   "show-conflicts",
   "repair-shared-records",
+  "bring-back-deleted-records",
   "conflict-keep-local",
   "conflict-keep-remote",
   "conflict-reveal",

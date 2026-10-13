@@ -5,23 +5,26 @@
  * features were built on. Deleting a conversation now removes its record and
  * leaves nothing behind; assigning one to a device is a plain rename. Its own
  * design notes accept the consequence — "rare stale sync conflicts are an
- * accepted tradeoff" — and nothing in either plugin tells the user.
+ * accepted tradeoff" — and nothing in Claudian tells the user.
  *
- * Two features are affected, both off by default:
+ * Two features were affected, both off by default:
  *
- *  - **Claudian conversation records** (ADR-48) restores a record that exists
- *    in the sync folder and not here. It could not tell "deleted here" from
- *    "not yet arrived" before either; the tombstone beside the record is what
- *    kept Claudian from showing it again. Without one, the conversation comes
- *    back after a restart.
- *  - **Sharing** (ADR-69/71) moved records into the shared layer and relied on
- *    the markers to notice a deletion or an assignment made since. Without
- *    them a same-session delete can come back, another device's delete or
- *    assignment can be published again, and "Assign to this device" does not
- *    stick.
+ *  - **Claudian conversation records** (ADR-48) restored any record the sync
+ *    folder had and this device did not. Under a markerless Claudian that
+ *    brought every deleted conversation back on the next restart. ADR-78
+ *    fixed it — a record this device held and no longer holds stays off it —
+ *    so there is no warning for it any more.
+ *  - **Sharing** (ADR-69/71) moves records into the shared layer, and relied
+ *    on the markers to notice a deletion made since. A delete made in the same
+ *    Obsidian session as the move can still come back once, and that is not
+ *    fixable from files alone; so this one still warns.
  *
  * The default path — admission reading records, the CLI session files
- * themselves — is unaffected: a deleted record simply stops being admitted.
+ * themselves — never depended on the markers. Two later Claudian changes do
+ * reach it, and are documented rather than warned about here: from 2.3.6 the
+ * old `.claude/sessions` folder is no longer read, and from 2.3.11 archiving a
+ * Codex conversation moves its session file out of the folder this plugin
+ * syncs (OQ-35).
  *
  * Pure: the version arrives as a string (or null when it could not be read),
  * and null is silence. A warning that fires on a guess about which Claudian is
@@ -39,29 +42,17 @@ export const MARKERLESS_FROM: readonly [number, number, number] = [2, 3, 3];
  * three numbers is unknown, and unknown is false.
  */
 export function isMarkerless(version: string | null): boolean {
-  if (version === null) return false;
-  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
-  if (!match) return false;
-  const parts = [Number(match[1]), Number(match[2]), Number(match[3])];
-  for (let i = 0; i < 3; i += 1) {
-    const have = parts[i] as number;
-    const need = MARKERLESS_FROM[i] as number;
-    if (have !== need) return have > need;
-  }
-  return true;
+  return version !== null && atLeast(version, MARKERLESS_FROM);
 }
 
 export interface CompatInput {
   /** Claudian's manifest version, or null when it could not be read. */
   readonly claudianVersion: string | null;
-  /** Is the "Claudian conversation records" provider enabled on this machine? */
-  readonly recordsProvider: boolean;
   /** Is "Share this device's conversations" on for this machine? */
   readonly sharing: boolean;
 }
 
 export interface CompatWarnings {
-  readonly recordsProvider: string | null;
   readonly sharing: string | null;
 }
 
@@ -69,40 +60,27 @@ export interface CompatWarnings {
  * The sentences to show, per feature, or null where there is nothing to say.
  *
  * Each names the version it read, what goes wrong, and what the user can do
- * about it now. They are shown in the settings pane under the feature, and at
- * the top of every sync report while the feature stays on.
+ * about it now. Shown in the settings pane under the feature, and at the top
+ * of every sync report while the feature stays on.
  */
 export function compatWarnings(input: CompatInput): CompatWarnings {
-  if (!isMarkerless(input.claudianVersion)) return { recordsProvider: null, sharing: null };
+  if (!isMarkerless(input.claudianVersion)) return { sharing: null };
   const version = input.claudianVersion as string;
   return {
-    // Scoped to the shared layer because that is all this provider carries:
-    // a record Claudian filed under this device's own folder is not in the
-    // sync folder, so deleting it works. Saying otherwise invites the user to
-    // test the warning on a new conversation and conclude it is wrong.
-    recordsProvider: input.recordsProvider
-      ? `Claudian ${version} deletes a conversation without leaving the marker that ` +
-        "“Claudian conversation records” relied on. While it is on, a conversation whose " +
-        "record is in the shared layer — an older one, or one that sharing moved there — " +
-        "comes back after you delete it here and restart Obsidian: the next sync restores " +
-        "its record from the sync folder. Your other devices keep it either way, and " +
-        "conversations deleted under an older Claudian can reappear after upgrading. Until " +
-        "this plugin is updated for it, turn this off unless your vault sync cannot carry " +
-        ".claudian/."
-      : null,
     // The condition is "Claudian's save target for it is still this device's
     // folder", which a user cannot see; these are the two ways it happens.
     sharing: input.sharing
       ? `Claudian ${version} no longer leaves the deletion and assignment markers that ` +
-        "sharing relied on. While it is on, a conversation you delete can come back after " +
-        "a restart if it was started in this Obsidian session or used shortly before " +
-        "Obsidian was last closed, and a conversation another device has deleted or " +
-        "assigned to itself can be shared again from this one. Keep every device on the " +
-        "same Claudian version while sharing is on. " +
-        (input.recordsProvider
-          ? "With “Claudian conversation records” also on, a conversation that comes back " +
-            "keeps coming back — see that setting."
-          : "If one comes back, deleting it again normally removes it.")
+        "sharing relied on. While it is on, a conversation you delete can come back after a " +
+        "restart if it was started in this Obsidian session or used shortly before Obsidian " +
+        "was last closed; deleting it again removes it. A conversation another device deleted " +
+        "or assigned to itself after this device shared it is not shared again; if this device " +
+        'still has its own copy, that copy is listed under "Repair shared conversation records". ' +
+        "Keep every device on the same Claudian version while sharing is on." +
+        (atLeast(version, [2, 3, 12])
+          ? " Since Claudian 2.3.12, a conversation in the shared layer cannot be mentioned " +
+            "with @ in another conversation."
+          : "")
       : null,
   };
 }
@@ -110,9 +88,7 @@ export function compatWarnings(input: CompatInput): CompatWarnings {
 /** Every sentence that applies, for the sync report. */
 export function compatNotices(input: CompatInput): string[] {
   const warnings = compatWarnings(input);
-  return [warnings.recordsProvider, warnings.sharing].filter(
-    (warning): warning is string => warning !== null,
-  );
+  return [warnings.sharing].filter((warning): warning is string => warning !== null);
 }
 
 /**
@@ -122,14 +98,22 @@ export function compatNotices(input: CompatInput): string[] {
  * what they find when they do.
  */
 export function launchNotice(warnings: CompatWarnings): string | null {
-  const affected = [
-    warnings.recordsProvider ? "“Claudian conversation records”" : null,
-    warnings.sharing ? "sharing" : null,
-  ].filter((name): name is string => name !== null);
-  if (affected.length === 0) return null;
+  if (warnings.sharing === null) return null;
   return (
     "Claudian Session Sync: your Claudian version deletes conversations differently, and " +
-    `${affected.join(" and ")} ${affected.length > 1 ? "are" : "is"} not fully compatible ` +
-    "with it yet — a deleted conversation can come back. Details in this plugin's settings."
+    "sharing is not fully compatible with it — a conversation deleted in the same session it " +
+    "was shared in can come back. Details in this plugin's settings."
   );
+}
+
+/** Leading `major.minor.patch` at or above `floor`; false for anything unreadable. */
+function atLeast(version: string, floor: readonly [number, number, number]): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  if (!match) return false;
+  for (let i = 0; i < 3; i += 1) {
+    const have = Number(match[i + 1]);
+    const need = floor[i] as number;
+    if (have !== need) return have > need;
+  }
+  return true;
 }

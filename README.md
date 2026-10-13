@@ -31,9 +31,12 @@ storage on your disk). Currently in **beta**, distributed via
 Only conversations **this vault's Claudian knows about**: the plugin reads the
 conversation records Claudian keeps inside the vault (`.claudian/sessions/`) and syncs
 exactly those sessions. A session you started with a bare `claude` or `codex` in a
-terminal has no Claudian record and is not synced. Conversations you deleted in Claudian
-stop syncing (but see [Claudian 2.3.3](#claudian-233-and-later) if you use either optional
-records feature). Old records that carry no session ID (conversations from older Claudian
+terminal has no Claudian record and is not synced. A conversation you delete in Claudian
+stops being *admitted*: no new session of it is uploaded from this machine. A session file
+already in the sync folder keeps converging both ways — including anything you add to it
+here from a terminal — because deletions are never propagated (see also
+[Claudian 2.3.3](#claudian-233-and-later)).
+Old records that carry no session ID (conversations from older Claudian
 versions, or ones that never got a first reply) cannot be matched to a CLI file and are
 skipped — continuing that conversation in Claudian once usually fixes this.
 
@@ -112,7 +115,8 @@ On each machine:
 > setting back off stops further moves but **does not un-share what has already moved**.
 > Claudian's **Assign to this device is not supported while it is on** — with Claudian
 > 2.3.3 or later on any of your devices, the next sync moves the conversation back into the
-> shared layer. To keep a conversation on one device, turn the setting off **and leave it
+> shared layer, or, for one this device shared itself, holds it and lists it under **Repair
+> shared conversation records**. To keep a conversation on one device, turn the setting off **and leave it
 > off**: turning it back on shares it again. (If any of your machines still runs Claudian
 > 2.2.6 or earlier, a shared conversation also carries the folders it had been given access
 > to as absolute paths, which on the other machine may point at something else; Claudian
@@ -154,33 +158,62 @@ safely is planned work). So:
 
 Claudian 2.3.3 changed how it deletes a conversation: it now removes the record and
 leaves no deletion marker, and *Assign to this device* no longer leaves an assignment
-marker either. **The default setup is not affected** — a deleted conversation's record is
-gone, so its session file simply stops syncing.
+marker either. **The default setup is not affected**: a deleted conversation's record is
+gone, so this machine stops admitting its sessions, and what is already in the sync folder
+keeps converging as described above.
 
-Two optional features, both off by default, relied on those markers and are **not yet
-compatible**:
+- **Claudian records** provider (off by default): a conversation you delete on this device
+  **stays deleted here**. The plugin remembers which records this device has held, and
+  does not restore one that is now missing — not when another device pushes it again, and
+  not when you point the plugin at a new sync folder. The sync report lists it as
+  `deleted-here`, and the command **Bring back conversations deleted on this device**
+  undoes it. Your other devices keep the conversation, and a device that has not received
+  it yet still will — deletions are never propagated. One exception: a Claude conversation
+  whose history is in the sync folder but has not reached this machine yet may have been
+  removed by Claudian itself (it does that when asked to resume a session it cannot find),
+  so the plugin restores it once and says so; if you deleted it, delete it again and it
+  stays deleted. This needs the Claude Code provider on. A conversation whose history is
+  nowhere — Claude Code purges old transcripts after thirty days — simply stays deleted.
+  Records an older version of this plugin had already restored after you deleted them
+  cannot be told apart from ones you want — delete those once more. For the best result,
+  update this plugin and let it sync once **before** the first launch of Claudian 2.3.3 or
+  later on a device; most devices have already passed that point, and for them the
+  one-more-delete above is the whole cost.
+- **Share this device's conversations** (off by default): a conversation you delete can
+  come back after a restart if it was started in that Obsidian session or used shortly
+  before Obsidian was last closed; deleting it again removes it. One that another device
+  deleted or assigned to itself after this device shared it is no longer shared again;
+  if this device still holds a copy of its own (it was shared in the current Obsidian
+  session), that copy is listed under **Repair shared conversation records**. This starts as soon as
+  **any** device syncing the vault runs Claudian 2.3.3, so upgrade all of them together, or
+  turn sharing off on the ones you have not upgraded yet. From Claudian 2.3.12, a
+  conversation in the shared layer cannot be mentioned with `@` in another conversation.
 
-- **Claudian records** provider: a conversation whose record is in the shared layer (an
-  older conversation, or one the sharing setting moved there) comes back after you delete
-  it and restart Obsidian, because the next sync restores its record from the sync folder.
-  Your other devices keep it either way. Conversations you deleted under an older Claudian
-  can also reappear once you upgrade.
-- **Share this device's conversations**: a conversation you delete can come back after a
-  restart if it was started in that Obsidian session or used shortly before Obsidian was
-  last closed, and one another device deleted or assigned to itself can be shared again
-  from this machine. This starts as soon as **any** device syncing the vault runs Claudian
-  2.3.3, including while the others are still on an older version — so upgrade all of them
-  together, or turn sharing off on the ones you have not upgraded yet.
+When this plugin detects Claudian 2.3.3 or later *on the same device* with sharing on, it
+says so in its settings, at the top of every sync report, and once per launch. A device
+still running an older Claudian cannot tell that another one has upgraded, so it stays
+silent. The version is read from Claudian's `manifest.json`; Obsidian Sync carries that
+file but not Claudian itself (it is over Obsidian Sync's size limit), so update Claudian on
+every device and the two will agree.
 
-No session file is ever deleted and every overwrite is backed up, so no conversation is
-lost — but deleted ones may reappear.
+Later Claudian releases changed three more things worth knowing:
 
-When this plugin detects Claudian 2.3.3 or later *on the same device* with either feature
-on, it says so in its settings, at the top of every sync report, and once per launch. A
-device still running an older Claudian cannot tell that another one has upgraded, so it
-stays silent. The version is read from Claudian's `manifest.json`; Obsidian Sync carries
-that file but not Claudian itself (it is over Obsidian Sync's size limit), so update
-Claudian on every device and the two will agree.
+- **2.3.6** no longer reads the old `.claude/sessions` folder. A conversation recorded only
+  there no longer appears in Claudian; its session file still syncs and resumes from a
+  terminal.
+- **2.3.8** strips image data out of conversation records when it saves them. With the
+  Claudian records provider on, a vault whose records were tens of megabytes can see the
+  sync folder shrink by more than a quarter in one go, and syncing then pauses with "fewer
+  bytes than before" and does not resume on its own. **Not fixed yet.** If it happens, and
+  you are sure nothing else removed files from the sync folder, delete
+  `~/.claudian-session-sync/state/<workspace id>/remote.json` on each paused device: the
+  plugin then re-checks the folder from scratch and resumes once it has settled.
+- **2.3.11** moves an archived Codex conversation's session file into Codex's own archive
+  folder. This plugin does not know that folder yet, so the next sync copies the file back
+  into the active one on that device. Nothing is lost. **Not fixed yet.**
+
+Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
+its records, but its sessions are not synced.
 
 ## How your data is protected
 
@@ -215,7 +248,7 @@ touches is a short list:
 
 | | |
 |---|---|
-| **Reads** | the session files of the providers *you* switch on (all off by default), Claudian's conversation records inside your vault, and the `manifest.json` files in the vault's plugins folder (only to learn which Claudian version is installed) |
+| **Reads** | the session files of the providers *you* switch on (all off by default), Claudian's conversation records inside your vault, and the `manifest.json` files in the vault's plugins folder (only to learn which Claudian version is installed). With the Claudian records provider on, it also checks whether a deleted Claude conversation's session file exists in this vault's Claude project folder — existence only, never the contents, and even when the Claude Code provider is off — to tell your delete from Claudian's own |
 | **Writes** | your sync folder, those same session files when pulling a conversation from another machine, and its own state under `~/.claudian-session-sync` |
 | **Never** | anything else. Every path is resolved segment by segment and rejected if it escapes a known root or passes through a symlink; files it does not recognise are reported and left alone; credentials (`auth.json`, `config.toml`, `.credentials.json`) are excluded by name and never read. The one exception to the symlink rule is reading Claudian's `manifest.json`, which follows a linked plugin folder the way Obsidian does, because a plugin installed from a working copy is usually linked there |
 
@@ -248,12 +281,12 @@ anywhere. `main.ts` marks the call site with the same explanation.
 
 ```bash
 npm ci
-npm run verify   # typecheck, lint, secret/docs gates, ~1000 tests, build, bundle checks
+npm run verify   # typecheck, lint, secret/docs gates, ~1200 tests, build, bundle checks
 ```
 
 Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 [testing & acceptance](docs/zh-CN/testing.md) · [measured findings](docs/zh-CN/findings/).
-Every behavioural claim above traces to a decision record (ADR 1–67) and, where it
+Every behavioural claim above traces to a decision record (ADR 1–78) and, where it
 matters, to a real-machine measurement.
 
 ## License
@@ -268,8 +301,10 @@ matters, to a real-machine measurement.
 A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接任何网盘 API,只认你指定
 的本地同步文件夹(Dropbox / OneDrive / Syncthing 均可)。
 
-- **只同步本 vault 的 Claudian 有记录的会话**;纯终端起的会话、已在 Claudian 里删除
-  的会话、没有 session id 的旧记录,都不同步。
+- **只同步本 vault 的 Claudian 有记录的会话**;纯终端起的会话、没有 session id 的旧记录
+  不同步。在 Claudian 里删除的会话不再有新会话从本机上传,但已在同步目录里的会话文件照常
+  双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,在本机删掉的对话留在删掉的状态,可用命令
+  「Bring back conversations deleted on this device」取回。
 - **合并只做前缀快进**,从不信时间戳;双机分叉 = 冲突,两个版本都保留,由你选择。
   覆盖前必备份;不认识的文件永远原地不动;不传播删除。
 - **请勿把 `.claudian/` 排除在你的 vault 同步之外**——Claudian 的会话列表靠它;

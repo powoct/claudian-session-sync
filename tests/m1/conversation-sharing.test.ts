@@ -62,6 +62,8 @@ interface RunOptions {
   readonly only?: ReadonlySet<string>;
   readonly inspectOnly?: boolean;
   readonly mayWrite?: () => Promise<boolean>;
+  /** The pass's clock; `published` entries are always last seen at NOW. */
+  readonly nowMs?: number;
   /** Returns null to model a backup that could not be taken. */
   readonly backup?: () => Promise<string | null>;
 }
@@ -98,7 +100,7 @@ async function run(root: string, options: RunOptions = {}) {
     hashBytes: (bytes) => createHash("sha256").update(bytes).digest("hex"),
     vaultRealPath: root,
     deviceKey: options.deviceKey === undefined ? DEVICE : options.deviceKey,
-    nowMs: NOW,
+    nowMs: options.nowMs ?? NOW,
     published: {
       schemaVersion: 1,
       deviceKey: DEVICE,
@@ -155,6 +157,7 @@ describe("ADR-69: sharing by moving the record", () => {
       folded: 0,
       retired: 0,
       tombstoned: 0,
+      sharedWrites: { created: 0, replaced: 0 },
       heldBack: [],
       holds: [],
       published: null,
@@ -557,5 +560,127 @@ describe("ADR-71: looking is not consenting", () => {
       "a record the user was never shown must not be published",
     ).toBeNull();
     expect(await read(deviceRecord(root, DEVICE, bystander))).toContain("not asked about");
+  });
+});
+
+describe("ADR-78 H9: a shared record that is gone is someone's decision", () => {
+  // Claudian 2.3.3+ deletes and assigns by removing the shared file and
+  // leaving nothing behind. A record this machine published and now finds
+  // missing, with a copy still in this device's folder, must not be published
+  // again — that would undo another device's delete or assignment.
+  async function publishedThenRemoved(root: string) {
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one" });
+    expect((await run(root)).moved).toBe(1);
+    const published = await baseFrom(root, CONV);
+    // Upstream's stale write target recreates the device copy (ADR-71)…
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one, again" });
+    // …and another device deletes the shared record, markerless.
+    await fsp.rm(sharedRecord(root, CONV));
+    return published;
+  }
+
+  it("holds instead of publishing it again", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    const outcome = await run(root, { published });
+    expect(outcome.moved).toBe(0);
+    expect(await read(sharedRecord(root, CONV)), "republished").toBeNull();
+    expect(await read(deviceRecord(root, DEVICE, CONV))).not.toBeNull();
+    expect(outcome.holds.map((h) => [h.conversationId, h.sharedPath, h.resolvable])).toEqual([[CONV, null, true]]);
+    expect(outcome.heldBack.join("\n")).toContain("not shared again");
+    // This device's own folder holds the record — it always does in this row
+    // — and that is not an assignment to another device.
+    expect(outcome.heldBack.join("\n")).not.toContain("assigned to another device");
+  });
+
+  it("keeps the base, so the hold outlives the thirty-day forgetting", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    // A pass thirty-one days after the base was last refreshed: without the
+    // refresh, GC drops it, and a record with no base is published by the
+    // original move on the pass after.
+    const later = NOW + 31 * 24 * 60 * 60 * 1000;
+    const outcome = await run(root, { published, nowMs: later });
+    expect(outcome.published?.records[CONV]?.lastSeenMs).toBe(later);
+    expect(outcome.published?.records[CONV]?.publishedHash).toBe(published[CONV]?.publishedHash);
+  });
+
+  it("shows on the repair screen, where publishing it is one deliberate click", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    const inspected = await run(root, { published, inspectOnly: true });
+    expect(inspected.holds.map((h) => h.conversationId)).toEqual([CONV]);
+    expect(await read(sharedRecord(root, CONV))).toBeNull();
+
+    const forced = await run(root, { published, forced: new Set([CONV]), only: new Set([CONV]) });
+    expect(forced.moved).toBe(1);
+    expect(forced.sharedWrites).toEqual({ created: 1, replaced: 0 });
+    expect(await read(sharedRecord(root, CONV))).toContain("one, again");
+  });
+
+  it("counts the publish at the write, even when the device copy cannot be cleared after", async () => {
+    // The click published; the device copy's removal afterwards is a separate
+    // step, and losing the lock (or Claudian writing it) there must not turn
+    // a done publish into "Not published" (review, 2026-10-14).
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+    let calls = 0;
+    const outcome = await run(root, {
+      published,
+      forced: new Set([CONV]),
+      only: new Set([CONV]),
+      mayWrite: async () => ++calls <= 2,
+    });
+    expect(await read(sharedRecord(root, CONV))).toContain("one, again");
+    expect(outcome.moved).toBe(0);
+    expect(outcome.sharedWrites).toEqual({ created: 1, replaced: 0 });
+  });
+
+  it("names an assignment to another device as one", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+    await writeRecord(root, OTHER, CONV, { id: CONV, providerId: "claude", title: "theirs now" });
+
+    const outcome = await run(root, { published });
+    expect(outcome.heldBack.join("\n")).toContain("assigned to another device");
+    // And it cannot be published from here: that device reads its own folder
+    // first, so a shared copy would be a second live record it ignores.
+    expect(outcome.holds.map((h) => h.resolvable)).toEqual([false]);
+  });
+
+  it("keeps the base for as long as the shared record exists, not only while a device copy does", async () => {
+    // After the first restart following a move there is no device copy, and
+    // nothing used to refresh the base: thirty days on it was gone, and a
+    // delete or assignment after that was published again (review, 2026-10-14).
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one" });
+    expect((await run(root)).moved).toBe(1);
+    const published = await baseFrom(root, CONV);
+
+    const month = 31 * 24 * 60 * 60 * 1000;
+    const quiet = await run(root, { published, nowMs: NOW + month });
+    expect(quiet.published?.records[CONV]?.lastSeenMs).toBe(NOW + month);
+
+    // Another device deletes it; this device's stale target writes a copy.
+    await fsp.rm(sharedRecord(root, CONV));
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one, again" });
+    const kept = Object.fromEntries(
+      Object.entries(quiet.published?.records ?? {}).map(([id, entry]) => [
+        id,
+        { publishedHash: entry.publishedHash, publishedSize: entry.publishedSize },
+      ]),
+    );
+    const later = await run(root, { published: kept, nowMs: NOW + 2 * month });
+    expect(later.moved).toBe(0);
+    expect(await read(sharedRecord(root, CONV)), "published again").toBeNull();
+  });
+
+  it("still makes the first move of a record it never published", async () => {
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "new" });
+    expect((await run(root)).moved).toBe(1);
   });
 });

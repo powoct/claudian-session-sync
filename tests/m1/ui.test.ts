@@ -635,15 +635,14 @@ describe("Claudian 2.3.3: the pane says which switched-on feature it breaks", ()
     expect(settingsCreated[index - 1]?.name).toContain("Share this device's conversations");
   }, SLOW);
 
-  it("puts the records warning directly under that provider's switch", async () => {
+  it("says nothing under the records switch — ADR-78 made it compatible", async () => {
     const h = await withClaudian("2.4.0", { records: true });
     resetStubSettings();
     makeTab(h).display();
 
-    expect(warnings()).toHaveLength(1);
-    expect(warnings()[0]?.desc).toContain("comes back after you delete it here and restart Obsidian");
-    const index = settingsCreated.findIndex((s) => s.name === COMPAT_WARNING_NAME);
-    expect(settingsCreated[index - 1]?.name).toBe("Claudian conversation records");
+    expect(warnings()).toHaveLength(0);
+    // What it does instead is said in the switch's own description.
+    expect(containing("Claudian conversation records")?.desc).toContain("deleted-here");
   }, SLOW);
 
   it("says nothing for an older Claudian, or none at all, or with both features off", async () => {

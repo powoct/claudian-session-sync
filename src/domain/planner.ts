@@ -16,6 +16,7 @@
  * one manifest-derived value allowed anywhere near this function is a boolean
  * that can only ever push a decision toward DEFER (rule EV-1).
  */
+import type { AbsentHere } from "./deleted-here";
 import type { TailState } from "./merge-policy";
 
 export type Action =
@@ -31,7 +32,11 @@ export type Action =
   | "SKIP_TOO_LARGE"
   | "SKIP_PLACEHOLDER"
   | "SKIP_REMOTE_NOT_READY"
-  | "SKIP_UNSUPPORTED_FORMAT";
+  | "SKIP_UNSUPPORTED_FORMAT"
+  /** A Claudian record removed on this device, kept off it (ADR-78). */
+  | "SKIP_DELETED_HERE"
+  /** A Claudian file the installed Claudian no longer reads (ADR-78). */
+  | "SKIP_RETIRED";
 
 export type RemoteReadiness = "ready" | "not-ready" | "unsupported-format";
 
@@ -414,6 +419,25 @@ export interface OpaquePlanInput {
    * the change is safer than its absence by construction.
    */
   readonly displacedPushWitness: boolean;
+  /**
+   * What a record only the replica has means on this device (ADR-78, §7.2b
+   * #3h). Absent for every provider but `claudian`, which is today's answer:
+   * land it.
+   *
+   * Computed outside the planner because the deciding facts are this
+   * device's own history and two probes of its disk, and consulted at #3 only
+   * — after every DEFER and SKIP above has had its say. Two of its three
+   * verdicts withhold the write; the third is the create #3 already makes. It
+   * can never authorise an overwrite.
+   */
+  readonly absentHere?: AbsentHere;
+  /**
+   * This file is a sidecar the installed Claudian no longer writes, so it is
+   * never published (ADR-78) — a `.deleted.json` a Claudian 2.3.3+ device
+   * holds only because a sync landed it there. Withholds #2 and #4a; changes
+   * nothing else.
+   */
+  readonly neverPublish?: boolean;
 }
 
 export function planOpaque(input: OpaquePlanInput): PlanResult {
@@ -458,6 +482,7 @@ export function planOpaque(input: OpaquePlanInput): PlanResult {
   if (local.exists && remote.exists) {
     const base = input.lastConvergedHash;
     if (base !== null && remote.observedHash === base) {
+      if (input.neverPublish === true) return result("SKIP_RETIRED", "retired-sidecar-not-pushed", flags);
       return result("PUSH_OVERWRITE", "remote-at-converged-base", flags);
     }
     if (base !== null && local.observedHash === base) {
@@ -484,8 +509,18 @@ export function planOpaque(input: OpaquePlanInput): PlanResult {
   }
 
   // #2/#3 — one side only. Zero-byte sides were already deferred above.
-  if (local.exists && !remote.exists) return result("PUSH_NEW", "local-only", flags);
-  if (!local.exists && remote.exists) return result("PULL_NEW", "remote-only", flags);
+  if (local.exists && !remote.exists) {
+    if (input.neverPublish === true) return result("SKIP_RETIRED", "retired-sidecar-not-pushed", flags);
+    return result("PUSH_NEW", "local-only", flags);
+  }
+  if (!local.exists && remote.exists) {
+    // #3h — the only place `absentHere` is read (ADR-78).
+    const here = input.absentHere;
+    if (here?.verdict === "hold") return result("SKIP_DELETED_HERE", here.kind, flags);
+    if (here?.verdict === "retired") return result("SKIP_RETIRED", here.reason, flags);
+    if (here?.verdict === "wait") return result("DEFER", here.reason, flags);
+    return result("PULL_NEW", here?.reason ?? "remote-only", flags);
+  }
 
   return result("NOOP", "neither-side-exists", flags);
 }

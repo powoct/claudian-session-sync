@@ -30,6 +30,14 @@ import {
   shrankBelowConvergedBase,
 } from "../domain/planner";
 import { compareRecordwise } from "../domain/equivalence";
+import {
+  type AbsentHere,
+  type TranscriptWhere,
+  claudianRecordOf,
+  decideAbsentHere,
+  judgeClaudeHistory,
+  recordDigest,
+} from "../domain/deleted-here";
 import { comparePrefix, resolveNotLineAligned, tailState } from "../domain/merge-policy";
 import { type E0Signature, judgeStability, signaturesEqual } from "../domain/stability";
 import { buildConflictMeta, conflictId, quarantineLayout } from "../domain/conflict";
@@ -45,6 +53,7 @@ import type {
   SessionFileRef,
   SessionGroup,
 } from "../providers/provider-adapter";
+import type { ClaudianRecordsState } from "./claudian-records";
 import {
   type ActionEntry,
   type ActionResult,
@@ -143,9 +152,50 @@ export interface EngineDeps {
    * it must be inside for the same reason every other write here is: between
    * its read and its write sit Claudian, the peer machine and this engine.
    */
-  readonly beforeDiscover?: () => Promise<readonly string[]>;
+  readonly beforeDiscover?: (lock?: PassLock) => Promise<readonly string[]>;
   /** Injected so the engine stays free of Date, per testing.md §3 req 4. */
   readonly nowIso: () => string;
+  /**
+   * What this machine remembers about Claudian's records, and the probes the
+   * deleted-here rule asks (ADR-78). Present only when the `claudian` provider
+   * is on; without it every record only the replica has is landed, as before.
+   */
+  readonly claudianRecords?: ClaudianRecordsDeps;
+}
+
+export interface ClaudianRecordsDeps {
+  /**
+   * Loads the memory. Called once the pass holds its lock, and committed
+   * before it lets go: a bring-back request is written under the same lock,
+   * and a memory loaded before it and saved after it would undo the request.
+   */
+  open(): Promise<ClaudianRecordsSession | null>;
+}
+
+export interface ClaudianRecordsSession {
+  readonly state: ClaudianRecordsState;
+  /** The installed Claudian deletes and assigns without markers (2.3.3+). */
+  readonly markerless: boolean;
+  /**
+   * Where `<id>.jsonl` would be in this machine's Claude project folder, and
+   * in the sync folder; null when there is no projects folder to look in. The
+   * probe itself is null when transcripts from other devices cannot arrive
+   * here (the Claude Code provider is off): restoring a record for a history
+   * that never comes would make it impossible to delete.
+   */
+  readonly claudeTranscriptPath:
+    | ((sessionId: string) => Promise<{ readonly local: string; readonly replica: string } | null>)
+    | null;
+  /** Does any `devices/<key>/` folder of this vault's store hold `<conv>.meta.json`? */
+  readonly movedToDevice: (conversationId: string) => Promise<boolean>;
+  /** `.claudian/sessions`'s inode, or null when it is not there or has none. */
+  readonly storeIdentity: () => Promise<string | null>;
+  /** The memory file exists and could not be read this pass. */
+  readonly memoryUnreadable: boolean;
+  /** Said once, at the top of the pass. */
+  readonly notice: string | null;
+  /** Saves, unless this is a dry run or the file belongs to a newer build. */
+  commit(): Promise<void>;
 }
 
 export interface PassLock {
@@ -254,6 +304,13 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const replacedByPeer = new Map<string, number>();
   const historyReplaced: Array<{ logicalIdPrefix: string; backupPath: string | null }> = [];
   const notices: string[] = [];
+  // ADR-78's three things worth a sentence, by conversation id. The ids are
+  // timestamps and random characters, not content.
+  const newlyHeld: string[] = [];
+  const changedSinceDeleted: string[] = [];
+  const restoredHistoryMissing: string[] = [];
+  /** Opened inside the lock, in `runPassBody`. */
+  let records: ClaudianRecordsSession | null = null;
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
   // A pass that cannot establish where it is writing does not write. Aborting
@@ -275,7 +332,10 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   async function runPassBody(): Promise<PassReport> {
   // Before P1, because moving a record changes what this same pass admits.
   // Inside the lock, because it writes.
-  for (const notice of deps.beforeDiscover ? await deps.beforeDiscover() : []) {
+  // The pass's own lock, so every write the step makes is re-checked against
+  // it — a step that runs inside the lock but cannot see it is protected only
+  // until the lock is stolen.
+  for (const notice of deps.beforeDiscover ? await deps.beforeDiscover(deps.lock) : []) {
     notices.push(notice);
   }
   await barrier("P0:preflight-done", {});
@@ -283,8 +343,25 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     return finish("aborted", "format-version-unsupported");
   }
 
+  records = deps.claudianRecords ? await deps.claudianRecords.open() : null;
+  if (records?.notice) notices.push(records.notice);
+  // A recreated store is a vault downloaded again or a folder somebody
+  // removed, and every record missing from it at once is not the user
+  // deleting them. This pass treats it like a store that is not there.
+  const storeRecreated = records ? records.state.observeStore(await records.storeIdentity()) : false;
+  if (storeRecreated) {
+    notices.push(
+      "Claudian's conversation folder on this device was recreated since the last sync, so " +
+        "records missing from it are being restored rather than treated as deleted here.",
+    );
+  }
+  /** Local files this pass created, for the transcript probe below. */
+  const pulledHere = new Set<string>();
+
   // ── P1 discover ──────────────────────────────────────────────────────────
   const groups: Array<{ adapter: ProviderAdapter; group: SessionGroup }> = [];
+  /** Adapters whose healthCheck passed this pass. */
+  const healthy = new Set<string>();
   for (const adapter of deps.adapters) {
     const health = await adapter.healthCheck();
     // Said even when the provider is fine, and deduplicated: the four adapters
@@ -297,6 +374,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       notices.push(`provider ${adapter.id} unavailable: ${health.reason ?? "unknown"}`);
       continue; // One provider failing must not stop the others.
     }
+    healthy.add(adapter.id);
     for (const group of await adapter.listSessions()) groups.push({ adapter, group });
   }
   await barrier("P1:discover-done", {});
@@ -440,6 +518,19 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         );
       }
       continue;
+    }
+
+    // ADR-78. Before the budget, so a record already held, or retired, costs
+    // a stat and no share of the pass: a bulk delete of fifty conversations is
+    // fifty holds, and charging each one every pass would starve the peer's
+    // new records that sort after them — this provider's groups come last.
+    // A delete's *first* judgement is still charged once, like any read.
+    if (records && adapter.id === "claudian" && planned.length === 1) {
+      const row = await claudianShortCircuit(group, adapter, planned[0] as SessionFileRef);
+      if (row !== null) {
+        actions.push(row);
+        continue;
+      }
     }
 
     // …with a floor. A group larger than `maxFilesPerPass` would otherwise
@@ -631,6 +722,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         if (shape) witness = await findDisplacedPush(deps, file.neutralRel, replicaSiblings, localFacts.observedHash);
       }
 
+      // ADR-78: only for a Claudian record only the replica has, and only
+      // once its bytes are in hand — the shape #3 would create.
+      const record = records && adapter.id === "claudian" ? claudianRecordOf(file.neutralRel) : null;
+      let absentHere: AbsentHere | undefined;
+      if (records && record && !localFacts.exists && remoteFacts.exists && remoteBytes !== null) {
+        absentHere = await judgeAbsentHere(
+          records,
+          adapter,
+          file.neutralRel,
+          record,
+          remoteBytes,
+          remoteFacts.observedHash,
+        );
+      }
+
       const decision =
         file.mode === "opaque-file"
           ? planOpaque({
@@ -641,8 +747,24 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
               maxFileSizeBytes: deps.settings.maxFileSizeBytes,
               lastConvergedHash: deps.ledger.converged(file.neutralRel),
               displacedPushWitness: witness.found,
+              ...(absentHere ? { absentHere } : {}),
+              ...(records?.markerless && record?.kind === "deleted" ? { neverPublish: true } : {}),
             })
           : plan(input);
+
+      if (records && record && decision.action === "SKIP_DELETED_HERE" && absentHere?.verdict === "hold") {
+        records.state.hold(
+          file.neutralRel,
+          {
+            kind: absentHere.kind,
+            nowMs,
+            replicaSize: remoteO2.stat?.size ?? 0,
+            replicaMtimeMs: remoteO2.stat?.mtimeMs ?? 0,
+            replicaDigest: record.kind === "meta" && remoteBytes ? digestOf(remoteBytes) : null,
+          },
+          deps.ledger.converged(file.neutralRel) ?? "",
+        );
+      }
       if (witness.unreadable !== null) {
         // Fail-open, and say so out loud. An unreadable candidate never stops
         // matching, and ADR-34 forbids deleting it, so failing closed would
@@ -798,6 +920,15 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           });
         }
       }
+      if (decision.action === "PULL_NEW" && applied.result === "APPLIED") pulledHere.add(localPath);
+      if (
+        record &&
+        decision.action === "PULL_NEW" &&
+        decision.reason === "remote-only-history-not-here" &&
+        applied.result === "APPLIED"
+      ) {
+        restoredHistoryMissing.push(record.conversationId);
+      }
       if (file.role !== "primary") {
         if (WRITE_ACTIONS.has(decision.action) && applied.result === "APPLIED") auxLanded = true;
       } else if (!localO2.exists && applied.result !== "APPLIED") {
@@ -840,6 +971,15 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
             ? localFacts.size
             : remoteFacts.size;
         if (convergedHash) deps.ledger.recordConverged(file.neutralRel, convergedHash, convergedSize);
+        // The same moment, the same hash: what the ledger forgets after thirty
+        // days without the file, this remembers until the file is gone from
+        // both sides (ADR-78 H6).
+        if (convergedHash && record) {
+          records?.state.witness(file.neutralRel, convergedHash);
+          if (decision.reason === "remote-only-history-not-here") {
+            records?.state.markRestoredForMissingHistory(file.neutralRel, convergedHash);
+          }
+        }
       }
 
       // P8's ledger write is unconditional, including for skipped and aborted
@@ -904,6 +1044,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     );
   }
 
+  if (records) notices.push(...claudianNotices());
+
   for (const [providerId, count] of replacedByPeer) {
     notices.push(
       `${providerId}: ${count} record(s) were replaced with the other machine's version; ` +
@@ -937,8 +1079,172 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   await barrier("P8:before-commit", {});
   await barrier("P8:committed", {});
 
+  // Inside the lock, which `runPass` releases only after this returns.
+  await records?.commit();
+
   const failed = actions.filter((a) => isErrorResult(a.result)).length;
   return finish(failed === 0 ? "ok" : actions.length === failed ? "failed" : "partial");
+
+  /**
+   * A held or retired Claudian file, settled without reading it; null to plan
+   * it normally.
+   */
+  async function claudianShortCircuit(
+    group: SessionGroup,
+    adapter: ProviderAdapter,
+    file: SessionFileRef,
+  ): Promise<ActionEntry | null> {
+    if (!records) return null;
+    const record = claudianRecordOf(file.neutralRel);
+    if (record === null) return null;
+    if (record.kind === "inputs" && records.markerless) {
+      return entry(group, file.neutralRel, adapter.id, "SKIP_RETIRED", "retired-sidecar", "SKIPPED_POLICY");
+    }
+
+    const held = records.state.held(file.neutralRel);
+    if (held === null || held.releaseRequested) return null;
+    // H5: back on this machine — Claudian wrote it again, or the user put it
+    // there. Whatever it is, it is no longer missing, and it plans normally.
+    const local = await observe(deps, await adapter.targetPathFor(file.neutralRel));
+    if (local.exists) {
+      records.state.release(file.neutralRel);
+      return null;
+    }
+
+    const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel);
+    const remote = await observe(deps, remotePath);
+    if (remote.stat) {
+      // Kept current so a bring-back finds the copy already stable.
+      recordLedger(deps, file.neutralRel, "remote", remote, deps.clock.nowMs(), null);
+      const moved = remote.stat.size !== held.replicaSize || remote.stat.mtimeMs !== held.replicaMtimeMs;
+      if (moved && held.kind === "deleted-here") {
+        const bytes =
+          remote.stat.size <= deps.settings.maxFileSizeBytes ? await readBytes(deps, remotePath) : null;
+        const changed = records.state.updateHeldReplica(
+          file.neutralRel,
+          remote.stat.size,
+          remote.stat.mtimeMs,
+          bytes ? digestOf(bytes) : null,
+        );
+        if (changed) changedSinceDeleted.push(record.conversationId);
+      }
+    }
+    if (records.state.continueHold(file.neutralRel)) newlyHeld.push(record.conversationId);
+    return entry(group, file.neutralRel, adapter.id, "SKIP_DELETED_HERE", held.kind, "SKIPPED_POLICY");
+  }
+
+  /** The facts `decideAbsentHere` needs, each gathered only when asked. */
+  async function judgeAbsentHere(
+    claudian: ClaudianRecordsSession,
+    adapter: ProviderAdapter,
+    neutralRel: string,
+    record: NonNullable<ReturnType<typeof claudianRecordOf>>,
+    remoteBytes: Uint8Array,
+    remoteHash: string,
+  ): Promise<AbsentHere> {
+    const tombstoneName = `${record.conversationId}.deleted.json`;
+    const tombstoneBeside =
+      record.kind === "meta" &&
+      ((replicaSiblings.get("claudian") ?? []).includes(tombstoneName) ||
+        (await observe(deps, await adapter.targetPathFor(`claudian/${tombstoneName}`))).exists);
+    const held = claudian.state.held(neutralRel);
+    return decideAbsentHere(
+      {
+        kind: record.kind,
+        markerless: claudian.markerless,
+        storeHealthy: healthy.has(adapter.id) && !storeRecreated,
+        witnessed: claudian.state.witnessed(neutralRel) || deps.ledger.converged(neutralRel) !== null,
+        releaseRequested: held?.releaseRequested === true,
+        tombstoneBeside,
+        restoredForMissingHistory: claudian.state.restoredForMissingHistory(neutralRel, remoteHash),
+        memoryUnreadable: claudian.memoryUnreadable,
+      },
+      {
+        movedToDevice: () => claudian.movedToDevice(record.conversationId),
+        claudeHistory: async () => {
+          const pathOf = claudian.claudeTranscriptPath;
+          if (pathOf === null) return "not-applicable";
+          return judgeClaudeHistory(new TextDecoder().decode(remoteBytes), record.conversationId, (id) =>
+            transcriptAt(pathOf, id),
+          );
+        },
+      },
+    );
+  }
+
+  /**
+   * Where was this transcript when the pass began?
+   *
+   * The question R2 turns on is whether Claudian could find the history when
+   * it deleted the record, and that was before this pass. A transcript this
+   * same pass just pulled — Claude Code's groups run before Claudian's — was
+   * not there then: the typical R2 is exactly a history that landed one pass
+   * too late, and reading "present" off our own write would hold it as the
+   * user's delete. Absent here, it matters whether it is on its way: a copy in
+   * the sync folder this pass can land is; nothing anywhere, or one over the
+   * size limit, is not.
+   */
+  async function transcriptAt(
+    pathOf: (sessionId: string) => Promise<{ readonly local: string; readonly replica: string } | null>,
+    sessionId: string,
+  ): Promise<TranscriptWhere> {
+    const paths = await pathOf(sessionId);
+    if (paths === null) return "unknown";
+    try {
+      if (!pulledHere.has(paths.local) && (await deps.fs.lstat(paths.local)) !== null) return "present";
+      const copy = await deps.fs.lstat(paths.replica);
+      const arriving =
+        copy !== null && copy.isFile && copy.size > 0 && copy.size <= deps.settings.maxFileSizeBytes;
+      return arriving ? "arriving" : "nowhere";
+    } catch (error) {
+      const code = errnoOf(error);
+      if (!code || !CATCHABLE_IO.has(code)) throw error;
+      return "unknown";
+    }
+  }
+
+  /** Up to three ids, then a count — enough to find them, short enough to read. */
+  function named(ids: readonly string[]): string {
+    const shown = ids.slice(0, 3).join(", ");
+    return ids.length > 3 ? `${shown} and ${ids.length - 3} more` : shown;
+  }
+
+  function digestOf(bytes: Uint8Array): string | null {
+    return recordDigest(new TextDecoder().decode(bytes), (value) =>
+      deps.hashBytes(new TextEncoder().encode(value)),
+    );
+  }
+
+  /**
+   * One sentence per kind of news, never one per record: a bulk delete in
+   * Claudian is fifty records in one click.
+   */
+  function claudianNotices(): string[] {
+    const out: string[] = [];
+    if (newlyHeld.length > 0) {
+      out.push(
+        `${newlyHeld.length} conversation record(s) deleted on this device are being kept off ` +
+          "it, although the sync folder and your other devices still have them (listed below as " +
+          'deleted-here). To undo this, run "Bring back conversations deleted on this device".',
+      );
+    }
+    if (changedSinceDeleted.length > 0) {
+      out.push(
+        `${named(changedSinceDeleted)}: changed on another device after you deleted it here. It ` +
+          "stays deleted on this device; bring it back to see the change.",
+      );
+    }
+    if (restoredHistoryMissing.length > 0) {
+      out.push(
+        `${restoredHistoryMissing.length} conversation record(s) were restored here: their history ` +
+          "is in the sync folder but had not reached this device, so Claudian may have removed " +
+          "them by itself, which is not a deletion. Do not send in them until their history has " +
+          "synced. If you deleted one yourself, delete it again and it stays deleted.",
+      );
+    }
+    return out;
+  }
+
   }
 
   function finish(outcome: PassReport["outcome"], abortReason?: string): PassReport {
@@ -958,6 +1264,15 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           return { providerId, name, sessions };
         })
         .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name)),
+      ...(records
+        ? {
+            claudianRecords: {
+              newlyHeld: newlyHeld.length,
+              changedSinceDeleted: changedSinceDeleted.length,
+              restoredHistoryMissing: restoredHistoryMissing.length,
+            },
+          }
+        : {}),
     };
   }
 

@@ -171,7 +171,8 @@ export interface ShareDeps {
  * where pressing again cannot help.
  */
 export type PublishOutcome =
-  | { readonly ok: true }
+  /** `replaced`: a shared version was overwritten (and backed up), rather than a removed one put back. */
+  | { readonly ok: true; readonly replaced: boolean }
   | { readonly ok: false; readonly reason: "sync-in-progress" | "changed-again" | "unavailable" };
 
 /** One conversation whose two copies have diverged, for the repair screen. */
@@ -198,6 +199,13 @@ export interface ShareOutcome {
   readonly retired: number;
   /** Deletions carried into the shared layer, repairing a stale-target delete. */
   readonly tombstoned: number;
+  /**
+   * Writes into the shared layer, counted when the write lands rather than
+   * when the device copy is cleared afterwards: `moved` and `folded` wait for
+   * that removal, and a click that published must not be reported as one
+   * that did not because Claudian touched the device copy in between.
+   */
+  readonly sharedWrites: { readonly created: number; readonly replaced: number };
   /** Left alone, with the reason, for the pass report. */
   readonly heldBack: readonly string[];
   readonly holds: readonly SharingHold[];
@@ -212,6 +220,7 @@ function empty(published: SharedRecordsFile | null = null): ShareOutcome {
     folded: 0,
     retired: 0,
     tombstoned: 0,
+    sharedWrites: { created: 0, replaced: 0 },
     heldBack: [],
     holds: [],
     published,
@@ -263,6 +272,8 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   let folded = 0;
   let retired = 0;
   let tombstoned = 0;
+  let created = 0;
+  let replaced = 0;
 
   const hold = (id: string, reason: string, detail?: Partial<SharingHold>) => {
     heldBack.push(`${id}: ${reason}`);
@@ -360,6 +371,46 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
     }
     const base = state.get(id);
     const deviceHash = deps.hashBytes(device.bytes);
+    const forced = deps.forced?.has(id) === true;
+
+    // ── flat absent, after we published it: someone removed it (ADR-78 H9) ─
+    // This machine put a record in the shared layer and it is gone. Claudian
+    // 2.3.3+ deletes and assigns by removing the shared file and leaving
+    // nothing behind, so this is a delete — on another device, or by Claudian
+    // on its own — or an "Assign to this device", made there or here. The copy
+    // in this device's folder is either that assignment or what our move's
+    // stale write target left behind, and from here the two look the same.
+    // Publishing it again would undo someone's decision either way, so it is
+    // held, kept from being forgotten, and left to a person.
+    if (!flat.has(entry.name) && base !== undefined && !forced) {
+      state.set(id, { ...base, lastSeenMs: deps.nowMs });
+      const assigned = await assignedElsewhere(deps, deps.deviceKey, id);
+      hold(
+        id,
+        assigned
+          ? "assigned to another device since this machine shared it — not shared again"
+          : "no longer in the shared layer — deleted, or assigned to a device, since this machine " +
+              "shared it — not shared again",
+        {
+          conversationId: id,
+          reason: assigned
+            ? "Assigned to another device since this machine shared it."
+            : "No longer in the shared layer since this machine shared it: deleted on another " +
+              "device (or by Claudian there on its own), or assigned to a device — this one included.",
+          devicePath: source.value,
+          deviceSize: device.bytes.length,
+          deviceMtimeMs: device.mtimeMs,
+          sharedPath: null,
+          sharedSize: null,
+          sharedMtimeMs: null,
+          // Not for an assignment to another device: that device reads its own
+          // folder first, so publishing here would give the conversation two
+          // live records, one it ignores — the split ADR-69 exists to avoid.
+          resolvable: !assigned,
+        },
+      );
+      continue;
+    }
 
     // ── flat absent: the original move ───────────────────────────────────
     if (!flat.has(entry.name)) {
@@ -387,6 +438,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
         // could have been overwritten" and "the last look was the only guard".
         heldBack.push(`${id}: published, but this filesystem cannot promise nothing was replaced`);
       }
+      created += 1;
       state.set(id, entryFor(deviceHash, device.bytes.length, deps.nowMs));
       if (await removeVerified(deps, source.value, deviceHash)) moved += 1;
       continue;
@@ -406,8 +458,6 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
       if (await removeVerified(deps, source.value, deviceHash)) completed += 1;
       continue;
     }
-
-    const forced = deps.forced?.has(id) === true;
 
     // ── the shared copy is still ours: fold this device's record forward ──
     if (forced || (base !== undefined && sharedHash === base.publishedHash)) {
@@ -435,6 +485,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
       }
       if (!(await mayWrite())) return finish();
       await deps.fs.writeFileAtomic(target.value, device.bytes);
+      replaced += 1;
       state.set(id, entryFor(deviceHash, device.bytes.length, deps.nowMs));
       if (await removeVerified(deps, source.value, deviceHash)) folded += 1;
       continue;
@@ -496,10 +547,18 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   }
 
   function finish(): ShareOutcome {
+    // A base is kept for as long as either copy exists. It used to be kept
+    // only while this device's folder held one, which after the first restart
+    // following a move is never: thirty days on, the base was gone, and a
+    // record another device then deleted or assigned (ADR-78 H9) fell through
+    // to the original move and was published again.
+    const ownNames = index(own ?? []);
     const records: Record<string, SharedRecordEntry> = {};
     for (const [id, value] of state) {
-      if (deps.nowMs - value.lastSeenMs > GC_AGE_MS) continue;
-      records[id] = value;
+      const name = `${id}${META_SUFFIX}`;
+      const present = flat.has(name) || ownNames.has(name);
+      if (!present && deps.nowMs - value.lastSeenMs > GC_AGE_MS) continue;
+      records[id] = present ? { ...value, lastSeenMs: deps.nowMs } : value;
     }
     return {
       moved,
@@ -507,6 +566,7 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
       folded,
       retired,
       tombstoned,
+      sharedWrites: { created, replaced },
       heldBack,
       holds,
       // An inspection wrote nothing, so it learned nothing it may remember.
@@ -523,6 +583,26 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   }
 
   return finish();
+}
+
+/**
+ * Does another device's folder hold this conversation's record?
+ *
+ * Only for choosing the sentence: the hold is the same either way. A folder
+ * that cannot be listed reads as "no", which picks the more general wording.
+ */
+async function assignedElsewhere(deps: ShareDeps, ownKey: string | null, id: string): Promise<boolean> {
+  const devices = await resolveUnderRoot(deps.guard, deps.vaultRealPath, [...STORE_SEGMENTS, DEVICES_DIR].join("/"));
+  if (!devices.ok) return false;
+  for (const entry of await deps.fs.readDir(devices.value).catch(() => [])) {
+    if (entry.isFile || entry.name === ownKey || !DEVICE_KEY.test(entry.name)) continue;
+    const record = await resolveUnderRoot(deps.guard, deps.vaultRealPath, [
+      ...STORE_SEGMENTS, DEVICES_DIR, entry.name, `${id}${META_SUFFIX}`,
+    ].join("/"));
+    if (!record.ok) continue;
+    if ((await deps.fs.lstat(record.value).catch(() => null)) !== null) return true;
+  }
+  return false;
 }
 
 function entryFor(hash: string, size: number, nowMs: number): SharedRecordEntry {

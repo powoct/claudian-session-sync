@@ -1,6 +1,6 @@
 # HANDOFF — 交接说明
 
-> 更新时间：**2026-09-25**（**0.3.5 已发布**；M1/M2/M4 完成；M3 主体交付；Claudian 2.2.5 兼容性已通过两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：**2026-10-14**（**0.3.5 已发布；ADR-78 在分支 `adr-78-deleted-here`，未发布**；M1/M2/M4 完成；M3 主体交付；Claudian 2.2.5 兼容性已通过两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
 ## 当前状态（2026-09-25）
@@ -120,6 +120,32 @@ codex 的 `FileChangeItem.changes` 是 `HashMap<PathBuf, FileChange>`，Rust 每
 **教训**：测试套件对上游变化**没有判别力**——fixture 是手写的上游行为，上游一改，套件照绿。
 `FakeCli.tombstone()` 模拟的甚至既不是 2.2.x 也不是 2.3.3。凡是 fixture 在「模拟另一个程序」的地方，
 都需要一条对上游源码的对照（哪怕只是注释里写明对照的 commit），否则它会安静地过期。
+
+### 2026-10-14：删掉的对话留在删掉的那台（ADR-78）
+
+先按 Claudian **2.3.20** 复核了 2.3.3 那两份评估（176 个 agent，报告在本地
+`tmp/2026-10-13-claudian-2.3.20-recheck/`，未入库）：上游删除 / Assign / 迁移 / 绑定 id 公式 /
+device key 推导都没变，**结论与推荐设计仍适用**，但实现要按 2.3.20 调六处（sidecar 规则拆分、
+legacy 层不再算「移动」、绑定 id 照上游缺省推导、通知按轮合并且只看语义字段、hold 在扣预算前短路、
+replica 列目录要报错）。复核还查出两个新问题，**都没修、都等维护者拍板**：OQ-35（≥ 2.3.11 归档
+Codex 对话会移走 rollout，本插件拉回来）、OQ-36（≥ 2.3.8 剥离 meta 里的 base64，可能触发 NR-7
+永久冻结）。
+
+ADR-78 按维护者 2026-09-25 接受的七项决定实现（H1–H7 + H9 + 锁传递修复；H8 只读审计与 H10 R2 预警
+留到下一个 PR）：本机收敛过、现在没有的 Claudian 记录不再拉回，判 `SKIP_DELETED_HERE`；记忆在
+`~/.claudian-session-sync/state/<ws>/claudian-records.json`，不随 ledger GC 丢；命令
+「Bring back conversations deleted on this device」撤销。records provider 的兼容告警随之撤掉。
+
+**测试第一次用上「照上游逐行复刻」的 fixture**：`tests/helpers/claudian-2320.ts`，每个 helper
+注明对照的上游文件。**⚠️ 未经真机验收**，步骤在 testing.md §9.12（D1、D11 最要紧）。
+
+**审查推翻了初版的一条设计**：H5 原有第三条解除途径「replica 连续两轮没有就解除」，实现时连见证一起删，
+结果换同步夹、或对端在 replica 暂缺时再推一次，删掉的对话就回来——两位审查者各自复现，判 critical。
+现在 hold 只有「取回」与「本地重现」两条出路，见证永不遗忘。同一轮还修掉：R2 判的是本轮写入之后的状态
+（典型的自删反被判成用户删除）、H3 无限次恢复、记忆文件锁外读写、读不出被当坏文件覆盖、store 重建被当
+成全部删除、sharing 的 base 30 天后被 GC 等。收尾的完整性审查再抓到一条 high：transcript 被 Claude Code
+30 天清理掉的旧对话，删了会被当成 R2 恢复——现在要求至少一份 transcript 在同步夹里（正在路上）才算 R2。教训：**「什么时候可以忘」比「怎么记」更容易错**——
+对端只要还有这份对话，就一定会在 replica 缺它时再推上来，所以「replica 没有了」从来不是「可以忘了」。
 
 ### 发布记录
 
