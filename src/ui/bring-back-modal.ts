@@ -11,7 +11,9 @@
  * folder is still listed in Claudian under that device; bringing its shared
  * copy back gives that device's Claudian two records for one conversation. A
  * record removed by an older Claudian's deletion marker was deleted on
- * another device on purpose. Both are offered, neither is assumed.
+ * purpose, usually on another device — and on a device still running that
+ * Claudian, the marker keeps hiding it even if the record comes back. Both are
+ * offered, neither is assumed.
  */
 import { Modal, Notice, type App } from "obsidian";
 import type { HeldRecordView, PluginRuntime } from "../orchestration/plugin-runtime";
@@ -19,7 +21,7 @@ import type { HeldRecordView, PluginRuntime } from "../orchestration/plugin-runt
 const KIND_TEXT: Record<HeldRecordView["kind"], string> = {
   "deleted-here": "Deleted on this device",
   "moved-to-device": "Assigned to a device (still listed there)",
-  "removed-by-tombstone": "Deleted on a device running an older Claudian",
+  "removed-by-tombstone": "Deleted with a deletion marker (Claudian 2.3.2 or older)",
 };
 
 export class BringBackModal extends Modal {
@@ -99,10 +101,14 @@ export class BringBackModal extends Modal {
     const outcome = await this.runtime.bringBack(rels);
     new Notice(
       outcome.ok
-        ? `Bringing back ${rels.length} conversation(s). Restart Obsidian, or reopen Claudian, to see them listed.`
+        ? `Bringing back ${rels.length} conversation(s). Claudian lists conversations only when it ` +
+            "starts, so restart Obsidian to see them."
         : outcome.reason === "sync-in-progress"
           ? "A sync is running right now. Nothing was changed; try again in a moment."
-          : "Nothing was changed — this vault's sync is not set up right now, or these are no longer held.",
+          : outcome.reason === "provider-off"
+            ? "Nothing was changed — “Claudian conversation records” is off on this device, and only " +
+              "it can bring them back. Turn it on first."
+            : "Nothing was changed — this vault's sync is not set up right now, or these are no longer held.",
     );
     await this.render();
   }

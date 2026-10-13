@@ -186,7 +186,8 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
           "bring back what has already been shared. Claudian's \"Assign to this device\" is " +
           "not supported while this is on — with Claudian 2.3.3 or later, the next sync moves " +
           "the conversation back into the shared layer, or, for one this device shared itself, " +
-          "holds it and lists it under \"Repair shared conversation records\". To keep a " +
+          "leaves it where it is (listed under \"Repair shared conversation records\" while " +
+          "this device still has its own copy). To keep a " +
           "conversation on one device, turn this off and leave it off: turning it back on " +
           "shares it again. And if any of your machines runs Claudian 2.2.6 or earlier, a " +
           "shared conversation also carries the folders it was given access to as absolute " +

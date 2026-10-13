@@ -1,11 +1,13 @@
 /**
- * ADR-78's memory: what it remembers, when it forgets, and what survives a
+ * ADR-78's memory: what it remembers, what ends a hold, and what survives a
  * round trip through the disk.
  *
- * The forgetting rules are the dangerous part. Forgetting a hold early brings
- * a deleted conversation back; never forgetting anything grows a file without
- * bound. So each rule is pinned from both sides, including the one that must
- * not fire: a listing that failed is not evidence that a file is gone.
+ * Forgetting is the dangerous part, and the first version forgot: a record
+ * missing from the sync folder for two passes lost its witness along with its
+ * hold, and the next device to push it — a peer that still had it, or simply
+ * a move to a new sync folder — brought the deletion back (review, 2026-10-14,
+ * reproduced twice). So nothing here forgets on its own any more, and the
+ * tests pin that from the side that used to fail.
  */
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -52,16 +54,28 @@ describe("witnessing", () => {
     state.hold(META, hold(), "sha256:a");
     state.witness(META, "sha256:b");
     expect(state.held(META)).toBeNull();
-    expect(state.witnessedHash(META)).toBe("sha256:b");
+    expect(state.toFile().records[META]?.witnessedHash).toBe("sha256:b");
   });
 
   it("is not a change when nothing moved", () => {
     const state = createClaudianRecordsState({
       schemaVersion: STATE_SCHEMA_VERSION,
-      records: { [META]: { witnessedHash: "sha256:a", goneFromReplicaPasses: 0 } },
+      records: { [META]: { witnessedHash: "sha256:a" } },
     });
     state.witness(META, "sha256:a");
     expect(state.changed()).toBe(false);
+  });
+
+  it("remembers a restore made for missing history only while the bytes are the same", () => {
+    const state = createClaudianRecordsState(emptyClaudianRecords());
+    state.witness(META, "sha256:r");
+    state.markRestoredForMissingHistory(META, "sha256:r");
+    expect(state.restoredForMissingHistory(META, "sha256:r")).toBe(true);
+    state.witness(META, "sha256:r"); // the same bytes, converged again
+    expect(state.restoredForMissingHistory(META, "sha256:r")).toBe(true);
+    state.witness(META, "sha256:newer"); // anything newer is a record the rule has not seen
+    expect(state.restoredForMissingHistory(META, "sha256:r")).toBe(false);
+    expect(state.restoredForMissingHistory(META, "sha256:newer")).toBe(false);
   });
 
   it("is seeded from the ledger's converged hashes, records and tombstones only", () => {
@@ -77,6 +91,18 @@ describe("witnessing", () => {
 });
 
 describe("a hold", () => {
+  it("stops counting once it has nothing left to announce, so an idle hold rewrites nothing", () => {
+    const file = (() => {
+      const state = createClaudianRecordsState(emptyClaudianRecords());
+      state.hold(META, hold(), "sha256:a");
+      state.continueHold(META);
+      return state.toFile();
+    })();
+    const later = createClaudianRecordsState(file);
+    for (let i = 0; i < 5; i++) later.continueHold(META);
+    expect(later.changed()).toBe(false);
+  });
+
   it("is announced exactly once, on its second pass, and only for a deletion", () => {
     const state = createClaudianRecordsState(emptyClaudianRecords());
     state.hold(META, hold(), "sha256:a");
@@ -118,39 +144,28 @@ describe("a hold", () => {
   });
 });
 
-describe("forgetting", () => {
-  const withHold = () => {
+describe("what does not end a hold", () => {
+  it("has no clock and no other way out than the two it names", () => {
+    // Only witness() (the file is here again), release() (it reappeared) and
+    // a bring-back end one. Nothing about time, or about the sync folder.
     const state = createClaudianRecordsState(emptyClaudianRecords());
     state.hold(META, hold(), "sha256:a");
-    return state;
-  };
-
-  it("drops an entry the sync folder has lacked for two complete passes", () => {
-    const state = withHold();
-    state.endPass({ replicaRels: new Set(), complete: true });
-    expect(state.held(META)).not.toBeNull();
-    state.endPass({ replicaRels: new Set(), complete: true });
-    expect(state.witnessed(META)).toBe(false);
-  });
-
-  it("counts nothing on a pass that could not list the folder", () => {
-    const state = withHold();
-    for (let i = 0; i < 5; i++) state.endPass({ replicaRels: new Set(), complete: false });
-    expect(state.held(META)).not.toBeNull();
-  });
-
-  it("starts the count again when the file is seen", () => {
-    const state = withHold();
-    state.endPass({ replicaRels: new Set(), complete: true });
-    state.endPass({ replicaRels: new Set([META]), complete: true });
-    state.endPass({ replicaRels: new Set(), complete: true });
-    expect(state.held(META)).not.toBeNull();
-  });
-
-  it("has no clock: a hold seen in the folder lasts however long", () => {
-    const state = withHold();
-    for (let i = 0; i < 1_000; i++) state.endPass({ replicaRels: new Set([META]), complete: true });
+    for (let i = 0; i < 1_000; i++) state.continueHold(META);
     expect(state.held(META)?.kind).toBe("deleted-here");
+    expect(Object.keys(createClaudianRecordsState(state.toFile()).toFile().records)).toEqual([META]);
+  });
+});
+
+describe("the store's identity", () => {
+  it("says recreated only when it knew a different one", () => {
+    const state = createClaudianRecordsState(emptyClaudianRecords());
+    expect(state.observeStore(null)).toBe(false);
+    expect(state.observeStore("101")).toBe(false); // first sight
+    expect(state.observeStore("101")).toBe(false);
+    expect(state.observeStore(null)).toBe(false); // the store is missing: not a recreation yet
+    expect(state.observeStore("202")).toBe(true);
+    expect(state.observeStore("202")).toBe(false);
+    expect(createClaudianRecordsState(state.toFile()).observeStore("202")).toBe(false);
   });
 });
 
@@ -193,7 +208,7 @@ describe("on disk", () => {
     if (load.status === "loaded") expect(load.file).toEqual(state.toFile());
   });
 
-  it("tells absent, unreadable and newer apart", async () => {
+  it("tells absent, unusable, unreadable and newer apart", async () => {
     const home = homeAt();
     expect((await home.loadClaudianRecords(WS)).status).toBe("absent");
 
@@ -201,6 +216,20 @@ describe("on disk", () => {
     await fsp.mkdir(path.dirname(target), { recursive: true });
     await fsp.writeFile(target, "{ torn");
     expect((await home.loadClaudianRecords(WS)).status).toBe("unusable");
+    await fsp.writeFile(target, "");
+    expect((await home.loadClaudianRecords(WS)).status).toBe("unusable");
+
+    // A file that is there and cannot be read is not a file that is broken:
+    // rebuilding over it would lose every hold the ledger no longer knows.
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      await fsp.writeFile(target, "{}");
+      await fsp.chmod(target, 0o000);
+      try {
+        expect((await home.loadClaudianRecords(WS)).status).toBe("unreadable");
+      } finally {
+        await fsp.chmod(target, 0o600);
+      }
+    }
 
     await fsp.writeFile(target, JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, records: {} }));
     expect((await home.loadClaudianRecords(WS)).status).toBe("newer");
@@ -217,12 +246,11 @@ describe("on disk", () => {
         records: {
           [META]: {
             witnessedHash: "sha256:a",
-            goneFromReplicaPasses: 0,
             hold: { kind: "from-the-future", sinceMs: 1, passes: 1, replicaSize: 1, replicaMtimeMs: 1 },
           },
-          [TOMB]: { goneFromReplicaPasses: 0 },
-          "claude-code/x.jsonl": { witnessedHash: "sha256:x", goneFromReplicaPasses: 0 },
-          "../escape": { witnessedHash: "sha256:x", goneFromReplicaPasses: 0 },
+          [TOMB]: { restoredForMissingHistory: "sha256:t" },
+          "claude-code/x.jsonl": { witnessedHash: "sha256:x" },
+          "../escape": { witnessedHash: "sha256:x" },
         },
       }),
     );

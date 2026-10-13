@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AbsentHereInput,
   type ClaudeHistory,
+  type TranscriptWhere,
   claudeBoundSessionIds,
   claudianRecordOf,
   decideAbsentHere,
@@ -52,6 +53,8 @@ describe("decideAbsentHere", () => {
     witnessed: true,
     releaseRequested: false,
     tombstoneBeside: false,
+    restoredForMissingHistory: false,
+    memoryUnreadable: false,
   };
 
   function probes(answers: { moved?: boolean; history?: ClaudeHistory } = {}) {
@@ -117,7 +120,28 @@ describe("decideAbsentHere", () => {
     expect(asked).toEqual(["moved", "history"]);
   });
 
-  it.each<ClaudeHistory>(["some-present", "unknown", "not-applicable"])(
+  it("restores for missing history only once per version of the record", async () => {
+    // The second removal of bytes this device already restored is the user's:
+    // otherwise a conversation whose history never reaches this device could
+    // never be deleted here (review, 2026-10-14).
+    const { verdict, asked } = await decide({ restoredForMissingHistory: true }, { history: "all-absent" });
+    expect(verdict).toEqual({ verdict: "hold", kind: "deleted-here" });
+    expect(asked).toEqual(["moved"]);
+  });
+
+  it("lands nothing it cannot place while the memory is unreadable, and still holds what it can", async () => {
+    const wait = { verdict: "wait", reason: "memory-unreadable" };
+    expect((await decide({ memoryUnreadable: true, witnessed: false })).verdict).toEqual(wait);
+    expect((await decide({ memoryUnreadable: true, storeHealthy: false })).verdict).toEqual(wait);
+    expect((await decide({ memoryUnreadable: true }, { history: "all-absent" })).verdict).toEqual(wait);
+    expect((await decide({ memoryUnreadable: true })).verdict).toEqual({ verdict: "hold", kind: "deleted-here" });
+    expect((await decide({ memoryUnreadable: true, kind: "inputs" })).verdict).toEqual({
+      verdict: "retired",
+      reason: "retired-sidecar",
+    });
+  });
+
+  it.each<ClaudeHistory>(["some-present", "nowhere", "unknown", "not-applicable"])(
     "holds when the history answer is %s",
     async (history) => {
       expect((await decide({}, { history })).verdict).toEqual({ verdict: "hold", kind: "deleted-here" });
@@ -249,14 +273,16 @@ describe("the session ids Claudian checks before deleting by itself", () => {
 describe("could Claudian have removed it by itself", () => {
   const record = (body: object) => JSON.stringify({ id: CONV, providerId: "claude", ...body });
 
-  function transcripts(present: readonly string[], unknown: readonly string[] = []) {
+  /** Not present and not unknown means in the sync folder, unless listed as nowhere. */
+  function transcripts(present: readonly string[], unknown: readonly string[] = [], nowhere: readonly string[] = []) {
     const asked: string[] = [];
     return {
       asked,
-      probe: async (id: string) => {
+      probe: async (id: string): Promise<TranscriptWhere> => {
         asked.push(id);
-        if (unknown.includes(id)) return "unknown" as const;
-        return present.includes(id) ? ("present" as const) : ("absent" as const);
+        if (unknown.includes(id)) return "unknown";
+        if (nowhere.includes(id)) return "nowhere";
+        return present.includes(id) ? "present" : "arriving";
       },
     };
   }
@@ -268,6 +294,16 @@ describe("could Claudian have removed it by itself", () => {
     // delete it — so a missing record with one segment here was the user.
     expect(await judgeClaudeHistory(body, CONV, transcripts([S2]).probe)).toBe("some-present");
     expect(await judgeClaudeHistory(body, CONV, transcripts([S1]).probe)).toBe("some-present");
+  });
+
+  it("needs the history to be on its way: missing everywhere is not Claudian's doing", async () => {
+    // Claude Code purges transcripts after thirty days, and old conversations
+    // are the ones users clean up. A restore there brings back every delete,
+    // with a promise of history that is not coming (review, 2026-10-14).
+    const body = record({ sessionId: S1, providerState: { previousProviderSessionIds: [S2] } });
+    expect(await judgeClaudeHistory(body, CONV, transcripts([], [], [S1, S2]).probe)).toBe("nowhere");
+    // One segment in the sync folder is enough to be on its way.
+    expect(await judgeClaudeHistory(body, CONV, transcripts([], [], [S1]).probe)).toBe("all-absent");
   });
 
   it("does not guess where the projects folder cannot be read", async () => {
@@ -286,6 +322,11 @@ describe("could Claudian have removed it by itself", () => {
 
   it("is not applicable to records that cannot have been auto-deleted", async () => {
     expect(await judgeClaudeHistory(record({ sessionId: null }), CONV, transcripts([]).probe)).toBe("not-applicable");
+    // The reset shape Claudian writes when its Claude environment changes: no
+    // current session, so upstream's R2 returns "preserve" before it looks at
+    // the old ids — whatever is missing (review, 2026-10-14).
+    const reset = record({ sessionId: null, providerState: { previousProviderSessionIds: [S1, S2] } });
+    expect(await judgeClaudeHistory(reset, CONV, transcripts([]).probe)).toBe("not-applicable");
     const codex = JSON.stringify({ id: CONV, providerId: "codex", sessionId: S1 });
     expect(await judgeClaudeHistory(codex, CONV, transcripts([]).probe)).toBe("not-applicable");
   });
@@ -314,6 +355,13 @@ describe("what counts as another device changing a held record", () => {
     expect(digest(body, 2)).toBe(original); // pretty vs compact (2.3.6)
     expect(digest({ ...body, isArchived: true, isPinned: false })).toBe(original); // auto-archive
     expect(digest({ ...body, subagentData: { a: { result: "stripped" } } })).toBe(original); // 2.3.8
+  });
+
+  it("ignores Claudian moving the same session ids between slots", () => {
+    // clearClaudeResumeState, on every record, when the Claude environment changes.
+    const before = digest({ ...body, sessionId: S1, providerState: { providerSessionId: S1, previousProviderSessionIds: [S3] } });
+    const reset = digest({ ...body, sessionId: null, providerState: { previousProviderSessionIds: [S3, S1] } });
+    expect(reset).toBe(before);
   });
 
   it("notices a new title, a new turn, or a new session", () => {

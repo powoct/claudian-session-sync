@@ -212,8 +212,13 @@ export class PluginRuntime {
   private firstPassDone = false;
   /** Last pass's forks, so the repair screen has something before it re-scans. */
   private sharingHolds: readonly SharingHold[] = [];
-  /** What the last real pass has to say out loud, once (ADR-78 H7). */
-  private announcement: string | null = null;
+  /**
+   * What real passes have had to say out loud (ADR-78 H7), until the host
+   * shows it. A queue, not the last pass's: a pass started by a command —
+   * bring-back, a restore, a resolution — has nobody waiting to show its
+   * pop-up, and the hold it announced is already marked announced.
+   */
+  private announcements: string[] = [];
   private readonly listeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(private readonly host: RuntimeHost) {
@@ -242,8 +247,9 @@ export class PluginRuntime {
    * kept off this device, or brought back without being asked for.
    */
   takeAnnouncement(): string | null {
-    const message = this.announcement;
-    this.announcement = null;
+    if (this.announcements.length === 0) return null;
+    const message = `Claudian Session Sync: ${this.announcements.join(" ")} Details in the sync report.`;
+    this.announcements = [];
     return message;
   }
 
@@ -299,7 +305,6 @@ export class PluginRuntime {
     // After the version is read, because whether a `.deleted.json` may be
     // published depends on it.
     const claudianRecords = this.claudianRecordsProbes(prepared.deps.providers);
-    this.announcement = null;
 
     this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
@@ -336,9 +341,8 @@ export class PluginRuntime {
         leading.length > 0
           ? { ...outcome.report, notices: [...leading, ...outcome.report.notices] }
           : outcome.report;
-      if (!(options.dryRun ?? false)) {
-        this.announcement = announce(outcome.report.claudianRecords);
-      }
+      const announcement = options.dryRun ? null : announce(outcome.report.claudianRecords);
+      if (announcement !== null) this.announcements.push(announcement);
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -542,7 +546,16 @@ export class PluginRuntime {
 
   async backups(): Promise<BackupEntry[]> {
     const deps = await this.conflictDeps();
-    return deps ? listBackups(deps) : [];
+    if (!deps) return [];
+    const load = await (await this.homeStore()).loadClaudianRecords(deps.workspaceId as WorkspaceId);
+    const heldHere = new Set(
+      load.status === "loaded"
+        ? Object.entries(load.file.records)
+            .filter(([, entry]) => entry.hold !== undefined)
+            .map(([rel]) => rel)
+        : [],
+    );
+    return listBackups({ ...deps, heldHere });
   }
 
   /** Everything the folder holds, so the dialog can say what it left out. */
@@ -965,7 +978,7 @@ export class PluginRuntime {
    */
   private async withWriteGate<T>(
     busy: T,
-    body: (mayWriteRemote: () => boolean) => Promise<T>,
+    body: (mayWriteRemote: () => boolean, lock: PassLock | undefined) => Promise<T>,
   ): Promise<T> {
     // Never a dry run: everything behind this gate is a write the user asked
     // for by name, and one of them is "put this version back".
@@ -980,7 +993,7 @@ export class PluginRuntime {
       // `mayWrite()` as well as the fresh probe: the lock can be taken over by
       // another instance mid-operation, and the command re-asks immediately
       // before it writes for the same reason the engine does.
-      return await body(() => fresh);
+      return await body(() => fresh, lock);
     } finally {
       await lock?.release();
     }
@@ -1016,40 +1029,44 @@ export class PluginRuntime {
   }
 
   /**
-   * The two questions ADR-78 asks of this machine's disk, or null when the
+   * The questions ADR-78 asks of this machine's disk, or null when the
    * `claudian` provider is off.
    *
    * The Claude project folder is the one this plugin's own Claude Code
-   * provider would use — the override if one is set, whether or not that
-   * provider is on — because it is the best available stand-in for the folder
-   * Claudian checks before deleting a conversation by itself. Where the two
-   * differ, the answer leans toward restoring (see `judgeClaudeHistory`).
+   * provider writes into — the same path its pulls land at, which the engine
+   * relies on to recognise a transcript it pulled this very pass. With that
+   * provider off there is no probe at all: no transcript from another device
+   * can arrive, so a record restored "for its history" would be restored for
+   * ever. Where this folder and the one Claudian checks differ
+   * (`CLAUDE_CONFIG_DIR`, an override), the answer can be wrong either way —
+   * see ADR-78's residual risks.
    */
   private claudianRecordsProbes(
     providers: readonly ProviderRuntime[],
   ): PassRunnerArgs["claudianRecords"] | null {
     const claudian = providers.find((p) => p.adapter.id === "claudian");
-    const binding = this.binding;
-    if (!claudian || !binding) return null;
-    const { fs, joinPath, homedir, vaultRoot } = this.host;
-    const claudeRoot =
-      binding.providers[CLAUDE_CODE.id]?.rootOverride ??
-      CLAUDE_CODE.defaultRoot({ homedir, vaultRealPath: vaultRoot }, joinPath);
+    if (!claudian) return null;
+    const claudeCode = providers.find((p) => p.adapter.id === CLAUDE_CODE.id);
+    const { fs, joinPath, vaultRoot } = this.host;
+    const syncDir = this.binding?.syncDirPath;
+    const workspaceId = this.identity?.file?.workspaceId;
 
     return {
       markerless: isMarkerless(this.claudianVersion),
-      claudeTranscript: async (sessionId) => {
-        try {
-          // No projects folder is Claudian's "unknown" as well: it does not
-          // delete a conversation it cannot look for.
-          const root = await fs.realpath(claudeRoot).catch(() => null);
-          if (root === null) return "unknown";
-          const dir = claudeCodeProjectDir({ providerRoot: root, vaultRealPath: vaultRoot, joinPath });
-          return (await fs.lstat(joinPath(dir, `${sessionId}.jsonl`))) === null ? "absent" : "present";
-        } catch {
-          return "unknown";
-        }
-      },
+      claudeTranscriptPath:
+        claudeCode && syncDir && workspaceId
+          ? async (sessionId) => {
+              // No projects folder is Claudian's "unknown" as well: it does not
+              // delete a conversation it cannot look for.
+              if ((await fs.lstat(claudeCode.root).catch(() => null)) === null) return null;
+              const dir = claudeCodeProjectDir({ providerRoot: claudeCode.root, vaultRealPath: vaultRoot, joinPath });
+              return {
+                local: joinPath(dir, `${sessionId}.jsonl`),
+                // The Claude Code provider's own name for it in the sync folder.
+                replica: joinPath(syncDir, workspaceId, CLAUDE_CODE.id, `${sessionId}.jsonl`),
+              };
+            }
+          : null,
       // Every device's folder, not only this one's: another device assigning a
       // conversation to itself moves the shared record into its folder, and
       // that is still a move, not a delete.
@@ -1062,6 +1079,12 @@ export class PluginRuntime {
         }
         return false;
       },
+      // The inode, where the filesystem has one: a recreated folder gets a new
+      // one, a folder whose files were deleted keeps its own.
+      storeIdentity: async () => {
+        const st = await fs.lstat(claudian.root).catch(() => null);
+        return st === null || !st.isDirectory || !st.ino ? null : String(st.ino);
+      },
     };
   }
 
@@ -1069,8 +1092,10 @@ export class PluginRuntime {
    * Records this device is keeping off itself, for the bring-back screen.
    *
    * Read-only. Titles are read from the sync folder's copy now, for display,
-   * and never stored or reported. Tombstones are not listed: bringing one
-   * back would only delete its conversation again at Claudian's next launch.
+   * and never stored or reported. Not listed: tombstones, because bringing one
+   * back would only delete its conversation again at Claudian's next launch;
+   * and records the sync folder no longer has, because there is nothing to
+   * bring back — their holds stay, in case a device pushes them again.
    */
   async heldRecords(): Promise<readonly HeldRecordView[]> {
     const binding = this.binding;
@@ -1083,13 +1108,15 @@ export class PluginRuntime {
       const record = claudianRecordOf(rel);
       const hold = entry.hold;
       if (!record || !hold || hold.kind === "tombstone-consumed") continue;
+      const copy = await this.replicaCopy(binding.syncDirPath, workspaceId, rel);
+      if (copy === null) continue;
       views.push({
         neutralRel: rel,
         conversationId: record.conversationId,
         kind: hold.kind,
         sinceMs: hold.sinceMs,
         releaseRequested: hold.releaseRequested,
-        title: await this.replicaTitle(binding.syncDirPath, workspaceId, rel),
+        title: copy.title,
       });
     }
     return views.sort((a, b) => b.sinceMs - a.sinceMs);
@@ -1098,14 +1125,18 @@ export class PluginRuntime {
   /**
    * Asks the next pass to land these records again (ADR-78 H5).
    *
-   * Under the write gate, because a pass that is running now would save its
-   * own copy of the memory over this one; then a pass, so the user sees the
-   * result rather than a promise. The pass lands each with the same
-   * no-replace create a new record gets — it cannot overwrite anything.
+   * Under the write gate: a pass loads and saves the memory while it holds
+   * the same lock, so the request can neither land in the middle of a pass
+   * nor be saved over by one. Then a pass, so the user sees the result
+   * rather than a promise. The pass lands each with the same no-replace
+   * create a new record gets — it cannot overwrite anything.
    */
   async bringBack(rels: readonly string[]): Promise<BringBackOutcome> {
     const workspaceId = this.identity?.file?.workspaceId;
     if (!workspaceId) return { ok: false, reason: "unavailable" };
+    // Only a pass with the provider on reads the request, so marking it now
+    // would be a promise kept at some unannounced later date.
+    if (!this.providerEnabled("claudian")) return { ok: false, reason: "provider-off" };
     const marked = await this.withWriteGate<BringBackOutcome | null>(
       { ok: false, reason: "sync-in-progress" },
       async () => {
@@ -1125,16 +1156,22 @@ export class PluginRuntime {
     return { ok: true };
   }
 
-  private async replicaTitle(syncDirPath: string, workspaceId: string, rel: string): Promise<string | null> {
+  /** The sync folder's copy, with its title when it can be read; null when there is none. */
+  private async replicaCopy(
+    syncDirPath: string,
+    workspaceId: string,
+    rel: string,
+  ): Promise<{ readonly title: string | null } | null> {
     const target = this.host.joinPath(syncDirPath, workspaceId, ...rel.split("/"));
     const stat = await this.host.fs.lstat(target).catch(() => null);
-    if (stat === null || !stat.isFile || stat.size > this.settings.maxFileSizeMB * 1024 * 1024) return null;
+    if (stat === null || !stat.isFile) return null;
+    if (stat.size > this.settings.maxFileSizeMB * 1024 * 1024) return { title: null };
     try {
       const parsed: unknown = JSON.parse(new TextDecoder().decode(await this.host.fs.readFile(target)));
       const title = (parsed as { title?: unknown } | null)?.title;
-      return typeof title === "string" && title.length > 0 ? title : null;
+      return { title: typeof title === "string" && title.length > 0 ? title : null };
     } catch {
-      return null;
+      return { title: null };
     }
   }
 
@@ -1236,7 +1273,7 @@ export class PluginRuntime {
     if (outcome.holds.length > 0) {
       notices.push(
         `${outcome.holds.length} conversation record(s) on this device are not being shared, ` +
-          "because the shared copy was changed or removed since this machine shared it. Run " +
+          "because the copy in the shared layer differs from this device's, or was removed. Run " +
           '"Repair shared conversation records" to see them and choose.',
       );
     }
@@ -1342,12 +1379,17 @@ export class PluginRuntime {
     // reviewer flagged that both landed on one sentence, and said not to trust
     // the dialog — a screen a careful reader is told to disbelieve is a bug.
     const one = new Set([conversationId]);
-    return this.withWriteGate<PublishOutcome>({ ok: false, reason: "sync-in-progress" }, async () => {
-      const run = await this.runSharing({ forced: one, only: one, inspectOnly: false });
+    return this.withWriteGate<PublishOutcome>({ ok: false, reason: "sync-in-progress" }, async (_, lock) => {
+      // The gate's lock goes in, so every write the click makes is re-checked
+      // against it, exactly as a pass's are.
+      const run = await this.runSharing({ forced: one, only: one, inspectOnly: false, ...(lock ? { lock } : {}) });
       if (run === null) return { ok: false, reason: "unavailable" };
-      // `moved` as well as `folded`: a record another device removed from the
-      // shared layer is published by the original move, not by a fold.
-      if (run.outcome.folded + run.outcome.moved > 0) return { ok: true };
+      // Counted at the write, not at the device copy's removal afterwards. A
+      // record another device removed from the shared layer is put back by
+      // the original move, which replaces nothing.
+      const { created, replaced } = run.outcome.sharedWrites;
+      if (replaced > 0) return { ok: true, replaced: true };
+      if (created > 0) return { ok: true, replaced: false };
       return { ok: false, reason: "changed-again" };
     });
   }
@@ -1546,8 +1588,9 @@ const NOT_READY_MESSAGES: Record<NotReadyReason, string> = {
     "The sync folder is holding fewer files than before. Usually this is a download still in " +
     "progress; syncing resumes on its own once the count stops falling.",
   "NR-7-byte-count-dropped":
-    "The sync folder is holding fewer bytes than before. Usually a download in progress; " +
-    "syncing resumes on its own.",
+    "The sync folder is holding fewer bytes than before. Usually a download in progress, and " +
+    "syncing resumes once the bytes are back. If they will not come back — Claudian 2.3.8 and " +
+    "later shrink conversation records that carried images — see this plugin's README.",
   "NR-8-remote-regression":
     "A file in the sync folder that had content is now empty. That is a sync-tool problem, not " +
     "a change anyone made, so nothing is copied over it.",
@@ -1592,9 +1635,9 @@ export interface HeldRecordView {
 
 export type BringBackOutcome =
   | { readonly ok: true }
-  | { readonly ok: false; readonly reason: "sync-in-progress" | "unavailable" };
+  | { readonly ok: false; readonly reason: "sync-in-progress" | "unavailable" | "provider-off" };
 
-/** The pop-up for a pass's ADR-78 news, or null when it has none. */
+/** The pop-up text for a pass's ADR-78 news, or null when it has none. */
 function announce(summary: ClaudianRecordsSummary | undefined): string | null {
   if (!summary) return null;
   const parts: string[] = [];
@@ -1611,12 +1654,11 @@ function announce(summary: ClaudianRecordsSummary | undefined): string | null {
   }
   if (summary.restoredHistoryMissing > 0) {
     parts.push(
-      `${summary.restoredHistoryMissing} conversation(s) that Claudian removed by itself, because ` +
-        "their history had not arrived, were restored.",
+      `${summary.restoredHistoryMissing} conversation(s) whose history had not reached this device yet ` +
+        "were restored — Claudian may have removed them by itself.",
     );
   }
-  if (parts.length === 0) return null;
-  return `Claudian Session Sync: ${parts.join(" ")} Details in the sync report.`;
+  return parts.length === 0 ? null : parts.join(" ");
 }
 
 function describe(error: unknown): string {

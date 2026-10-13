@@ -518,6 +518,7 @@ export function planOpaque(input: OpaquePlanInput): PlanResult {
     const here = input.absentHere;
     if (here?.verdict === "hold") return result("SKIP_DELETED_HERE", here.kind, flags);
     if (here?.verdict === "retired") return result("SKIP_RETIRED", here.reason, flags);
+    if (here?.verdict === "wait") return result("DEFER", here.reason, flags);
     return result("PULL_NEW", here?.reason ?? "remote-only", flags);
   }
 

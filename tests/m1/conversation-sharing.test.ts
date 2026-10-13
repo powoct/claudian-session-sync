@@ -157,6 +157,7 @@ describe("ADR-69: sharing by moving the record", () => {
       folded: 0,
       retired: 0,
       tombstoned: 0,
+      sharedWrites: { created: 0, replaced: 0 },
       heldBack: [],
       holds: [],
       published: null,
@@ -588,6 +589,9 @@ describe("ADR-78 H9: a shared record that is gone is someone's decision", () => 
     expect(await read(deviceRecord(root, DEVICE, CONV))).not.toBeNull();
     expect(outcome.holds.map((h) => [h.conversationId, h.sharedPath, h.resolvable])).toEqual([[CONV, null, true]]);
     expect(outcome.heldBack.join("\n")).toContain("not shared again");
+    // This device's own folder holds the record — it always does in this row
+    // — and that is not an assignment to another device.
+    expect(outcome.heldBack.join("\n")).not.toContain("assigned to another device");
   });
 
   it("keeps the base, so the hold outlives the thirty-day forgetting", async () => {
@@ -613,7 +617,26 @@ describe("ADR-78 H9: a shared record that is gone is someone's decision", () => 
 
     const forced = await run(root, { published, forced: new Set([CONV]), only: new Set([CONV]) });
     expect(forced.moved).toBe(1);
+    expect(forced.sharedWrites).toEqual({ created: 1, replaced: 0 });
     expect(await read(sharedRecord(root, CONV))).toContain("one, again");
+  });
+
+  it("counts the publish at the write, even when the device copy cannot be cleared after", async () => {
+    // The click published; the device copy's removal afterwards is a separate
+    // step, and losing the lock (or Claudian writing it) there must not turn
+    // a done publish into "Not published" (review, 2026-10-14).
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+    let calls = 0;
+    const outcome = await run(root, {
+      published,
+      forced: new Set([CONV]),
+      only: new Set([CONV]),
+      mayWrite: async () => ++calls <= 2,
+    });
+    expect(await read(sharedRecord(root, CONV))).toContain("one, again");
+    expect(outcome.moved).toBe(0);
+    expect(outcome.sharedWrites).toEqual({ created: 1, replaced: 0 });
   });
 
   it("names an assignment to another device as one", async () => {
@@ -623,6 +646,36 @@ describe("ADR-78 H9: a shared record that is gone is someone's decision", () => 
 
     const outcome = await run(root, { published });
     expect(outcome.heldBack.join("\n")).toContain("assigned to another device");
+    // And it cannot be published from here: that device reads its own folder
+    // first, so a shared copy would be a second live record it ignores.
+    expect(outcome.holds.map((h) => h.resolvable)).toEqual([false]);
+  });
+
+  it("keeps the base for as long as the shared record exists, not only while a device copy does", async () => {
+    // After the first restart following a move there is no device copy, and
+    // nothing used to refresh the base: thirty days on it was gone, and a
+    // delete or assignment after that was published again (review, 2026-10-14).
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one" });
+    expect((await run(root)).moved).toBe(1);
+    const published = await baseFrom(root, CONV);
+
+    const month = 31 * 24 * 60 * 60 * 1000;
+    const quiet = await run(root, { published, nowMs: NOW + month });
+    expect(quiet.published?.records[CONV]?.lastSeenMs).toBe(NOW + month);
+
+    // Another device deletes it; this device's stale target writes a copy.
+    await fsp.rm(sharedRecord(root, CONV));
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one, again" });
+    const kept = Object.fromEntries(
+      Object.entries(quiet.published?.records ?? {}).map(([id, entry]) => [
+        id,
+        { publishedHash: entry.publishedHash, publishedSize: entry.publishedSize },
+      ]),
+    );
+    const later = await run(root, { published: kept, nowMs: NOW + 2 * month });
+    expect(later.moved).toBe(0);
+    expect(await read(sharedRecord(root, CONV)), "published again").toBeNull();
   });
 
   it("still makes the first move of a record it never published", async () => {

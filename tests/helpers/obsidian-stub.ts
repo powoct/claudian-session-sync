@@ -22,6 +22,8 @@ export class FakeElement {
    * failing when the UI stops disabling things.
    */
   disabled = false;
+  /** For checkboxes, which the bring-back screen ticks by default. */
+  checked = false;
 
   setText(text: string): this {
     this.textContent = text;
@@ -47,6 +49,14 @@ export class FakeElement {
     if (attrs?.text !== undefined) child.textContent = attrs.text;
     this.children.push(child);
     return child;
+  }
+
+  /** Obsidian's `appendText`: text after the element's children. */
+  appendText(text: string): void {
+    const node = new FakeElement();
+    node.tag = "#text";
+    node.textContent = text;
+    this.children.push(node);
   }
 
   createDiv(attrs?: { text?: string }): FakeElement {

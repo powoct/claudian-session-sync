@@ -42,6 +42,7 @@ import {
   type LedgerEntryView,
   type LedgerView,
   type MintOutcome,
+  type PassLock,
   runPass,
 } from "../../src/orchestration/sync-engine";
 import {
@@ -281,6 +282,9 @@ export class Machine {
       extraAdapters?: readonly ProviderAdapter[];
       localQuietMs?: number;
       remoteQuietMs?: number;
+      /** A lock of the test's own, for asserting what happens inside it. */
+      lock?: PassLock;
+      claudianRecords?: EngineDeps["claudianRecords"];
     } = {},
   ): Promise<PassReport> {
     // Load, run, write back — the real shape of a pass, and the reason this is
@@ -288,7 +292,12 @@ export class Machine {
     // manifest has to be genuinely read from and written to disk for that test
     // to be testing anything.
     const cache = await this.loadEvidence();
-    const deps = { ...this.engineDeps(options), evidence: cache };
+    const deps = {
+      ...this.engineDeps(options),
+      evidence: cache,
+      ...(options.lock ? { lock: options.lock } : {}),
+      ...(options.claudianRecords ? { claudianRecords: options.claudianRecords } : {}),
+    };
 
     let report: PassReport;
     if (!options.withLock) {

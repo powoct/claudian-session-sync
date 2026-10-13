@@ -213,6 +213,12 @@ function describeNextSync(backup: BackupEntry): string {
         "either copies this version to your other machines or asks you to choose between " +
         "them — there is no way to merge the two."
       );
+    case "held-here":
+      return (
+        "This machine is keeping this conversation off itself because it was deleted here, so " +
+        "the next sync does not copy it here. Run \"Bring back conversations deleted on this " +
+        "device\" if you want it back on this machine."
+      );
     default:
       return "What the next sync will do with it cannot be worked out from here.";
   }

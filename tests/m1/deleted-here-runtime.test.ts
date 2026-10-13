@@ -15,7 +15,7 @@ import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionEntry, PassReport } from "../../src/orchestration/pass-report";
-import { RuntimeHarness } from "../helpers/runtime-harness";
+import { type HarnessOptions, RuntimeHarness } from "../helpers/runtime-harness";
 import {
   assignToDevice,
   autoArchiveRewrite,
@@ -39,8 +39,12 @@ afterEach(async () => {
   while (machines.length) await machines.pop()?.dispose();
 });
 
-async function machine(version = "2.3.20", peerOf?: RuntimeHarness): Promise<RuntimeHarness> {
-  const m = peerOf ? await RuntimeHarness.createPeer(peerOf) : await RuntimeHarness.create();
+async function machine(
+  version = "2.3.20",
+  peerOf?: RuntimeHarness,
+  options: HarnessOptions = {},
+): Promise<RuntimeHarness> {
+  const m = peerOf ? await RuntimeHarness.createPeer(peerOf, options) : await RuntimeHarness.create(options);
   machines.push(m);
   if (!peerOf) await m.configure();
   await m.installClaudian(version);
@@ -162,6 +166,35 @@ describe("a conversation deleted here", () => {
     expect(seen.rows.some((r) => r.action === "SKIP_DELETED_HERE")).toBe(false);
   }, 60_000);
 
+  it("keeps no conversation text in its memory", async () => {
+    const a = await machine();
+    const sentinel = "Sentinel title 7f3a — never in a state file";
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: sentinel, lastActivityAt: 1 });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 2);
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    const memory = await fsp.readFile(
+      path.join(a.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json"),
+      "utf8",
+    );
+    expect(memory).toContain("deleted-here");
+    expect(memory).not.toContain("Sentinel");
+    expect(memory).not.toContain("7f3a");
+  }, 60_000);
+
+  it("does not announce from a dry run", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await pass(a); // the hold's first pass
+    await a.runtime.syncNow({ dryRun: true }); // would be its second
+    expect(a.runtime.takeAnnouncement()).toBeNull();
+    const { announcement } = await pass(a); // the real second pass still announces
+    expect(announcement ?? "").toContain("you deleted on this device");
+  }, 60_000);
+
   it("changes nothing on disk in a dry run", async () => {
     const a = await machine();
     await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
@@ -213,6 +246,13 @@ describe("assigned, not deleted", () => {
     expect(assigned.announcements, "a move is not a deletion to announce").toEqual([]);
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
 
+    // The shared copy changing while it is held as moved is not "changed
+    // after you deleted it": nothing here was deleted.
+    const replica = await replicaOf(a, `${CONV}.meta.json`);
+    await fsp.writeFile(replica, JSON.stringify({ id: CONV, providerId: "codex", sessionId: null, title: "renamed" }));
+    const edited = await restarts(a, 1);
+    expect(edited.notices.some((n) => n.includes("changed on another device"))).toBe(false);
+
     await deleteRecord(a, CONV, { device: DEVICE });
     await restarts(a, 2);
     expect(await visibleToClaudian(a, DEVICE)).not.toContain(CONV);
@@ -220,17 +260,45 @@ describe("assigned, not deleted", () => {
 });
 
 describe("Claude's own automatic delete is not the user's (H3)", () => {
-  async function deletedClaudeRecord(transcriptHere: boolean) {
-    const a = await machine();
+  /** Where the transcript is when the record goes; `arriving` = in the sync folder only. */
+  type Where = "here" | "arriving" | "nowhere";
+
+  /**
+   * `arriving` keeps it arriving: writes of it into this machine's project
+   * folder fail, the way a history that has not landed yet looks for as long
+   * as a test needs it to — it never turns into `here` and masks the rule.
+   */
+  async function claudeRecordWithHistory(where: Where) {
+    let projectDir: string | null = null;
+    const a = await machine("2.3.20", undefined, {
+      failWrite: (target) => where === "arriving" && projectDir !== null && target.startsWith(projectDir),
+    });
+    projectDir = a.projectDir;
     await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
-    if (transcriptHere) await fsp.writeFile(a.sessionPath(S1), '{"type":"user"}\n');
+    if (where === "here") await fsp.writeFile(a.sessionPath(S1), '{"type":"user"}\n');
     await a.settle();
+    if (where === "arriving") {
+      const ws = (await a.runtime.refresh()).workspaceId as string;
+      await fsp.mkdir(path.join(a.syncDir, ws, "claude-code"), { recursive: true });
+      await fsp.writeFile(path.join(a.syncDir, ws, "claude-code", `${S1}.jsonl`), '{"type":"user"}\n');
+    }
+    return a;
+  }
+
+  async function deletedClaudeRecord(where: Where) {
+    const a = await claudeRecordWithHistory(where);
     await deleteRecord(a, CONV);
     return { a, seen: await restarts(a, 1) };
   }
 
+  it("keeps it deleted when its history is nowhere — what Claude Code's thirty-day purge leaves", async () => {
+    const { a, seen } = await deletedClaudeRecord("nowhere");
+    expect(await exists(local(a, `${CONV}.meta.json`)), "restored for a history that is not coming").toBe(false);
+    expect(seen.notices.some((n) => n.includes("removed them by itself"))).toBe(false);
+  }, 60_000);
+
   it("restores it, with a notice, when every bound transcript is missing here", async () => {
-    const { a, seen } = await deletedClaudeRecord(false);
+    const { a, seen } = await deletedClaudeRecord("arriving");
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
     expect(seen.rows.find((r) => r.neutralRel === META && r.action === "PULL_NEW")?.reason).toBe(
       "remote-only-history-not-here",
@@ -240,9 +308,103 @@ describe("Claude's own automatic delete is not the user's (H3)", () => {
   }, 60_000);
 
   it("keeps it deleted when its transcript is here — Claudian would only have reset it", async () => {
-    const { a } = await deletedClaudeRecord(true);
+    const { a } = await deletedClaudeRecord("here");
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
   }, 60_000);
+
+  it("does not claim a restore in a dry run", async () => {
+    const a = await claudeRecordWithHistory("arriving");
+    await deleteRecord(a, CONV);
+    await a.runtime.syncNow({ dryRun: true });
+    const report = a.runtime.lastPassReport() as PassReport;
+    expect(report.actions.find((r) => r.neutralRel === META)?.reason).toBe("remote-only-history-not-here");
+    expect(report.notices.some((n) => n.includes("were restored here"))).toBe(false);
+    expect(a.runtime.takeAnnouncement()).toBeNull();
+  }, 60_000);
+
+  it("restores it only once: deleting it again keeps it deleted", async () => {
+    const { a } = await deletedClaudeRecord("arriving");
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
+    // A full read re-witnesses the restored bytes; the once-only mark must
+    // survive that, or a scrub between the two deletes undoes the rule.
+    await a.runtime.syncNow({ verifyAll: true });
+    await deleteRecord(a, CONV);
+    const again = await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "a delete that can never stick").toBe(false);
+    expect(again.rows.find((r) => r.neutralRel === META && r.action === "SKIP_DELETED_HERE")?.reason).toBe(
+      "deleted-here",
+    );
+
+    // Brought back by hand and deleted once more: still the user's delete.
+    // The bring-back lands the same bytes, and must not wipe the mark that
+    // says they were already restored once for their missing history.
+    expect(await a.runtime.bringBack([META])).toEqual({ ok: true });
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
+    await deleteRecord(a, CONV);
+    await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "restored for its history a second time").toBe(false);
+  }, 60_000);
+
+  it("does not restore when no transcript can ever arrive here (the Claude Code provider is off)", async () => {
+    const a = await machine();
+    await a.runtime.setProvider("claude-code", { enabled: false });
+    await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 60_000);
+
+  it("holds when there is no projects folder to look in — Claudian would not delete then either", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
+    await a.settle();
+    await fsp.rm(a.providerRoot, { recursive: true });
+    await deleteRecord(a, CONV);
+    await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "restored on a guess").toBe(false);
+  }, 60_000);
+
+  it("looks in the projects folder the Claude Code provider is set to use", async () => {
+    const a = await machine();
+    const elsewhere = path.join(a.root, "claude-elsewhere");
+    const dir = path.join(elsewhere, path.basename(a.projectDir));
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${S1}.jsonl`), '{"type":"user"}\n');
+    await a.runtime.setProvider("claude-code", { enabled: true, rootOverride: elsewhere });
+    await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 2);
+    // The history is here, in the override: Claudian would have reset the
+    // record, not deleted it, so the user did.
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 60_000);
+
+  it("counts a transcript this same pass pulled as not there — the typical R2", async () => {
+    // B's record arrives first, its history a pass later. Claudian on A is
+    // asked to resume before the history lands, finds nothing, and removes
+    // the record. The very next pass pulls the history (Claude Code runs
+    // before Claudian) and then judges the record — and must not read its own
+    // pull as "the history was here" (review, 2026-10-14).
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
+    await a.settle();
+    const b = await machine("2.3.20", a);
+    await b.settle();
+    await fsp.writeFile(b.sessionPath(S1), '{"type":"user","text":"hello"}\n');
+    for (let i = 0; i < 3; i++) await pass(b);
+
+    // A sees the history for the first time: too fresh to copy yet.
+    const first = await pass(a);
+    expect(first.report.actions.find((r) => r.neutralRel === `claude-code/${S1}.jsonl`)?.action).toBe("DEFER");
+    await deleteRecord(a, CONV); // R2
+
+    const { report } = await pass(a);
+    expect(report.actions.find((r) => r.neutralRel === `claude-code/${S1}.jsonl`)?.action).toBe("PULL_NEW");
+    expect(report.actions.find((r) => r.neutralRel === META)?.reason).toBe("remote-only-history-not-here");
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
+  }, 90_000);
 });
 
 describe("another device keeps using a conversation deleted here", () => {
@@ -281,6 +443,7 @@ describe("another device keeps using a conversation deleted here", () => {
     const seen = await restarts(a, 1);
     expect(seen.notices.filter((n) => n.includes("changed on another device"))).toHaveLength(1);
     expect(seen.notices.find((n) => n.includes("changed on another device"))).toContain(CONV);
+    expect(seen.announcements.join(" ")).toContain("changed on another device");
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
   }, 90_000);
 
@@ -293,13 +456,47 @@ describe("another device keeps using a conversation deleted here", () => {
     const held = await a.runtime.heldRecords();
     expect(held.map((h) => [h.conversationId, h.kind, h.title])).toEqual([[CONV, "deleted-here", "renamed there"]]);
     expect(await a.runtime.bringBack(held.map((h) => h.neutralRel))).toEqual({ ok: true });
-    await pass(a);
+    // The command runs its own pass: the record is back before any timer.
+    expect(await exists(local(a, `${CONV}.meta.json`)), "bring-back waited for the next sync").toBe(true);
 
     expect(JSON.parse(await fsp.readFile(local(a, `${CONV}.meta.json`), "utf8")).title).toBe("renamed there");
     expect(await a.runtime.heldRecords()).toEqual([]);
     await restarts(a, 1);
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
   }, 90_000);
+});
+
+describe("bringing back", () => {
+  it("refuses, and says why, while the records provider is off", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+    const held = await a.runtime.heldRecords();
+    await a.runtime.setProvider("claudian", { enabled: false });
+    expect(await a.runtime.bringBack(held.map((h) => h.neutralRel))).toEqual({ ok: false, reason: "provider-off" });
+  }, 60_000);
+
+  it("keeps the pop-up of a pass it started itself, for the next time the host asks", async () => {
+    const a = await machine();
+    const OTHER = "conv-1786422687000-another";
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await saveRecord(a, OTHER, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+    a.runtime.takeAnnouncement();
+
+    await deleteRecord(a, OTHER);
+    await pass(a); // OTHER's hold starts
+    a.runtime.takeAnnouncement();
+    // Bringing CONV back runs a pass: OTHER's second, the one that announces.
+    // Nobody shows it then; the next timer pass must not throw it away.
+    await a.runtime.bringBack([META]);
+    await a.runtime.syncNow();
+    expect(a.runtime.takeAnnouncement() ?? "").toContain("you deleted on this device");
+  }, 60_000);
 });
 
 describe("deletion markers from Claudian 2.3.2 and older", () => {
@@ -339,7 +536,13 @@ describe("deletion markers from Claudian 2.3.2 and older", () => {
     await b.settle();
 
     await legacyPeerDelete(b, CONV);
-    await restarts(b, 1, { migrates: false });
+    const onB = await restarts(b, 1, { migrates: false });
+    // On the 2.3.2 device itself the marker is local, and its own delete is
+    // held silently: that Claudian hides the record by the marker anyway.
+    expect(new Set(onB.rows.filter((r) => r.neutralRel === META).map((r) => `${r.action}/${r.reason}`))).toEqual(
+      new Set(["SKIP_DELETED_HERE/removed-by-tombstone"]),
+    );
+    expect(onB.announcements).toEqual([]);
     const seen = await restarts(a, 2);
 
     expect(await visibleToClaudian(a, null)).not.toContain(CONV);
@@ -368,9 +571,61 @@ describe("deletion markers from Claudian 2.3.2 and older", () => {
   }, 90_000);
 });
 
-describe("forgetting a hold", () => {
+describe("what does not end a hold", () => {
+  async function heldX() {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    const KEEP = "conv-1786422687000-keepme";
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    const bytes = await fsp.readFile(local(a, `${CONV}.meta.json`));
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+    return { a, bytes };
+  }
+
+  it("is not the sync folder losing the record: a device that pushes it again later is kept out", async () => {
+    // The first version forgot the whole entry after two passes without the
+    // file, witness included — and a peer that still had the conversation
+    // brought it straight back (review, 2026-10-14, reproduced twice).
+    const { a, bytes } = await heldX();
+    const replica = await replicaOf(a, `${CONV}.meta.json`);
+    await fsp.rm(replica);
+    const gone = await restarts(a, 2);
+    expect(gone.rows.some((r) => r.neutralRel === META)).toBe(false);
+    // Nothing to bring back while the folder lacks it, so it is not offered…
+    expect(await a.runtime.heldRecords()).toEqual([]);
+
+    // …and when another device pushes it again, it stays off — silently,
+    // because the user was told the first time.
+    await fsp.writeFile(replica, bytes);
+    const back = await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "a peer's push brought it back").toBe(false);
+    expect(back.announcements).toEqual([]);
+    expect(back.rows.filter((r) => r.neutralRel === META).map((r) => r.action)).toContain("SKIP_DELETED_HERE");
+  }, 90_000);
+
+  it("is not a move to a new sync folder", async () => {
+    const { a, bytes } = await heldX();
+    const fresh = path.join(a.root, "sync-2");
+    await fsp.mkdir(fresh, { recursive: true });
+    await a.runtime.setSyncDir(fresh);
+    await a.runtime.initialiseSyncDir();
+    await a.settle();
+    await restarts(a, 2);
+
+    // Much later a device that still has it moves to the new folder too.
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    await fsp.mkdir(path.join(fresh, ws, "claudian"), { recursive: true });
+    await fsp.writeFile(path.join(fresh, ws, "claudian", `${CONV}.meta.json`), bytes);
+    await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "a new sync folder undid the delete").toBe(false);
+  }, 90_000);
+});
+
+describe("an unreadable memory", () => {
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
-    "does not count a pass whose listing of the sync folder failed",
+    "lands nothing it cannot place, and is not overwritten",
     async () => {
       const a = await machine();
       await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
@@ -378,29 +633,94 @@ describe("forgetting a hold", () => {
       await deleteRecord(a, CONV);
       await restarts(a, 1);
 
-      // Traversable and writable, but not listable: the walk fails while every
-      // stat inside still works, so the passes run in full. (0o000 would fail
-      // the stats too, abort every pass, and prove nothing.)
-      const folder = path.dirname(await replicaOf(a, `${CONV}.meta.json`));
-      await fsp.chmod(folder, 0o311);
-      try {
-        for (let i = 0; i < 3; i++) {
-          await pass(a);
-          expect(a.runtime.lastPassReport()?.outcome, "the pass must actually run").not.toBe("aborted");
-        }
-      } finally {
-        await fsp.chmod(folder, 0o755);
-      }
-      // The ledger remembers the record on its own; take it away, so that only
-      // the memory can keep the hold.
       const ws = (await a.runtime.refresh()).workspaceId as string;
-      await fsp.rm(path.join(a.homedir, ".claudian-session-sync", "state", ws, "observations.json"));
-      a.restart();
+      const memory = path.join(a.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json");
+      const before = await fsp.readFile(memory, "utf8");
+      // Thirty-one quiet days: the ledger has forgotten the record, so only
+      // the memory knows it was deleted here.
+      a.advanceClock(31 * DAY_MS);
       await restarts(a, 1);
-      expect(await exists(local(a, `${CONV}.meta.json`)), "an unreadable folder released the hold").toBe(false);
+
+      await fsp.chmod(memory, 0o000);
+      let report: PassReport;
+      try {
+        ({ report } = await pass(a));
+        ({ report } = await pass(a));
+      } finally {
+        await fsp.chmod(memory, 0o600);
+      }
+      expect(report.notices.some((n) => n.includes("could not be opened"))).toBe(true);
+      expect(await exists(local(a, `${CONV}.meta.json`)), "landed while the memory was unreadable").toBe(false);
+      expect(await fsp.readFile(memory, "utf8"), "a rebuild was saved over it").toBe(before);
+
+      await restarts(a, 1);
+      expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
     },
-    60_000,
+    90_000,
   );
+});
+
+describe("the restore screen, for a record held here", () => {
+  it("does not promise that restoring the sync folder's copy brings it to this machine", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "one" });
+    await a.settle();
+    // A rewrite here fast-forwards the sync folder's copy, backing up the old.
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "two" });
+    await restarts(a, 1);
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+
+    const backup = (await a.runtime.backups()).find((b) => b.neutralRel === META && b.remote);
+    expect(backup, "no backup of the sync folder's copy to look at").toBeDefined();
+    expect(backup?.outcome).toBe("held-here");
+  }, 60_000);
+});
+
+describe("a memory written by a newer build", () => {
+  it("is used, never written, and said", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await a.settle();
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    const memory = path.join(a.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json");
+    const newer = JSON.stringify({ schemaVersion: 999, records: {}, fromTheFuture: true });
+    await fsp.writeFile(memory, newer);
+    await deleteRecord(a, CONV);
+    const seen = await restarts(a, 1);
+    expect(seen.notices.some((n) => n.includes("written by a newer version"))).toBe(true);
+    expect(await fsp.readFile(memory, "utf8")).toBe(newer);
+    // Still kept off, from what the ledger knows.
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 60_000);
+});
+
+describe("a recreated store", () => {
+  it("restores what is missing from it, and keeps holding what was deleted before", async () => {
+    // A vault downloaded again, or `.claudian` removed: Claudian recreates the
+    // folder on its first save, and every record missing from it at once is
+    // not the user deleting them.
+    const a = await machine();
+    const KEEP = "conv-1786422687000-keepme";
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+
+    // A new folder — a new inode — before the old one goes, so the test does
+    // not depend on the filesystem reusing inode numbers.
+    const old = `${store(a)}-old`;
+    await fsp.rename(store(a), old);
+    await fsp.mkdir(path.join(store(a), "devices", DEVICE), { recursive: true });
+    await fsp.rm(old, { recursive: true });
+
+    const seen = await restarts(a, 2);
+    expect(seen.notices.some((n) => n.includes("was recreated"))).toBe(true);
+    expect(await exists(local(a, `${KEEP}.meta.json`)), "kept off a recreated store").toBe(true);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "a deletion undone by the recreation").toBe(false);
+    expect(seen.announcements).toEqual([]);
+  }, 90_000);
 });
 
 describe("the sharing step runs under the pass's own lock (pre-1)", () => {
@@ -433,7 +753,7 @@ describe("the sharing step runs under the pass's own lock (pre-1)", () => {
   }, 60_000);
 });
 
-describe("the other ways a hold ends, and one it must not", () => {
+describe("the ways a hold ends", () => {
   async function held() {
     const a = await machine();
     await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "kept" });
@@ -455,13 +775,6 @@ describe("the other ways a hold ends, and one it must not", () => {
     expect(await a.runtime.heldRecords()).toEqual([]);
     const seen = await restarts(a, 1);
     expect(seen.rows.some((r) => r.action === "SKIP_DELETED_HERE")).toBe(false);
-  }, 60_000);
-
-  it("ends when the sync folder loses the record as well", async () => {
-    const { a } = await held();
-    await fsp.rm(await replicaOf(a, `${CONV}.meta.json`));
-    await restarts(a, 1);
-    expect(await a.runtime.heldRecords()).toEqual([]);
   }, 60_000);
 
   it("is rebuilt from the ledger, and said once, when the memory file is unreadable", async () => {
@@ -544,7 +857,38 @@ describe("publishing a held shared record from the repair screen (ADR-78 H9)", (
     expect(await exists(local(a, `${CONV}.meta.json`)), "published again on its own").toBe(false);
     expect((await a.runtime.sharingConflicts()).map((h) => h.conversationId)).toEqual([CONV]);
 
-    expect(await a.runtime.publishSharedRecord(CONV)).toEqual({ ok: true });
+    expect(await a.runtime.publishSharedRecord(CONV)).toEqual({ ok: true, replaced: false });
     expect(JSON.parse(await fsp.readFile(local(a, `${CONV}.meta.json`), "utf8")).title).toBe("two");
+  }, 60_000);
+
+  it("stops when the lock is taken over while it works", async () => {
+    let steal: (() => Promise<void>) | null = null;
+    const a = await RuntimeHarness.create({
+      claudianDeviceKey: DEVICE,
+      beforeReadDir: async (target) => {
+        if (steal && target.endsWith(DEVICE)) await steal();
+      },
+    });
+    machines.push(a);
+    await a.configure();
+    await a.settle();
+    await a.runtime.setShareConversations(true);
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "one" }, { device: DEVICE });
+    await a.runtime.syncNow();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "two" }, { device: DEVICE });
+    await deleteRecord(a, CONV);
+    await a.runtime.syncNow();
+
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    const lockFile = path.join(a.homedir, ".claudian-session-sync", "locks", `${ws}.lock`);
+    steal = async () => {
+      steal = null;
+      const held = JSON.parse(await fsp.readFile(lockFile, "utf8")) as { epoch: number };
+      await fsp.writeFile(lockFile, JSON.stringify({ ...held, epoch: held.epoch + 1 }));
+    };
+    const outcome = await a.runtime.publishSharedRecord(CONV);
+    expect(steal, "the click never listed this device's folder").toBeNull();
+    expect(outcome.ok).toBe(false);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "published after the lock was lost").toBe(false);
   }, 60_000);
 });

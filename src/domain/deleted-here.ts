@@ -47,9 +47,11 @@ export function claudianRecordOf(
  *   to this device", or Claudian finishing an assignment another device made.
  *   The conversation is still listed; restoring the shared copy would only
  *   leave a stale duplicate under it.
- * - `removed-by-tombstone` — a deletion marker beside it in the sync folder,
- *   from a device on Claudian 2.3.2 or older, which Claudian 2.3.3+ carries out
- *   at launch by removing both files. Nobody here deleted anything.
+ * - `removed-by-tombstone` — a deletion marker beside it, written by Claudian
+ *   2.3.2 or older. Usually another device's: Claudian 2.3.3+ carries it out at
+ *   launch by removing both files, so nobody here deleted anything. On a
+ *   device still running 2.3.2 it is this device's own delete, which that
+ *   Claudian hides by the marker whether or not the record comes back.
  * - `tombstone-consumed` — that marker itself, gone for the same reason.
  */
 export type HoldKind = "deleted-here" | "moved-to-device" | "removed-by-tombstone" | "tombstone-consumed";
@@ -69,7 +71,13 @@ export type RetiredReason = "retired-sidecar" | "tombstoned-in-replica";
 export type AbsentHere =
   | { readonly verdict: "restore"; readonly reason: "remote-only" | "remote-only-history-not-here" | "brought-back" }
   | { readonly verdict: "hold"; readonly kind: HoldKind }
-  | { readonly verdict: "retired"; readonly reason: RetiredReason };
+  | { readonly verdict: "retired"; readonly reason: RetiredReason }
+  /**
+   * This device's memory could not be read this pass, so "not here yet" and
+   * "removed here" cannot be told apart. Neither is acted on: no record is
+   * landed, and no hold is created. The next pass asks again.
+   */
+  | { readonly verdict: "wait"; readonly reason: "memory-unreadable" };
 
 /** What a pass did before ADR-78: a record only the sync folder has, landed. */
 export const RESTORE: AbsentHere = { verdict: "restore", reason: "remote-only" };
@@ -91,6 +99,15 @@ export interface AbsentHereInput {
   readonly releaseRequested: boolean;
   /** `<conv>.deleted.json` is in the sync folder or in this device's store. */
   readonly tombstoneBeside: boolean;
+  /**
+   * This device already restored exactly these bytes once because Claudian
+   * might have removed them by itself. A second removal of the same record is
+   * the user's: restoring again would make a conversation whose history never
+   * reaches this device impossible to delete here.
+   */
+  readonly restoredForMissingHistory: boolean;
+  /** This device's memory could not be read this pass (see `wait`). */
+  readonly memoryUnreadable: boolean;
 }
 
 export interface AbsentHereProbes {
@@ -121,13 +138,26 @@ export interface AbsentHereProbes {
  *    silently. One it never held is still landed (rule 3), which is how a
  *    deletion made on a Claudian 2.3.2 device still reaches this one.
  * 6. A record that moved into a device folder is kept off, labelled as moved.
- * 7. Claude's own automatic delete is not the user's (see `ClaudeHistory`).
+ * 7. Claude's own automatic delete is not the user's (see `ClaudeHistory`),
+ *    once per version of the record.
  * 8. Everything left was deleted here.
+ *
+ * And over all of it: when this device's memory could not be read, a verdict
+ * that would land a record waits instead — the memory is what tells a record
+ * removed here from one not here yet, and guessing "not here yet" is the bug
+ * this exists to fix.
  */
 export async function decideAbsentHere(
   input: AbsentHereInput,
   probes: AbsentHereProbes,
 ): Promise<AbsentHere> {
+  const verdict = await decide(input, probes);
+  return input.memoryUnreadable && verdict.verdict === "restore"
+    ? { verdict: "wait", reason: "memory-unreadable" }
+    : verdict;
+}
+
+async function decide(input: AbsentHereInput, probes: AbsentHereProbes): Promise<AbsentHere> {
   if (input.kind === "inputs") {
     return input.markerless ? { verdict: "retired", reason: "retired-sidecar" } : RESTORE;
   }
@@ -143,7 +173,7 @@ export async function decideAbsentHere(
   if (input.kind === "deleted") return { verdict: "hold", kind: "tombstone-consumed" };
 
   if (await probes.movedToDevice()) return { verdict: "hold", kind: "moved-to-device" };
-  if ((await probes.claudeHistory()) === "all-absent") {
+  if (!input.restoredForMissingHistory && (await probes.claudeHistory()) === "all-absent") {
     return { verdict: "restore", reason: "remote-only-history-not-here" };
   }
   return { verdict: "hold", kind: "deleted-here" };
@@ -159,40 +189,59 @@ export async function decideAbsentHere(
  * it deleted would turn a sync delay into a lost conversation. So:
  *
  * - `all-absent` — every bound transcript is missing from this machine's
- *   Claude project directory. Claudian could have done this; restore it.
+ *   Claude project directory, **and at least one is in the sync folder** on
+ *   its way here. Claudian could have done this; restore it.
+ * - `nowhere` — missing here and from the sync folder too. Nothing is on its
+ *   way, so "not arrived yet" is not the story: Claude Code purges transcripts
+ *   after thirty days, and old conversations — the ones a user cleans up —
+ *   are exactly the ones with none left anywhere. Restoring those would bring
+ *   back every one the user deletes, with a promise of history that will not
+ *   come (completeness review, 2026-10-14).
  * - `some-present` — at least one is here, or one Claudian cannot check.
  *   Claudian resets such a record rather than deleting it, so the user did.
  * - `unknown` — the record cannot be read, or the projects folder is not
  *   there to look in (Claudian calls that "unknown" too, and does not delete).
- * - `not-applicable` — not a Claude record, or one with no session yet.
- *   Codex and Grok reset and never delete; a record with no session cannot
- *   have failed to resume one.
+ * - `not-applicable` — not a Claude record, or one with no current session.
+ *   Codex and Grok reset and never delete. A record with no current session
+ *   cannot have failed to resume one — upstream returns "preserve" before it
+ *   looks at any id — and that includes the reset shape Claudian writes when
+ *   its Claude environment changes (`sessionId: null`, the old ids moved into
+ *   `previousProviderSessionIds`).
  *
  * Deliberately biased toward restoring when it cannot rule the automatic
  * delete out — a transcript Claudian would find in another project folder
  * reads as absent here. The price is a conversation the user deleted coming
  * back once, with a notice; the alternative's price is one Claudian deleted
- * staying gone.
+ * staying gone. "Once" is enforced by the caller (`restoredForMissingHistory`).
  */
-export type ClaudeHistory = "all-absent" | "some-present" | "unknown" | "not-applicable";
+export type ClaudeHistory = "all-absent" | "nowhere" | "some-present" | "unknown" | "not-applicable";
+
+/**
+ * Where one bound transcript is, as the caller can tell: on this machine; not
+ * here but in the sync folder (and small enough to be copied); in neither; or
+ * not determinable.
+ */
+export type TranscriptWhere = "present" | "arriving" | "nowhere" | "unknown";
 
 export async function judgeClaudeHistory(
   text: string,
   conversationId: string,
-  transcript: (sessionId: string) => Promise<"present" | "absent" | "unknown">,
+  transcript: (sessionId: string) => Promise<TranscriptWhere>,
 ): Promise<ClaudeHistory> {
   const bound = claudeBoundSessionIds(text, conversationId);
   if (bound.status === "unreadable") return "unknown";
-  if (bound.status === "not-claude" || bound.ids.length === 0) return "not-applicable";
+  if (bound.status === "not-claude" || !bound.hasCurrent || bound.ids.length === 0) return "not-applicable";
   // An id Claudian cannot turn into a path is one it calls "unknown", and an
   // unknown id is kept — so its record was not deleted automatically.
   if (bound.ids.some((id) => typeof id !== "string" || !isPathSafeId(id))) return "some-present";
+  let arriving = false;
   for (const id of bound.ids as string[]) {
     const found = await transcript(id);
     if (found === "present") return "some-present";
     if (found === "unknown") return "unknown";
+    if (found === "arriving") arriving = true;
   }
-  return "all-absent";
+  return arriving ? "all-absent" : "nowhere";
 }
 
 /**
@@ -207,6 +256,10 @@ export async function judgeClaudeHistory(
  * its source, and anything else is every previous id plus the current one
  * (`providerSessionId ?? sessionId`).
  *
+ * `hasCurrent` is upstream's gate in front of all of that: the R2 path returns
+ * "preserve" unless `providerSessionId ?? sessionId ?? forkSource.sessionId`
+ * is set (`resolveSessionIdForConversation`).
+ *
  * Ids are returned unvalidated; the caller decides what an unusable one means.
  * The admission scan's `sessionIdOf` reads one id per record and does none of
  * this, which is right for admission and wrong here.
@@ -217,7 +270,7 @@ export function claudeBoundSessionIds(
 ):
   | { readonly status: "unreadable" }
   | { readonly status: "not-claude" }
-  | { readonly status: "ok"; readonly ids: readonly unknown[] } {
+  | { readonly status: "ok"; readonly ids: readonly unknown[]; readonly hasCurrent: boolean } {
   const record = parseObject(text);
   if (record === null) return { status: "unreadable" };
   const providerId = record.providerId ?? "claude";
@@ -228,12 +281,13 @@ export function claudeBoundSessionIds(
   const state = isObject(record.providerState) ? record.providerState : {};
 
   const forkSource = isObject(state.forkSource) ? state.forkSource : undefined;
+  const hasCurrent = !!(state.providerSessionId ?? sessionId ?? forkSource?.sessionId);
   if (forkSource && !state.providerSessionId && !sessionId) {
-    return { status: "ok", ids: forkSource.sessionId ? [forkSource.sessionId] : [] };
+    return { status: "ok", ids: forkSource.sessionId ? [forkSource.sessionId] : [], hasCurrent };
   }
   const previous = Array.isArray(state.previousProviderSessionIds) ? state.previousProviderSessionIds : [];
   const ids = [...previous, state.providerSessionId ?? sessionId].filter((id) => !!id);
-  return { status: "ok", ids: [...new Set(ids)] };
+  return { status: "ok", ids: [...new Set(ids)], hasCurrent };
 }
 
 /** Claudian's own rule for an id it will put in a path (`isPathSafeId`). */
@@ -253,21 +307,23 @@ export function isPathSafeId(value: string): boolean {
  * would be a notice the user learns to ignore. These fields move when the
  * conversation does: a new title, a new turn, a new session.
  *
+ * The session ids go in as one sorted set, not slot by slot. Claudian moves
+ * them between slots with nobody touching the conversation — a change of its
+ * Claude environment resets every record, nulling `sessionId` and moving the
+ * current id into `previousProviderSessionIds` — and the set is what does not
+ * move when that happens.
+ *
  * Null when the record cannot be parsed; two nulls are not a change.
  */
 export function recordDigest(text: string, hash: (value: string) => string): string | null {
   const record = parseObject(text);
   if (record === null) return null;
   const state = isObject(record.providerState) ? record.providerState : {};
+  const previous = Array.isArray(state.previousProviderSessionIds) ? state.previousProviderSessionIds : [];
+  const sessions = [record.sessionId, state.providerSessionId, state.threadId, ...previous]
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
   return hash(
-    JSON.stringify([
-      record.title ?? null,
-      record.lastActivityAt ?? null,
-      record.sessionId ?? null,
-      state.providerSessionId ?? null,
-      state.previousProviderSessionIds ?? null,
-      state.threadId ?? null,
-    ]),
+    JSON.stringify([record.title ?? null, record.lastActivityAt ?? null, [...new Set(sessions)].sort()]),
   );
 }
 

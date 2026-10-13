@@ -32,6 +32,7 @@ import {
 import { compareRecordwise } from "../domain/equivalence";
 import {
   type AbsentHere,
+  type TranscriptWhere,
   claudianRecordOf,
   decideAbsentHere,
   judgeClaudeHistory,
@@ -163,13 +164,38 @@ export interface EngineDeps {
 }
 
 export interface ClaudianRecordsDeps {
+  /**
+   * Loads the memory. Called once the pass holds its lock, and committed
+   * before it lets go: a bring-back request is written under the same lock,
+   * and a memory loaded before it and saved after it would undo the request.
+   */
+  open(): Promise<ClaudianRecordsSession | null>;
+}
+
+export interface ClaudianRecordsSession {
   readonly state: ClaudianRecordsState;
   /** The installed Claudian deletes and assigns without markers (2.3.3+). */
   readonly markerless: boolean;
-  /** Is `<id>.jsonl` in this machine's Claude project folder? */
-  readonly claudeTranscript: (sessionId: string) => Promise<"present" | "absent" | "unknown">;
+  /**
+   * Where `<id>.jsonl` would be in this machine's Claude project folder, and
+   * in the sync folder; null when there is no projects folder to look in. The
+   * probe itself is null when transcripts from other devices cannot arrive
+   * here (the Claude Code provider is off): restoring a record for a history
+   * that never comes would make it impossible to delete.
+   */
+  readonly claudeTranscriptPath:
+    | ((sessionId: string) => Promise<{ readonly local: string; readonly replica: string } | null>)
+    | null;
   /** Does any `devices/<key>/` folder of this vault's store hold `<conv>.meta.json`? */
   readonly movedToDevice: (conversationId: string) => Promise<boolean>;
+  /** `.claudian/sessions`'s inode, or null when it is not there or has none. */
+  readonly storeIdentity: () => Promise<string | null>;
+  /** The memory file exists and could not be read this pass. */
+  readonly memoryUnreadable: boolean;
+  /** Said once, at the top of the pass. */
+  readonly notice: string | null;
+  /** Saves, unless this is a dry run or the file belongs to a newer build. */
+  commit(): Promise<void>;
 }
 
 export interface PassLock {
@@ -283,7 +309,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const newlyHeld: string[] = [];
   const changedSinceDeleted: string[] = [];
   const restoredHistoryMissing: string[] = [];
-  const records = deps.claudianRecords;
+  /** Opened inside the lock, in `runPassBody`. */
+  let records: ClaudianRecordsSession | null = null;
 
   // ── P0 preflight ─────────────────────────────────────────────────────────
   // A pass that cannot establish where it is writing does not write. Aborting
@@ -315,6 +342,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   if (deps.remoteReadiness === "unsupported-format") {
     return finish("aborted", "format-version-unsupported");
   }
+
+  records = deps.claudianRecords ? await deps.claudianRecords.open() : null;
+  if (records?.notice) notices.push(records.notice);
+  // A recreated store is a vault downloaded again or a folder somebody
+  // removed, and every record missing from it at once is not the user
+  // deleting them. This pass treats it like a store that is not there.
+  const storeRecreated = records ? records.state.observeStore(await records.storeIdentity()) : false;
+  if (storeRecreated) {
+    notices.push(
+      "Claudian's conversation folder on this device was recreated since the last sync, so " +
+        "records missing from it are being restored rather than treated as deleted here.",
+    );
+  }
+  /** Local files this pass created, for the transcript probe below. */
+  const pulledHere = new Set<string>();
 
   // ── P1 discover ──────────────────────────────────────────────────────────
   const groups: Array<{ adapter: ProviderAdapter; group: SessionGroup }> = [];
@@ -356,12 +398,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   // Kept rather than discarded after the discovery loop: OQ-18's witness needs
   // to know what else lives beside a replica file, and this walk already has it.
   const replicaSiblings = new Map<string, readonly string[]>();
-  const replica = await listReplicaFiles(deps);
-  /** What the claudian subtree held, for ADR-78's forgetting rule. */
-  const claudianReplicaRels = new Set<string>();
-  for (const { adapter, rel, siblings } of replica.files) {
+  for (const { adapter, rel, siblings } of await listReplicaFiles(deps)) {
     replicaSiblings.set(rel.slice(0, rel.lastIndexOf("/")), siblings);
-    if (adapter.id === "claudian") claudianReplicaRels.add(rel);
     if (seen.has(rel)) continue;
     const classified = adapter.classifyNeutral(rel);
     if (classified === null) {
@@ -482,10 +520,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       continue;
     }
 
-    // ADR-78. Before the budget, so a held or retired record costs a stat and
-    // no share of the pass: a bulk delete of fifty conversations is fifty
-    // holds, and charging each one would starve the peer's new records that
-    // sort after them — this provider's groups come last.
+    // ADR-78. Before the budget, so a record already held, or retired, costs
+    // a stat and no share of the pass: a bulk delete of fifty conversations is
+    // fifty holds, and charging each one every pass would starve the peer's
+    // new records that sort after them — this provider's groups come last.
+    // A delete's *first* judgement is still charged once, like any read.
     if (records && adapter.id === "claudian" && planned.length === 1) {
       const row = await claudianShortCircuit(group, adapter, planned[0] as SessionFileRef);
       if (row !== null) {
@@ -688,7 +727,14 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const record = records && adapter.id === "claudian" ? claudianRecordOf(file.neutralRel) : null;
       let absentHere: AbsentHere | undefined;
       if (records && record && !localFacts.exists && remoteFacts.exists && remoteBytes !== null) {
-        absentHere = await judgeAbsentHere(records, adapter, file.neutralRel, record, remoteBytes);
+        absentHere = await judgeAbsentHere(
+          records,
+          adapter,
+          file.neutralRel,
+          record,
+          remoteBytes,
+          remoteFacts.observedHash,
+        );
       }
 
       const decision =
@@ -874,6 +920,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           });
         }
       }
+      if (decision.action === "PULL_NEW" && applied.result === "APPLIED") pulledHere.add(localPath);
       if (
         record &&
         decision.action === "PULL_NEW" &&
@@ -927,7 +974,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         // The same moment, the same hash: what the ledger forgets after thirty
         // days without the file, this remembers until the file is gone from
         // both sides (ADR-78 H6).
-        if (convergedHash && record) records?.state.witness(file.neutralRel, convergedHash);
+        if (convergedHash && record) {
+          records?.state.witness(file.neutralRel, convergedHash);
+          if (decision.reason === "remote-only-history-not-here") {
+            records?.state.markRestoredForMissingHistory(file.neutralRel, convergedHash);
+          }
+        }
       }
 
       // P8's ledger write is unconditional, including for skipped and aborted
@@ -992,16 +1044,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     );
   }
 
-  if (records) {
-    // Ages entries only against a walk that both finished and looked at a
-    // READY folder: a half-downloaded one is missing files for reasons that
-    // have nothing to do with anybody deleting them.
-    records.state.endPass({
-      replicaRels: claudianReplicaRels,
-      complete: deps.remoteReadiness === "ready" && !replica.failed.has("claudian"),
-    });
-    notices.push(...claudianNotices());
-  }
+  if (records) notices.push(...claudianNotices());
 
   for (const [providerId, count] of replacedByPeer) {
     notices.push(
@@ -1035,6 +1078,9 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
 
   await barrier("P8:before-commit", {});
   await barrier("P8:committed", {});
+
+  // Inside the lock, which `runPass` releases only after this returns.
+  await records?.commit();
 
   const failed = actions.filter((a) => isErrorResult(a.result)).length;
   return finish(failed === 0 ? "ok" : actions.length === failed ? "failed" : "partial");
@@ -1089,11 +1135,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
 
   /** The facts `decideAbsentHere` needs, each gathered only when asked. */
   async function judgeAbsentHere(
-    claudian: ClaudianRecordsDeps,
+    claudian: ClaudianRecordsSession,
     adapter: ProviderAdapter,
     neutralRel: string,
     record: NonNullable<ReturnType<typeof claudianRecordOf>>,
     remoteBytes: Uint8Array,
+    remoteHash: string,
   ): Promise<AbsentHere> {
     const tombstoneName = `${record.conversationId}.deleted.json`;
     const tombstoneBeside =
@@ -1105,17 +1152,55 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       {
         kind: record.kind,
         markerless: claudian.markerless,
-        storeHealthy: healthy.has(adapter.id),
+        storeHealthy: healthy.has(adapter.id) && !storeRecreated,
         witnessed: claudian.state.witnessed(neutralRel) || deps.ledger.converged(neutralRel) !== null,
         releaseRequested: held?.releaseRequested === true,
         tombstoneBeside,
+        restoredForMissingHistory: claudian.state.restoredForMissingHistory(neutralRel, remoteHash),
+        memoryUnreadable: claudian.memoryUnreadable,
       },
       {
         movedToDevice: () => claudian.movedToDevice(record.conversationId),
-        claudeHistory: () =>
-          judgeClaudeHistory(new TextDecoder().decode(remoteBytes), record.conversationId, claudian.claudeTranscript),
+        claudeHistory: async () => {
+          const pathOf = claudian.claudeTranscriptPath;
+          if (pathOf === null) return "not-applicable";
+          return judgeClaudeHistory(new TextDecoder().decode(remoteBytes), record.conversationId, (id) =>
+            transcriptAt(pathOf, id),
+          );
+        },
       },
     );
+  }
+
+  /**
+   * Where was this transcript when the pass began?
+   *
+   * The question R2 turns on is whether Claudian could find the history when
+   * it deleted the record, and that was before this pass. A transcript this
+   * same pass just pulled — Claude Code's groups run before Claudian's — was
+   * not there then: the typical R2 is exactly a history that landed one pass
+   * too late, and reading "present" off our own write would hold it as the
+   * user's delete. Absent here, it matters whether it is on its way: a copy in
+   * the sync folder this pass can land is; nothing anywhere, or one over the
+   * size limit, is not.
+   */
+  async function transcriptAt(
+    pathOf: (sessionId: string) => Promise<{ readonly local: string; readonly replica: string } | null>,
+    sessionId: string,
+  ): Promise<TranscriptWhere> {
+    const paths = await pathOf(sessionId);
+    if (paths === null) return "unknown";
+    try {
+      if (!pulledHere.has(paths.local) && (await deps.fs.lstat(paths.local)) !== null) return "present";
+      const copy = await deps.fs.lstat(paths.replica);
+      const arriving =
+        copy !== null && copy.isFile && copy.size > 0 && copy.size <= deps.settings.maxFileSizeBytes;
+      return arriving ? "arriving" : "nowhere";
+    } catch (error) {
+      const code = errnoOf(error);
+      if (!code || !CATCHABLE_IO.has(code)) throw error;
+      return "unknown";
+    }
   }
 
   /** Up to three ids, then a count — enough to find them, short enough to read. */
@@ -1151,9 +1236,10 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     }
     if (restoredHistoryMissing.length > 0) {
       out.push(
-        `${restoredHistoryMissing.length} conversation record(s) were restored here: Claudian on ` +
-          "this device removed them by itself because their history had not arrived yet, which is " +
-          "not a deletion. Their history follows with the next syncs — do not send in them until it has.",
+        `${restoredHistoryMissing.length} conversation record(s) were restored here: their history ` +
+          "is in the sync folder but had not reached this device, so Claudian may have removed " +
+          "them by itself, which is not a deletion. Do not send in them until their history has " +
+          "synced. If you deleted one yourself, delete it again and it stays deleted.",
       );
     }
     return out;
@@ -1655,24 +1741,16 @@ function recordLedger(
  * appear and vanish between passes by design, and a report that lists them
  * every pass trains the user to stop reading it (§8.2's ignore list).
  */
-async function listReplicaFiles(deps: EngineDeps): Promise<{
-  readonly files: Array<{ adapter: ProviderAdapter; rel: string; siblings: readonly string[] }>;
-  /**
-   * Adapters whose subtree could not be listed in full, its own folder
-   * missing included. Everything else here treats a failed listing as an
-   * empty one, which is harmless for discovery; it is not harmless for "this
-   * file is gone from the sync folder", which ADR-78 acts on.
-   */
-  readonly failed: ReadonlySet<string>;
-}> {
+async function listReplicaFiles(
+  deps: EngineDeps,
+): Promise<Array<{ adapter: ProviderAdapter; rel: string; siblings: readonly string[] }>> {
   const base = deps.joinPath(deps.replicaRoot, deps.workspaceId);
   const found: Array<{ adapter: ProviderAdapter; rel: string; siblings: readonly string[] }> = [];
-  const failed = new Set<string>();
 
   for (const adapter of deps.adapters) {
     await walk(adapter, deps.joinPath(base, adapter.id), adapter.id, 1);
   }
-  return { files: found, failed };
+  return found;
 
   async function walk(
     adapter: ProviderAdapter,
@@ -1680,10 +1758,7 @@ async function listReplicaFiles(deps: EngineDeps): Promise<{
     rel: string,
     depth: number,
   ): Promise<void> {
-    const entries = await deps.fs.readDir(dir).catch(() => {
-      failed.add(adapter.id);
-      return [];
-    });
+    const entries = await deps.fs.readDir(dir).catch(() => []);
     const siblings = entries.filter((item) => item.isFile).map((item) => item.name);
     for (const item of entries) {
       if (isTransferArtifact(item.name) || isDenylisted(item.name)) continue;

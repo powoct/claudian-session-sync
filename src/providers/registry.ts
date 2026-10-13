@@ -111,9 +111,10 @@ export const CLAUDIAN: ProviderDescriptor = {
     "which CLI session belongs to which conversation) so the other machine's Claudian can " +
     "list them. Since Claudian 2.2.5 a new conversation's record stays in its own device's " +
     "folder until the sharing switch above moves it, so on its own this carries older " +
-    "records only. A conversation you delete on this device stays deleted here even though " +
-    "the sync folder and your other devices keep it; the sync report lists it as " +
-    '"deleted-here", and "Bring back conversations deleted on this device" undoes it. Enable ' +
+    "records only. With Claudian 2.3.3 or later, a conversation you delete on this device " +
+    "stays deleted here even though the sync folder and your other devices keep it; the sync " +
+    'report lists it as "deleted-here", and "Bring back conversations deleted on this device" ' +
+    "undoes it. Enable " +
     "ONLY if your vault sync does not already carry .claudian/ — git and Syncthing usually " +
     "do, Obsidian Sync does not. Two transports over one folder hand your sync tool " +
     "conflicts to manufacture copies from.",

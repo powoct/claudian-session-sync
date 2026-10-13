@@ -1109,15 +1109,18 @@ records provider 两机都开(E2c),或 E2b 加至少一条 flat 层记录。在�
 |---|---|
 | **D0** | 默认路径回归:两机都关 provider,A 上新建 Claude、Codex、Grok 各一条,B 上落地并能 `--resume`;插件推导的 device key 等于 Claudian `devices/` 下本机目录名 |
 | **D1 ⭐⭐** | A 上删除一条 flat 层记录 → Sync now:报告 `SKIP_DELETED_HERE` / `deleted-here`,第二轮出一条 Notice 加一次弹窗;**重启两次都不回来**;同步夹里仍有它;B 上仍列出它 |
-| **D2 ⭐** | Archive 视图「Delete N sessions」一次删 5 条以上:每轮只有一条合并 Notice;把 Max files per pass 调到 3,B 新建的一条照样在两轮内落到 A |
+| **D2 ⭐** | Archive 视图「Delete N sessions」一次删 5 条以上:每轮只有一条合并 Notice;把 Max files per pass 调到 3,**等所有删除都已显示 `SKIP_DELETED_HERE` 之后**(每条删除第一次判定仍扣一次预算),B 新建的一条在两轮内落到 A |
 | **D3 ⭐** | B 继续在那条对话里聊 → A 点名「changed on another device」,仍不回来;B 触发自动归档(只用 7 天档)、或只是重开 Obsidian(紧凑 JSON 改写) → A **不**点名 |
 | **D4 ⭐** | 命令「Bring back conversations deleted on this device」→ 勾选 → 重启后回来,内容是 B 的最新版本 |
 | **D5** | 共享开关关着时,A 上 Assign to this device → 报告 `moved-to-device`,无弹窗;再在 device 层删除 → 重启两次都不回来 |
 | **D6** | 启动交错:冷启动、Obsidian 运行中更新 Claudian、layout 就绪后才启用本插件,三种都做;`.inputs.json` 一律 `SKIP_RETIRED`,**从未出现 PUSH**;结论不得依赖某一种先后 |
-| **D7** | R2 例外:B 上挪走某条 Claude 对话的 transcript 再发送,Claudian 自删记录 → 下一轮 `PULL_NEW` / `remote-only-history-not-here` 加通知;**同时记下 Claude CLI 实际输出的报错文本**(R2 只在匹配 `/no conversation found with session id/i` 时触发) |
+| **D7** | R2 例外:A 上收到 B 的一条 Claude 对话、transcript 还没落地时就发送,Claudian 自删记录 → 下一轮 transcript `PULL_NEW` **且同一轮**记录 `PULL_NEW` / `remote-only-history-not-here` 加通知;再删一次 → 保持删除。**同时记下 Claude CLI 实际输出的报错文本**(R2 只在匹配 `/no conversation found with session id/i` 时触发) |
 | **D8** | 混合机群(若能装一台 2.3.2):它的删除写墓碑 → 2.3.20 那台下次启动后不再列出,且**不**算本机删除(无弹窗、`removed-by-tombstone`) |
 | **D9** | 新机器 C 首次开启:A 上 hold 的对话在 C 上照常出现(ADR-10,符合预期);带墓碑的那对只落墓碑 |
-| **D10** | 共享开关开着:对端删除或 Assign 一条本机共享过的记录 → 本机 hold,进「Repair shared conversation records」,**不**重新发布 |
+| **D10** | 共享开关开着:对端删除或 Assign 一条本机共享过的记录 → 本机**不**重新发布。若本机仍有自己那份(共享发生在当前 Obsidian 会话里,没重启过),它出现在「Repair shared conversation records」里;Assign 给对端的那条**没有**发布按钮 |
+| **D11 ⭐** | A 删一条后把同步夹换成新目录并 Initialise;B 后来也换过去、推上那条 → A 上**不回来**,也不再弹窗 |
+| **D12** | 关掉 Obsidian,把 A 的 `.claudian` 整个移走,让 Claudian 新建一个(或重新下载 vault)→ 下一轮缺的记录被恢复(报告首行说明 store 被重建),此前删掉的那条仍不回来 |
+| **D13** | 删一条 transcript 早已被 Claude Code 清理（本机与同步夹都没有）的旧 Claude 对话 → **保持删除**,没有「restored」通知 |
 
 **D1 是核心。** 它失败就说明这次修复在真的 Claudian 上不成立,其余各步都没有意义。
 ⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.11 一起跑;跑完把 ADR-78 的 ⚠️ 改成 ✅。

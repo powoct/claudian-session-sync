@@ -6,22 +6,22 @@
  * - **Witnessed** — this machine converged on the file: read it equal on both
  *   sides, or wrote it. Set only at the point the ledger's converged base is
  *   set, from the same hash. It is what makes "missing here" mean "removed
- *   here" rather than "not here yet".
+ *   here" rather than "not here yet", and it is never forgotten (see
+ *   `ClaudianRecordEntry`).
  * - **Held** — the file is missing here, the sync folder has it, and it is
  *   being kept off this machine. Created only by the planner's verdict, and
- *   ended by exactly three things: the user asking for it back, the file
- *   reappearing here, or the sync folder losing it too. No timer.
+ *   ended by exactly two things: the user asking for it back, or the file
+ *   reappearing here. No timer, and not the sync folder losing it either — a
+ *   peer that still has the conversation pushes it again the moment the
+ *   folder lacks it, and a hold that had lapsed by then would let it in.
  *
- * Mutable and in-memory; the pass runner loads it before the pass and saves
- * it after, and a dry run never saves.
+ * Mutable and in-memory; loaded and saved inside the pass lock, and a dry run
+ * never saves.
  */
 import type { ClaudianRecordEntry, ClaudianRecordsFile, HeldRecordEntry } from "../infra/home-store";
 import type { HoldKind } from "../domain/deleted-here";
 import { claudianRecordOf } from "../domain/deleted-here";
 import { STATE_SCHEMA_VERSION } from "../infra/state-store";
-
-/** Passes a file may be missing from a complete, READY sync folder before it is forgotten. */
-export const GONE_FROM_REPLICA_PASSES = 2;
 
 /** Passes a new deleted-here hold must last before the user is told (ADR-78 H7). */
 export const ANNOUNCE_AFTER_PASSES = 2;
@@ -29,10 +29,12 @@ export const ANNOUNCE_AFTER_PASSES = 2;
 export interface ClaudianRecordsState {
   /** This machine has converged on the file and remembers it. */
   witnessed(rel: string): boolean;
-  /** The hash it converged on, or null. */
-  witnessedHash(rel: string): string | null;
   /** Converged now. Ends any hold: the file is here again. */
   witness(rel: string, hash: string): void;
+  /** Landed these bytes because Claudian may have removed the record itself. */
+  markRestoredForMissingHistory(rel: string, hash: string): void;
+  /** True when the file still holds exactly the bytes so landed. */
+  restoredForMissingHistory(rel: string, currentHash: string): boolean;
 
   held(rel: string): HeldRecordEntry | null;
   /** Starts a hold. `witnessedHash` covers a witness only the ledger knew. */
@@ -49,7 +51,8 @@ export interface ClaudianRecordsState {
   ): void;
   /**
    * Counts one more pass of an existing hold. True exactly once: the pass in
-   * which a deleted-here hold first deserves to be announced.
+   * which a deleted-here hold first deserves to be announced. Stops counting
+   * after that, so a hold that changes nothing does not rewrite the file.
    */
   continueHold(rel: string): boolean;
   /**
@@ -62,13 +65,10 @@ export interface ClaudianRecordsState {
   requestRelease(rel: string): boolean;
 
   /**
-   * Ages every entry against what the sync folder held this pass.
-   *
-   * `complete` false — the walk could not list the claudian subtree, or the
-   * folder is not READY — leaves every count as it is: a listing that failed
-   * says nothing about what is missing from it.
+   * Notes the store's identity. True when it differs from a known previous
+   * one: the store was recreated, and absences this pass are not deletions.
    */
-  endPass(input: { readonly replicaRels: ReadonlySet<string>; readonly complete: boolean }): void;
+  observeStore(identity: string | null): boolean;
 
   entries(): ReadonlyArray<readonly [string, ClaudianRecordEntry]>;
   toFile(): ClaudianRecordsFile;
@@ -97,13 +97,14 @@ export function seedClaudianRecords(
     const record = claudianRecordOf(rel);
     if (record === null || record.kind === "inputs") continue;
     if (typeof entry.lastConvergedHash !== "string" || entry.lastConvergedHash.length === 0) continue;
-    records[rel] = { witnessedHash: entry.lastConvergedHash, goneFromReplicaPasses: 0 };
+    records[rel] = { witnessedHash: entry.lastConvergedHash };
   }
   return { schemaVersion: STATE_SCHEMA_VERSION, records };
 }
 
 export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianRecordsState {
   const records = new Map<string, ClaudianRecordEntry>(Object.entries(file.records));
+  let storeIdentity = file.storeIdentity ?? null;
   let dirty = false;
 
   const set = (rel: string, entry: ClaudianRecordEntry) => {
@@ -118,23 +119,33 @@ export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianR
 
   return {
     witnessed: (rel) => records.has(rel),
-    witnessedHash: (rel) => records.get(rel)?.witnessedHash ?? null,
 
     witness(rel, hash) {
       const record = claudianRecordOf(rel);
       if (record === null || record.kind === "inputs") return;
       const entry = records.get(rel);
-      if (entry && entry.witnessedHash === hash && entry.goneFromReplicaPasses === 0 && !entry.hold) return;
-      set(rel, { witnessedHash: hash, goneFromReplicaPasses: 0 });
+      if (entry && entry.witnessedHash === hash && !entry.hold) return;
+      // The restore-once mark survives only while the bytes are the ones it
+      // was made for; anything newer is a record the rule has not seen.
+      const keep = entry?.restoredForMissingHistory === hash ? { restoredForMissingHistory: hash } : {};
+      set(rel, { witnessedHash: hash, ...keep });
     },
+
+    markRestoredForMissingHistory(rel, hash) {
+      const entry = records.get(rel);
+      set(rel, { witnessedHash: entry?.witnessedHash ?? hash, restoredForMissingHistory: hash });
+    },
+
+    restoredForMissingHistory: (rel, currentHash) =>
+      currentHash !== "" && records.get(rel)?.restoredForMissingHistory === currentHash,
 
     held: (rel) => records.get(rel)?.hold ?? null,
 
     hold(rel, hold, witnessedHash) {
       const entry = records.get(rel);
       set(rel, {
+        ...(entry ?? {}),
         witnessedHash: entry?.witnessedHash ?? witnessedHash,
-        goneFromReplicaPasses: 0,
         hold: {
           kind: hold.kind,
           sinceMs: hold.nowMs,
@@ -150,7 +161,7 @@ export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianR
 
     continueHold(rel) {
       const hold = records.get(rel)?.hold;
-      if (!hold) return false;
+      if (!hold || hold.passes >= ANNOUNCE_AFTER_PASSES) return false;
       const passes = hold.passes + 1;
       const announce = hold.kind === "deleted-here" && !hold.announced && passes >= ANNOUNCE_AFTER_PASSES;
       updateHold(rel, { passes, ...(announce ? { announced: true } : {}) });
@@ -171,7 +182,8 @@ export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianR
     release(rel) {
       const entry = records.get(rel);
       if (!entry?.hold) return;
-      set(rel, { witnessedHash: entry.witnessedHash, goneFromReplicaPasses: entry.goneFromReplicaPasses });
+      const { hold: _released, ...rest } = entry;
+      set(rel, rest);
     },
 
     requestRelease(rel) {
@@ -181,27 +193,21 @@ export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianR
       return true;
     },
 
-    endPass({ replicaRels, complete }) {
-      if (!complete) return;
-      for (const [rel, entry] of [...records]) {
-        if (replicaRels.has(rel)) {
-          if (entry.goneFromReplicaPasses !== 0) set(rel, { ...entry, goneFromReplicaPasses: 0 });
-          continue;
-        }
-        const gone = entry.goneFromReplicaPasses + 1;
-        if (gone >= GONE_FROM_REPLICA_PASSES) {
-          records.delete(rel);
-          dirty = true;
-        } else {
-          set(rel, { ...entry, goneFromReplicaPasses: gone });
-        }
+    observeStore(identity) {
+      if (identity === null) return false;
+      const recreated = storeIdentity !== null && storeIdentity !== identity;
+      if (storeIdentity !== identity) {
+        storeIdentity = identity;
+        dirty = true;
       }
+      return recreated;
     },
 
     entries: () => [...records],
 
     toFile: () => ({
       schemaVersion: STATE_SCHEMA_VERSION,
+      ...(storeIdentity !== null ? { storeIdentity } : {}),
       records: Object.fromEntries([...records].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
     }),
 

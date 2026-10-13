@@ -164,18 +164,32 @@ export interface SharedRecordEntry {
  */
 export interface ClaudianRecordsFile {
   readonly schemaVersion: number;
+  /**
+   * `.claudian/sessions` as last seen (its inode), or absent when unknown. A
+   * different one means the store was recreated — a vault downloaded again,
+   * the folder deleted — and its records missing all at once is not the user
+   * deleting them.
+   */
+  readonly storeIdentity?: string;
   readonly records: Readonly<Record<string, ClaudianRecordEntry>>;
 }
 
+/**
+ * Never forgotten, deliberately. A witness is what makes a record missing
+ * here mean "removed here"; dropping one turns the record into "not here
+ * yet", and the next time any device pushes it — a peer that still has it,
+ * a move to a new sync folder — it comes back. One entry per record this
+ * machine has ever held is a few hundred bytes each, which is the price.
+ */
 export interface ClaudianRecordEntry {
   /** sha256 of the bytes this machine last converged on for this file. */
   readonly witnessedHash: string;
   /**
-   * Consecutive passes whose complete, READY view of the sync folder did not
-   * contain this file. At 2 the entry is dropped: a file gone from both sides
-   * has nothing left to keep off this machine (ADR-78 H5).
+   * The bytes this machine landed because Claudian may have removed the
+   * record by itself (ADR-78 ⑥). Cleared as soon as it converges on anything
+   * else; while it matches, a second removal is the user's.
    */
-  readonly goneFromReplicaPasses: number;
+  readonly restoredForMissingHistory?: string;
   readonly hold?: HeldRecordEntry;
 }
 
@@ -199,7 +213,14 @@ export interface HeldRecordEntry {
 export type ClaudianRecordsLoad =
   | { readonly status: "loaded"; readonly file: ClaudianRecordsFile }
   | { readonly status: "absent" }
+  /** Read, and not this format: empty, truncated, not JSON, not the shape. */
   | { readonly status: "unusable" }
+  /**
+   * Could not be read at all (EBUSY, EPERM, EACCES…). Not the same as
+   * unusable: the file may be perfectly good, and rebuilding it from the
+   * ledger would overwrite every hold older than the ledger's memory.
+   */
+  | { readonly status: "unreadable"; readonly reason: string }
   /** Written by a newer build of this plugin: not read, and never overwritten. */
   | { readonly status: "newer" };
 
@@ -405,7 +426,11 @@ export function createHomeStore(deps: HomeStoreDeps): HomeStore {
     async loadClaudianRecords(workspaceId) {
       const load = await readJson(deps.fs, layout.claudianRecordsFile(workspaceId));
       if (load.status === "absent") return { status: "absent" };
-      if (load.status === "unusable") return { status: "unusable" };
+      if (load.status === "unusable") {
+        return load.reason === "empty" || load.reason === "not-json"
+          ? { status: "unusable" }
+          : { status: "unreadable", reason: load.reason };
+      }
       return parseClaudianRecords(load.raw);
     },
 
@@ -534,15 +559,23 @@ function parseClaudianRecords(raw: unknown): ClaudianRecordsLoad {
     if (typeof value !== "object" || value === null) continue;
     const entry = value as Partial<ClaudianRecordEntry>;
     if (typeof entry.witnessedHash !== "string") continue;
-    const gone = finite(entry.goneFromReplicaPasses) ?? 0;
     const hold = parseHold(entry.hold);
     records[rel] = {
       witnessedHash: entry.witnessedHash,
-      goneFromReplicaPasses: gone,
+      ...(typeof entry.restoredForMissingHistory === "string"
+        ? { restoredForMissingHistory: entry.restoredForMissingHistory }
+        : {}),
       ...(hold ? { hold } : {}),
     };
   }
-  return { status: "loaded", file: { schemaVersion: c.schemaVersion, records } };
+  return {
+    status: "loaded",
+    file: {
+      schemaVersion: c.schemaVersion,
+      ...(typeof c.storeIdentity === "string" ? { storeIdentity: c.storeIdentity } : {}),
+      records,
+    },
+  };
 }
 
 function parseHold(raw: unknown): HeldRecordEntry | null {

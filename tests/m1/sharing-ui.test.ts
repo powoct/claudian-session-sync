@@ -43,7 +43,7 @@ const hold = (over: Partial<SharingHold> = {}): SharingHold => ({
   ...over,
 });
 
-const stubRuntime = (holds: readonly SharingHold[], outcome: PublishOutcome = { ok: true }) =>
+const stubRuntime = (holds: readonly SharingHold[], outcome: PublishOutcome = { ok: true, replaced: true }) =>
   ({
     sharingConflicts: async () => [...holds],
     publishSharedRecord: async () => outcome,
@@ -137,5 +137,23 @@ describe("the repair screen", () => {
     await click(modal.contentEl, "Publish this device's version");
 
     expect(Notice.instances.at(-1)?.message).toContain("in your backups");
+  });
+
+  it("does not point at a backup when it put a removed record back (ADR-78 H9)", () => {
+    // Nothing was replaced, so there is no backup to look for.
+    const message = describePublish({ ok: true, replaced: false });
+    expect(message).not.toContain("backups");
+    expect(message).toContain("nothing was replaced");
+  });
+
+  it("offers no publish button for a record another device assigned to itself", async () => {
+    // That device reads its own folder first; publishing here would give the
+    // conversation a second live record that it ignores.
+    const modal = new SharingModal(
+      stubRuntime([hold({ sharedPath: null, sharedSize: null, sharedMtimeMs: null, resolvable: false })]),
+      makeStubApp() as unknown as App,
+    );
+    await modal.onOpen();
+    expect(buttonsIn(modal.contentEl).map((b) => b.textContent)).not.toContain("Publish this device's version");
   });
 });

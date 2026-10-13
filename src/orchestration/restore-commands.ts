@@ -89,6 +89,12 @@ export interface BackupEntry {
     | "whole-file"
     /** Same records, different member order (ADR-75) — neither a fork nor news. */
     | "equivalent"
+    /**
+     * A Claudian record this machine is keeping off itself (ADR-78): the
+     * other side is missing *here* on purpose, so the next sync does not copy
+     * it over — "will propagate" would be the wrong promise.
+     */
+    | "held-here"
     | "unknown";
 }
 
@@ -128,6 +134,8 @@ export interface RestoreCommandDeps {
   readonly backup: (request: BackupRequest) => Promise<{ readonly path: string | null }>;
   readonly hashBytes: (bytes: Uint8Array) => string;
   readonly mayWriteRemote: () => boolean;
+  /** Neutral paths of Claudian records held off this machine (ADR-78). */
+  readonly heldHere?: ReadonlySet<string>;
 }
 
 /**
@@ -531,7 +539,7 @@ function predict(
 ): BackupEntry["outcome"] {
   if (neutralRel === null) return "unknown";
   const mode = provider.adapter.classifyNeutral(neutralRel)?.mode ?? null;
-  if (other === null) return "will-propagate";
+  if (other === null) return deps.heldHere?.has(neutralRel) === true ? "held-here" : "will-propagate";
   if (deps.hashBytes(other) === deps.hashBytes(bytes)) return "nothing";
   if (mode !== "append-jsonl") return "whole-file";
   if (bytes.length < other.length && isPrefix(bytes, other)) return "will-be-undone";

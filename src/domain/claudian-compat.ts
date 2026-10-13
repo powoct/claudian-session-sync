@@ -74,9 +74,9 @@ export function compatWarnings(input: CompatInput): CompatWarnings {
         "sharing relied on. While it is on, a conversation you delete can come back after a " +
         "restart if it was started in this Obsidian session or used shortly before Obsidian " +
         "was last closed; deleting it again removes it. A conversation another device deleted " +
-        "or assigned to itself after this device shared it is not shared again — it is listed " +
-        'under "Repair shared conversation records" instead. Keep every device on the same ' +
-        "Claudian version while sharing is on." +
+        "or assigned to itself after this device shared it is not shared again; if this device " +
+        'still has its own copy, that copy is listed under "Repair shared conversation records". ' +
+        "Keep every device on the same Claudian version while sharing is on." +
         (atLeast(version, [2, 3, 12])
           ? " Since Claudian 2.3.12, a conversation in the shared layer cannot be mentioned " +
             "with @ in another conversation."

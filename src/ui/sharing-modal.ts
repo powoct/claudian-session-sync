@@ -61,9 +61,9 @@ export class SharingModal extends Modal {
     contentEl.createEl("p", {
       text:
         "Each of these is on this device, and the copy in the layer your other devices read " +
-        "is no longer the one this machine published. Either it was changed — so something else " +
-        "wrote it, and choosing for you would mean overwriting whatever that was — or it was " +
-        "removed: deleted, or assigned to a device, after this machine shared it. Your other " +
+        "is not one this machine can safely replace. Either it differs — something else wrote " +
+        "it, and choosing for you would mean overwriting whatever that was — or it was removed: " +
+        "deleted, or assigned to a device, after this machine shared it. Your other " +
         "devices are reading the shared version where there is one, which may be older than what " +
         "you see here.",
     });
@@ -71,8 +71,10 @@ export class SharingModal extends Modal {
       text:
         "Publishing puts this device's version in the shared layer. A shared version it replaces " +
         "is copied to your backups first, so this is reversible; publishing a removed one undoes " +
-        "that delete or assignment for every device. Decide one at a time — these are separate " +
-        "conversations and what is right for one says nothing about the next.",
+        "that delete, or an assignment to this device, for every device. One assigned to another " +
+        "device cannot be published from here — that device keeps reading its own copy. Decide " +
+        "one at a time — these are separate conversations and what is right for one says nothing " +
+        "about the next.",
     });
 
     for (const hold of holds) {
@@ -115,10 +117,11 @@ export class SharingModal extends Modal {
  */
 export function describePublish(outcome: PublishOutcome): string {
   if (outcome.ok) {
-    return (
-      "Published. Your other devices will show this version once the vault syncs; the one it " +
-      "replaced is in your backups."
-    );
+    return outcome.replaced
+      ? "Published. Your other devices will show this version once the vault syncs; the one it " +
+          "replaced is in your backups."
+      : "Published again. Your other devices will list this conversation once the vault syncs " +
+          "and Claudian restarts there; nothing was replaced.";
   }
   switch (outcome.reason) {
     case "sync-in-progress":
