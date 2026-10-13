@@ -19,7 +19,8 @@ import {
   serialiseSettings,
 } from "../domain/settings";
 import type { ConflictResolution } from "../domain/conflict";
-import { type CompatWarnings, compatNotices, compatWarnings } from "../domain/claudian-compat";
+import { type CompatWarnings, compatNotices, compatWarnings, isMarkerless } from "../domain/claudian-compat";
+import { type HoldKind, claudianRecordOf } from "../domain/deleted-here";
 import type { NotReadyReason, ReadinessObservation, ReadinessState } from "../domain/readiness";
 import type { LogicalId, MachineId, WorkspaceId } from "../domain/types";
 import type { Clock, IdGen } from "../infra/clock";
@@ -38,7 +39,8 @@ import { mintStatePath, probeCaseSensitivity, splitPathSegments } from "../infra
 import { type MachineFile, STATE_SCHEMA_VERSION } from "../infra/state-store";
 import { judgeIdentity } from "../infra/state-store";
 import { createSyncDirStore, newRootFile } from "../infra/sync-dir-store";
-import { PROVIDERS, providerById } from "../providers/registry";
+import { CLAUDE_CODE, PROVIDERS, providerById } from "../providers/registry";
+import { claudeCodeProjectDir } from "../providers/claude-code/adapter";
 import {
   type BackupEntry,
   type RestoreOutcome,
@@ -49,15 +51,17 @@ import {
 import { type ConflictEntry, listConflicts, resolveConflict } from "./conflict-commands";
 import type { PassLock } from "./sync-engine";
 import {
+  DEVICE_KEY,
   type PublishOutcome,
   type ShareOutcome,
   type SharingHold,
   shareOwnConversations,
 } from "./conversation-sharing";
+import { createClaudianRecordsState } from "./claudian-records";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
-import type { PassReport } from "./pass-report";
+import type { ClaudianRecordsSummary, PassReport } from "./pass-report";
 import {
   type PassOutcome,
   type ProviderRuntime,
@@ -208,6 +212,8 @@ export class PluginRuntime {
   private firstPassDone = false;
   /** Last pass's forks, so the repair screen has something before it re-scans. */
   private sharingHolds: readonly SharingHold[] = [];
+  /** What the last real pass has to say out loud, once (ADR-78 H7). */
+  private announcement: string | null = null;
   private readonly listeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(private readonly host: RuntimeHost) {
@@ -226,6 +232,19 @@ export class PluginRuntime {
 
   lastPassReport(): PassReport | null {
     return this.lastReport;
+  }
+
+  /**
+   * The pop-up the last pass asked for, handed over once.
+   *
+   * Separate from the report because the report is read when someone opens
+   * it, and these are the passes where someone should: a conversation was
+   * kept off this device, or brought back without being asked for.
+   */
+  takeAnnouncement(): string | null {
+    const message = this.announcement;
+    this.announcement = null;
+    return message;
   }
 
   onChange(listener: (status: RuntimeStatus) => void): () => void {
@@ -277,6 +296,10 @@ export class PluginRuntime {
     if (!prepared.ok) return this.publish(prepared.status);
     if (this.passInFlight) return this.status;
     await this.detectClaudian();
+    // After the version is read, because whether a `.deleted.json` may be
+    // published depends on it.
+    const claudianRecords = this.claudianRecordsProbes(prepared.deps.providers);
+    this.announcement = null;
 
     this.publish({ ...this.status, phase: "syncing", short: "Claudian Session Sync: syncing…" });
     try {
@@ -287,8 +310,9 @@ export class PluginRuntime {
         // with a check-then-write window against the peer, Claudian and the
         // engine itself). A dry run moves nothing.
         ...(this.binding?.shareConversations === true && !(options.dryRun ?? false)
-          ? { beforeDiscover: () => this.shareConversations() }
+          ? { beforeDiscover: (lock?: PassLock) => this.shareConversations(lock) }
           : {}),
+        ...(claudianRecords ? { claudianRecords } : {}),
         dryRun: options.dryRun ?? false,
         verifyAll: options.verifyAll ?? false,
         firstPassAfterStartup: !this.firstPassDone,
@@ -312,6 +336,9 @@ export class PluginRuntime {
         leading.length > 0
           ? { ...outcome.report, notices: [...leading, ...outcome.report.notices] }
           : outcome.report;
+      if (!(options.dryRun ?? false)) {
+        this.announcement = announce(outcome.report.claudianRecords);
+      }
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -989,13 +1016,128 @@ export class PluginRuntime {
   }
 
   /**
-   * Moves this device's conversation records into the layer every device reads
-   * (ADR-69).
+   * The two questions ADR-78 asks of this machine's disk, or null when the
+   * `claudian` provider is off.
    *
-   * Failures are swallowed, and the outcome is reported rather than acted on:
-   * this is a convenience laid on top of another plugin's store, and it must
-   * never be the reason a sync pass does not run.
+   * The Claude project folder is the one this plugin's own Claude Code
+   * provider would use — the override if one is set, whether or not that
+   * provider is on — because it is the best available stand-in for the folder
+   * Claudian checks before deleting a conversation by itself. Where the two
+   * differ, the answer leans toward restoring (see `judgeClaudeHistory`).
    */
+  private claudianRecordsProbes(
+    providers: readonly ProviderRuntime[],
+  ): PassRunnerArgs["claudianRecords"] | null {
+    const claudian = providers.find((p) => p.adapter.id === "claudian");
+    const binding = this.binding;
+    if (!claudian || !binding) return null;
+    const { fs, joinPath, homedir, vaultRoot } = this.host;
+    const claudeRoot =
+      binding.providers[CLAUDE_CODE.id]?.rootOverride ??
+      CLAUDE_CODE.defaultRoot({ homedir, vaultRealPath: vaultRoot }, joinPath);
+
+    return {
+      markerless: isMarkerless(this.claudianVersion),
+      claudeTranscript: async (sessionId) => {
+        try {
+          // No projects folder is Claudian's "unknown" as well: it does not
+          // delete a conversation it cannot look for.
+          const root = await fs.realpath(claudeRoot).catch(() => null);
+          if (root === null) return "unknown";
+          const dir = claudeCodeProjectDir({ providerRoot: root, vaultRealPath: vaultRoot, joinPath });
+          return (await fs.lstat(joinPath(dir, `${sessionId}.jsonl`))) === null ? "absent" : "present";
+        } catch {
+          return "unknown";
+        }
+      },
+      // Every device's folder, not only this one's: another device assigning a
+      // conversation to itself moves the shared record into its folder, and
+      // that is still a move, not a delete.
+      movedToDevice: async (conversationId) => {
+        const devices = joinPath(claudian.root, "devices");
+        for (const entry of await fs.readDir(devices).catch(() => [])) {
+          if (entry.isFile || !DEVICE_KEY.test(entry.name)) continue;
+          const found = await fs.lstat(joinPath(devices, entry.name, `${conversationId}.meta.json`)).catch(() => null);
+          if (found !== null) return true;
+        }
+        return false;
+      },
+    };
+  }
+
+  /**
+   * Records this device is keeping off itself, for the bring-back screen.
+   *
+   * Read-only. Titles are read from the sync folder's copy now, for display,
+   * and never stored or reported. Tombstones are not listed: bringing one
+   * back would only delete its conversation again at Claudian's next launch.
+   */
+  async heldRecords(): Promise<readonly HeldRecordView[]> {
+    const binding = this.binding;
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!binding || !workspaceId) return [];
+    const load = await (await this.homeStore()).loadClaudianRecords(workspaceId);
+    if (load.status !== "loaded") return [];
+    const views: HeldRecordView[] = [];
+    for (const [rel, entry] of Object.entries(load.file.records)) {
+      const record = claudianRecordOf(rel);
+      const hold = entry.hold;
+      if (!record || !hold || hold.kind === "tombstone-consumed") continue;
+      views.push({
+        neutralRel: rel,
+        conversationId: record.conversationId,
+        kind: hold.kind,
+        sinceMs: hold.sinceMs,
+        releaseRequested: hold.releaseRequested,
+        title: await this.replicaTitle(binding.syncDirPath, workspaceId, rel),
+      });
+    }
+    return views.sort((a, b) => b.sinceMs - a.sinceMs);
+  }
+
+  /**
+   * Asks the next pass to land these records again (ADR-78 H5).
+   *
+   * Under the write gate, because a pass that is running now would save its
+   * own copy of the memory over this one; then a pass, so the user sees the
+   * result rather than a promise. The pass lands each with the same
+   * no-replace create a new record gets — it cannot overwrite anything.
+   */
+  async bringBack(rels: readonly string[]): Promise<BringBackOutcome> {
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!workspaceId) return { ok: false, reason: "unavailable" };
+    const marked = await this.withWriteGate<BringBackOutcome | null>(
+      { ok: false, reason: "sync-in-progress" },
+      async () => {
+        const home = await this.homeStore();
+        const load = await home.loadClaudianRecords(workspaceId);
+        if (load.status !== "loaded") return { ok: false, reason: "unavailable" };
+        const state = createClaudianRecordsState(load.file);
+        let count = 0;
+        for (const rel of rels) if (state.requestRelease(rel)) count += 1;
+        if (count === 0) return { ok: false, reason: "unavailable" };
+        await home.saveClaudianRecords(workspaceId, state.toFile());
+        return null;
+      },
+    );
+    if (marked !== null) return marked;
+    await this.syncNow();
+    return { ok: true };
+  }
+
+  private async replicaTitle(syncDirPath: string, workspaceId: string, rel: string): Promise<string | null> {
+    const target = this.host.joinPath(syncDirPath, workspaceId, ...rel.split("/"));
+    const stat = await this.host.fs.lstat(target).catch(() => null);
+    if (stat === null || !stat.isFile || stat.size > this.settings.maxFileSizeMB * 1024 * 1024) return null;
+    try {
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(await this.host.fs.readFile(target)));
+      const title = (parsed as { title?: unknown } | null)?.title;
+      return typeof title === "string" && title.length > 0 ? title : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Is this machine moving its conversation records into the shared layer? */
   sharesConversations(): boolean {
     return this.binding?.shareConversations === true;
@@ -1014,7 +1156,6 @@ export class PluginRuntime {
   private compatInput() {
     return {
       claudianVersion: this.claudianVersion,
-      recordsProvider: this.providerEnabled("claudian"),
       sharing: this.sharesConversations(),
     };
   }
@@ -1094,8 +1235,9 @@ export class PluginRuntime {
     }
     if (outcome.holds.length > 0) {
       notices.push(
-        `${outcome.holds.length} conversation record(s) differ on this device and in the shared ` +
-          'layer. Run "Repair shared conversation records" to see both and choose.',
+        `${outcome.holds.length} conversation record(s) on this device are not being shared, ` +
+          "because the shared copy was changed or removed since this machine shared it. Run " +
+          '"Repair shared conversation records" to see them and choose.',
       );
     }
     return notices;
@@ -1203,7 +1345,9 @@ export class PluginRuntime {
     return this.withWriteGate<PublishOutcome>({ ok: false, reason: "sync-in-progress" }, async () => {
       const run = await this.runSharing({ forced: one, only: one, inspectOnly: false });
       if (run === null) return { ok: false, reason: "unavailable" };
-      if (run.outcome.folded > 0) return { ok: true };
+      // `moved` as well as `folded`: a record another device removed from the
+      // shared layer is published by the original move, not by a fold.
+      if (run.outcome.folded + run.outcome.moved > 0) return { ok: true };
       return { ok: false, reason: "changed-again" };
     });
   }
@@ -1433,6 +1577,46 @@ function summarise(report: PassReport): string {
   const parts = applied > 0 ? [`${applied} change${applied === 1 ? "" : "s"}`] : [];
   if (failed > 0) parts.push(`${failed} failed`);
   return parts.join(", ");
+}
+
+/** One record the bring-back screen lists. */
+export interface HeldRecordView {
+  readonly neutralRel: string;
+  readonly conversationId: string;
+  readonly kind: Exclude<HoldKind, "tombstone-consumed">;
+  readonly sinceMs: number;
+  readonly releaseRequested: boolean;
+  /** From the sync folder's copy, read for this screen only. */
+  readonly title: string | null;
+}
+
+export type BringBackOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: "sync-in-progress" | "unavailable" };
+
+/** The pop-up for a pass's ADR-78 news, or null when it has none. */
+function announce(summary: ClaudianRecordsSummary | undefined): string | null {
+  if (!summary) return null;
+  const parts: string[] = [];
+  if (summary.newlyHeld > 0) {
+    parts.push(
+      `${summary.newlyHeld} conversation(s) you deleted on this device are being kept off it — ` +
+        "your other devices still have them.",
+    );
+  }
+  if (summary.changedSinceDeleted > 0) {
+    parts.push(
+      `${summary.changedSinceDeleted} conversation(s) deleted here were changed on another device since.`,
+    );
+  }
+  if (summary.restoredHistoryMissing > 0) {
+    parts.push(
+      `${summary.restoredHistoryMissing} conversation(s) that Claudian removed by itself, because ` +
+        "their history had not arrived, were restored.",
+    );
+  }
+  if (parts.length === 0) return null;
+  return `Claudian Session Sync: ${parts.join(" ")} Details in the sync report.`;
 }
 
 function describe(error: unknown): string {

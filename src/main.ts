@@ -13,6 +13,7 @@ import { ReportModal } from "./ui/report-modal";
 import { OrphanModal } from "./ui/orphan-modal";
 import { SharingModal } from "./ui/sharing-modal";
 import { RestoreModal } from "./ui/restore-modal";
+import { BringBackModal } from "./ui/bring-back-modal";
 import { launchNotice } from "./domain/claudian-compat";
 
 /**
@@ -93,6 +94,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       name: "Repair shared conversation records",
       callback: () => this.openSharing(),
     });
+    this.addCommand({
+      id: "bring-back-deleted-records",
+      name: "Bring back conversations deleted on this device",
+      callback: () => this.openBringBack(),
+    });
 
     // The three resolutions of §8.1 as palette entries. Each acts directly
     // when there is exactly one conflict — the common case, and the one where
@@ -166,7 +172,8 @@ export default class AiSessionSyncPlugin extends Plugin {
       pid: process.pid,
       // Claudian keeps its installation seed in localStorage, and Obsidian
       // gives every plugin the same renderer, so this machine can derive its
-      // own key exactly as Claudian does (`utils/env.ts`). Only ever read
+      // own key exactly as Claudian does (`core/device/InstallationKey.ts`
+      // since 2.3.8, `utils/env.ts` before; unchanged). Only ever read
       // here, never written, and never sent anywhere: it names a folder in
       // this vault, and the whole point is that the other machine's key is
       // different.
@@ -232,6 +239,8 @@ export default class AiSessionSyncPlugin extends Plugin {
     this.rescheduleIfNeeded();
     if (options.dryRun) new ReportModal(this.app, runtime.lastPassReport()).open();
     else if (status.phase === "error") new Notice(status.detail);
+    const announcement = runtime.takeAnnouncement();
+    if (announcement !== null) new Notice(announcement, 15_000);
   }
 
   /**
@@ -278,6 +287,10 @@ export default class AiSessionSyncPlugin extends Plugin {
 
   private openSharing(): void {
     new SharingModal(this.getRuntime(), this.app).open();
+  }
+
+  private openBringBack(): void {
+    new BringBackModal(this.getRuntime(), this.app).open();
   }
 
   /**

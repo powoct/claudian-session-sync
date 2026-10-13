@@ -184,9 +184,10 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
           "tell which version should win it leaves both and asks you — see \"Repair shared " +
           "conversation records\". Turning this back off stops further moves but does not " +
           "bring back what has already been shared. Claudian's \"Assign to this device\" is " +
-          "not supported while this is on — with Claudian 2.3.3 or later on any of your " +
-          "devices, the next sync moves the conversation back into the shared layer. To keep " +
-          "a conversation on one device, turn this off and leave it off: turning it back on " +
+          "not supported while this is on — with Claudian 2.3.3 or later, the next sync moves " +
+          "the conversation back into the shared layer, or, for one this device shared itself, " +
+          "holds it and lists it under \"Repair shared conversation records\". To keep a " +
+          "conversation on one device, turn this off and leave it off: turning it back on " +
           "shares it again. And if any of your machines runs Claudian 2.2.6 or earlier, a " +
           "shared conversation also carries the folders it was given access to as absolute " +
           "paths, which may mean something else there. Off by default, and set per machine.",
@@ -223,10 +224,6 @@ export class AiSessionSyncSettingTab extends PluginSettingTab {
             this.redraw();
           }),
         );
-      if (provider.id === "claudian") {
-        this.renderCompatWarning(containerEl, this.runtime.compatibilityWarnings().recordsProvider);
-      }
-
       new Setting(containerEl)
         .setName(`${provider.label} storage folder`)
         .setDesc(provider.rootDescription)

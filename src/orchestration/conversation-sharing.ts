@@ -360,6 +360,43 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
     }
     const base = state.get(id);
     const deviceHash = deps.hashBytes(device.bytes);
+    const forced = deps.forced?.has(id) === true;
+
+    // ── flat absent, after we published it: someone removed it (ADR-78 H9) ─
+    // This machine put a record in the shared layer and it is gone. Claudian
+    // 2.3.3+ deletes and assigns by removing the shared file and leaving
+    // nothing behind, so this is a delete — on another device, or by Claudian
+    // on its own — or an "Assign to this device", made there or here. The copy
+    // in this device's folder is either that assignment or what our move's
+    // stale write target left behind, and from here the two look the same.
+    // Publishing it again would undo someone's decision either way, so it is
+    // held, kept from being forgotten, and left to a person.
+    if (!flat.has(entry.name) && base !== undefined && !forced) {
+      state.set(id, { ...base, lastSeenMs: deps.nowMs });
+      const assigned = await assignedElsewhere(deps, store, deps.deviceKey, id);
+      hold(
+        id,
+        assigned
+          ? "assigned to another device since this machine shared it — not shared again"
+          : "no longer in the shared layer — deleted, or assigned to a device, since this machine " +
+              "shared it — not shared again",
+        {
+          conversationId: id,
+          reason: assigned
+            ? "Assigned to another device since this machine shared it."
+            : "No longer in the shared layer since this machine shared it: deleted on another " +
+              "device (or by Claudian there on its own), or assigned to a device — this one included.",
+          devicePath: source.value,
+          deviceSize: device.bytes.length,
+          deviceMtimeMs: device.mtimeMs,
+          sharedPath: null,
+          sharedSize: null,
+          sharedMtimeMs: null,
+          resolvable: true,
+        },
+      );
+      continue;
+    }
 
     // ── flat absent: the original move ───────────────────────────────────
     if (!flat.has(entry.name)) {
@@ -406,8 +443,6 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
       if (await removeVerified(deps, source.value, deviceHash)) completed += 1;
       continue;
     }
-
-    const forced = deps.forced?.has(id) === true;
 
     // ── the shared copy is still ours: fold this device's record forward ──
     if (forced || (base !== undefined && sharedHash === base.publishedHash)) {
@@ -523,6 +558,27 @@ export async function shareOwnConversations(deps: ShareDeps): Promise<ShareOutco
   }
 
   return finish();
+}
+
+/**
+ * Does another device's folder hold this conversation's record?
+ *
+ * Only for choosing the sentence: the hold is the same either way. A folder
+ * that cannot be listed reads as "no", which picks the more general wording.
+ */
+async function assignedElsewhere(
+  deps: ShareDeps,
+  store: string,
+  ownKey: string | null,
+  id: string,
+): Promise<boolean> {
+  const devices = deps.joinPath(store, DEVICES_DIR);
+  for (const entry of await deps.fs.readDir(devices).catch(() => [])) {
+    if (entry.isFile || entry.name === ownKey || !DEVICE_KEY.test(entry.name)) continue;
+    const found = await deps.fs.lstat(deps.joinPath(devices, entry.name, `${id}${META_SUFFIX}`)).catch(() => null);
+    if (found !== null) return true;
+  }
+  return false;
 }
 
 function entryFor(hash: string, size: number, nowMs: number): SharedRecordEntry {

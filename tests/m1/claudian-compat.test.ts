@@ -1,8 +1,9 @@
 /**
  * Claudian 2.3.3 stopped writing deletion and assignment markers (#1386).
  *
- * Two optional features were built on them, and neither plugin tells the user.
- * These tests pin the two halves of saying so: that the version is read from
+ * Two optional features were built on them. ADR-78 fixed the records provider,
+ * so only sharing is still warned about. These tests pin the two halves of
+ * saying so: that the version is read from
  * the manifest Obsidian actually loads, never guessed; and that the sentence
  * appears exactly when a feature switched on here is affected — silence
  * otherwise, because a warning that fires on a guess is one people learn to
@@ -52,9 +53,9 @@ describe("which Claudian deletes without a marker", () => {
 });
 
 describe("what is said, and when", () => {
-  const on = { recordsProvider: true, sharing: true };
+  const on = { sharing: true };
 
-  it("says nothing for an older Claudian, whatever is switched on", () => {
+  it("says nothing for an older Claudian", () => {
     expect(compatNotices({ claudianVersion: "2.3.2", ...on })).toEqual([]);
   });
 
@@ -62,74 +63,43 @@ describe("what is said, and when", () => {
     expect(compatNotices({ claudianVersion: null, ...on })).toEqual([]);
   });
 
-  it("says nothing when neither affected feature is on", () => {
-    // The default setup is not affected: a deleted record just stops being
-    // admitted. Warning everyone would bury the people it is for.
-    expect(
-      compatNotices({ claudianVersion: "2.3.3", recordsProvider: false, sharing: false }),
-    ).toEqual([]);
+  it("says nothing when sharing is off", () => {
+    // The default setup is not affected, and since ADR-78 neither is the
+    // records provider: a record deleted here stays deleted here.
+    expect(compatNotices({ claudianVersion: "2.3.3", sharing: false })).toEqual([]);
   });
 
-  it("names the feature, the version, and what the user will see", () => {
-    const warnings = compatWarnings({ claudianVersion: "2.3.3", ...on });
-
-    expect(warnings.recordsProvider).toContain("Claudian 2.3.3");
-    expect(warnings.recordsProvider).toContain("comes back after you delete it here and restart Obsidian");
-    expect(warnings.recordsProvider).toContain("turn this off");
-
-    expect(warnings.sharing).toContain("Claudian 2.3.3");
-    expect(warnings.sharing).toContain("can come back after a restart");
-    expect(warnings.sharing).toContain("deleted or assigned to itself");
+  it("names the version, what the user will see, and what to do", () => {
+    const { sharing } = compatWarnings({ claudianVersion: "2.3.3", ...on });
+    expect(sharing).toContain("Claudian 2.3.3");
+    expect(sharing).toContain("can come back after a restart");
+    expect(sharing).toContain("deleting it again removes it");
+    expect(sharing).toContain("Keep every device on the same Claudian version");
   });
 
-  it("does not promise a second delete works while the records provider is also on", () => {
-    // With the provider on, the flat record is restored from the sync folder
-    // after every delete, so "deleting it again removes it" would be false in
-    // exactly the setup that turns both features on.
-    const alone = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: false, sharing: true });
-    expect(alone.sharing).toContain("deleting it again normally removes it");
-
-    const both = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: true, sharing: true });
-    expect(both.sharing).not.toContain("deleting it again");
-    expect(both.sharing).toContain("keeps coming back");
+  it("says another device's delete is held, not shared again (ADR-78 H9)", () => {
+    // 0.3.5 said it "can be shared again from this one". That stopped being
+    // true when the flat-absent row learned to hold.
+    const { sharing } = compatWarnings({ claudianVersion: "2.3.20", ...on });
+    expect(sharing).not.toContain("can be shared again");
+    expect(sharing).toContain('listed under "Repair shared conversation records"');
   });
 
-  it("scopes the records warning to the shared layer it actually carries", () => {
-    // A record in this device's own folder is not in the sync folder, so
-    // deleting it works; an unscoped warning is one a user disproves in a
-    // minute and then stops believing.
-    const warning = compatWarnings({ claudianVersion: "2.3.3", recordsProvider: true, sharing: false });
-    expect(warning.recordsProvider).toContain("record is in the shared layer");
-    expect(warning.recordsProvider).toContain("deleted under an older Claudian");
+  it("mentions @ only where Claudian excludes the shared layer from it", () => {
+    expect(compatWarnings({ claudianVersion: "2.3.11", ...on }).sharing).not.toContain("@");
+    expect(compatWarnings({ claudianVersion: "2.3.12", ...on }).sharing).toContain("cannot be mentioned with @");
+    expect(compatWarnings({ claudianVersion: "2.10.0", ...on }).sharing).toContain("cannot be mentioned with @");
   });
 
-  it("warns only about what is switched on", () => {
-    const provider = compatWarnings({ claudianVersion: "2.4.0", recordsProvider: true, sharing: false });
-    expect(provider.recordsProvider).not.toBeNull();
-    expect(provider.sharing).toBeNull();
-
-    const sharing = compatWarnings({ claudianVersion: "2.4.0", recordsProvider: false, sharing: true });
-    expect(sharing.recordsProvider).toBeNull();
-    expect(sharing.sharing).not.toBeNull();
-  });
-
-  it("puts the same sentences in the report as in the settings pane", () => {
+  it("puts the same sentence in the report as in the settings pane", () => {
     const input = { claudianVersion: "2.3.3", ...on };
-    const warnings = compatWarnings(input);
-    expect(compatNotices(input)).toEqual([warnings.recordsProvider, warnings.sharing]);
+    expect(compatNotices(input)).toEqual([compatWarnings(input).sharing]);
   });
 
-  it("launch notice names what is affected, and nothing when nothing is", () => {
-    expect(launchNotice({ recordsProvider: null, sharing: null })).toBeNull();
-    expect(launchNotice({ recordsProvider: "x", sharing: null })).toContain(
-      "“Claudian conversation records” is not fully compatible",
-    );
-    expect(launchNotice({ recordsProvider: null, sharing: "x" })).toContain(
-      "sharing is not fully compatible",
-    );
-    expect(launchNotice({ recordsProvider: "x", sharing: "x" })).toContain(
-      "“Claudian conversation records” and sharing are not fully compatible",
-    );
+  it("launch notice names sharing, and nothing when it is unaffected", () => {
+    expect(launchNotice({ sharing: null })).toBeNull();
+    expect(launchNotice({ sharing: "x" })).toContain("sharing is not fully compatible");
+    expect(launchNotice({ sharing: "x" })).not.toContain("records");
   });
 });
 

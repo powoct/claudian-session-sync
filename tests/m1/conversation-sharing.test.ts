@@ -62,6 +62,8 @@ interface RunOptions {
   readonly only?: ReadonlySet<string>;
   readonly inspectOnly?: boolean;
   readonly mayWrite?: () => Promise<boolean>;
+  /** The pass's clock; `published` entries are always last seen at NOW. */
+  readonly nowMs?: number;
   /** Returns null to model a backup that could not be taken. */
   readonly backup?: () => Promise<string | null>;
 }
@@ -98,7 +100,7 @@ async function run(root: string, options: RunOptions = {}) {
     hashBytes: (bytes) => createHash("sha256").update(bytes).digest("hex"),
     vaultRealPath: root,
     deviceKey: options.deviceKey === undefined ? DEVICE : options.deviceKey,
-    nowMs: NOW,
+    nowMs: options.nowMs ?? NOW,
     published: {
       schemaVersion: 1,
       deviceKey: DEVICE,
@@ -557,5 +559,75 @@ describe("ADR-71: looking is not consenting", () => {
       "a record the user was never shown must not be published",
     ).toBeNull();
     expect(await read(deviceRecord(root, DEVICE, bystander))).toContain("not asked about");
+  });
+});
+
+describe("ADR-78 H9: a shared record that is gone is someone's decision", () => {
+  // Claudian 2.3.3+ deletes and assigns by removing the shared file and
+  // leaving nothing behind. A record this machine published and now finds
+  // missing, with a copy still in this device's folder, must not be published
+  // again — that would undo another device's delete or assignment.
+  async function publishedThenRemoved(root: string) {
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one" });
+    expect((await run(root)).moved).toBe(1);
+    const published = await baseFrom(root, CONV);
+    // Upstream's stale write target recreates the device copy (ADR-71)…
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "one, again" });
+    // …and another device deletes the shared record, markerless.
+    await fsp.rm(sharedRecord(root, CONV));
+    return published;
+  }
+
+  it("holds instead of publishing it again", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    const outcome = await run(root, { published });
+    expect(outcome.moved).toBe(0);
+    expect(await read(sharedRecord(root, CONV)), "republished").toBeNull();
+    expect(await read(deviceRecord(root, DEVICE, CONV))).not.toBeNull();
+    expect(outcome.holds.map((h) => [h.conversationId, h.sharedPath, h.resolvable])).toEqual([[CONV, null, true]]);
+    expect(outcome.heldBack.join("\n")).toContain("not shared again");
+  });
+
+  it("keeps the base, so the hold outlives the thirty-day forgetting", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    // A pass thirty-one days after the base was last refreshed: without the
+    // refresh, GC drops it, and a record with no base is published by the
+    // original move on the pass after.
+    const later = NOW + 31 * 24 * 60 * 60 * 1000;
+    const outcome = await run(root, { published, nowMs: later });
+    expect(outcome.published?.records[CONV]?.lastSeenMs).toBe(later);
+    expect(outcome.published?.records[CONV]?.publishedHash).toBe(published[CONV]?.publishedHash);
+  });
+
+  it("shows on the repair screen, where publishing it is one deliberate click", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+
+    const inspected = await run(root, { published, inspectOnly: true });
+    expect(inspected.holds.map((h) => h.conversationId)).toEqual([CONV]);
+    expect(await read(sharedRecord(root, CONV))).toBeNull();
+
+    const forced = await run(root, { published, forced: new Set([CONV]), only: new Set([CONV]) });
+    expect(forced.moved).toBe(1);
+    expect(await read(sharedRecord(root, CONV))).toContain("one, again");
+  });
+
+  it("names an assignment to another device as one", async () => {
+    const root = await vault();
+    const published = await publishedThenRemoved(root);
+    await writeRecord(root, OTHER, CONV, { id: CONV, providerId: "claude", title: "theirs now" });
+
+    const outcome = await run(root, { published });
+    expect(outcome.heldBack.join("\n")).toContain("assigned to another device");
+  });
+
+  it("still makes the first move of a record it never published", async () => {
+    const root = await vault();
+    await writeRecord(root, DEVICE, CONV, { id: CONV, providerId: "claude", title: "new" });
+    expect((await run(root)).moved).toBe(1);
   });
 });

@@ -695,7 +695,12 @@ export class FakeCli {
   }
 
   /**
-   * Marks the conversation deleted, the way Claudian's markDeleted does.
+   * Marks the conversation deleted, the way Claudian 2.3.2 and older did.
+   *
+   * Only for admission and for mixed-version fleets. It keeps the meta file,
+   * which no Claudian version actually does (2.2.4 measured: Delete removed
+   * the record and left the tombstone), and Claudian 2.3.3+ writes no marker
+   * at all — for those, see `tests/helpers/claudian-2320.ts`.
    *
    * `device` writes the marker inside that device's directory instead of at
    * the top level, which is the distinction upstream draws:

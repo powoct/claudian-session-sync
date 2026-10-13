@@ -35,6 +35,11 @@ import type { ProviderAdapter } from "../providers/provider-adapter";
 import { type PassReport, type Barrier } from "./pass-report";
 import { type EngineDeps, type MintOutcome, runPass } from "./sync-engine";
 import { type ScrubContext, createPassState, recordOutcomes } from "./state-adapters";
+import {
+  type ClaudianRecordsState,
+  createClaudianRecordsState,
+  seedClaudianRecords,
+} from "./claudian-records";
 
 /** T6's per-pass sample size (§5.3.3): min(20, 2% of what we know about). */
 const SCRUB_SAMPLE_MAX = 20;
@@ -53,7 +58,12 @@ export interface PassRunnerDeps {
    * difference between a replan and a lost record. Returns notices to fold
    * into the report.
    */
-  readonly beforeDiscover?: () => Promise<readonly string[]>;
+  readonly beforeDiscover?: EngineDeps["beforeDiscover"];
+  /**
+   * The probes ADR-78 asks, when the `claudian` provider is on. The memory
+   * they work with is loaded and saved here, around the pass.
+   */
+  readonly claudianRecords?: Omit<NonNullable<EngineDeps["claudianRecords"]>, "state">;
   readonly fs: FsGateway;
   readonly guard: PathGuardDeps;
   readonly clock: Clock;
@@ -288,6 +298,8 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     scrub: scrubContext(deps, loaded.file.remote, manifestLoad.status !== "ok", previous, record),
   });
 
+  const claudian = await loadClaudianRecords(deps, loaded.file.local);
+
   // ── the pass ─────────────────────────────────────────────────────────────
   const backupWriter = createBackupWriter({
     fs: deps.fs,
@@ -333,6 +345,9 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
     machineIdPrefix: deps.machineId.slice(0, 8),
     ...(deps.lock ? { lock: deps.lock } : {}),
     nowIso: () => new Date(deps.clock.nowMs()).toISOString(),
+    ...(claudian && deps.claudianRecords
+      ? { claudianRecords: { ...deps.claudianRecords, state: claudian.state } }
+      : {}),
   });
 
   // ── commit (§7.1 P8) ─────────────────────────────────────────────────────
@@ -349,6 +364,11 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
       })),
     );
     await deps.home.saveObservations(deps.workspaceId, observations, nowMs);
+    // A rebuilt memory is saved even when the pass changed nothing in it:
+    // otherwise it is rebuilt — and its notice repeated — every pass.
+    if (claudian?.writable && (claudian.rebuilt || claudian.state.changed())) {
+      await deps.home.saveClaudianRecords(deps.workspaceId, claudian.state.toFile());
+    }
 
     const manifest = state.manifest();
     // Not rewritten when a newer client is demonstrably using this directory
@@ -391,12 +411,59 @@ export async function runWorkspacePass(deps: PassRunnerDeps): Promise<PassOutcom
   // as it runs, now that it owns the call. The ledger notice is not — it is
   // decided before the pass begins, from a load the pass would otherwise
   // discard without a word.
+  const leading = [...ledgerNotices, ...(claudian?.notice ? [claudian.notice] : [])];
   return {
-    report:
-      ledgerNotices.length > 0
-        ? { ...report, notices: [...ledgerNotices, ...report.notices] }
-        : report,
+    report: leading.length > 0 ? { ...report, notices: [...leading, ...report.notices] } : report,
     readiness: record,
+  };
+}
+
+/**
+ * ADR-78's memory, or null when the `claudian` provider is off.
+ *
+ * A machine with no file yet starts from the ledger, which knows every record
+ * converged here recently — that is what lets the first pass after upgrading
+ * recognise a delete made the day before. An unreadable file is rebuilt the
+ * same way and said out loud, because a delete older than the ledger's memory
+ * can come back once. A file from a newer build of this plugin is used the
+ * same way but never written: overwriting it would throw away what that build
+ * knows.
+ */
+async function loadClaudianRecords(
+  deps: PassRunnerDeps,
+  ledgerLocal: Readonly<Record<string, { readonly lastConvergedHash?: string | null }>>,
+): Promise<{
+  state: ClaudianRecordsState;
+  writable: boolean;
+  rebuilt: boolean;
+  notice: string | null;
+} | null> {
+  if (!deps.claudianRecords || !deps.providers.some((p) => p.adapter.id === "claudian")) return null;
+  const load = await deps.home.loadClaudianRecords(deps.workspaceId);
+  if (load.status === "loaded") {
+    return { state: createClaudianRecordsState(load.file), writable: true, rebuilt: false, notice: null };
+  }
+  const seeded = createClaudianRecordsState(seedClaudianRecords(ledgerLocal));
+  if (load.status === "absent") return { state: seeded, writable: true, rebuilt: true, notice: null };
+  if (load.status === "newer") {
+    return {
+      state: seeded,
+      writable: false,
+      rebuilt: false,
+      notice:
+        "This device's record of conversations deleted here was written by a newer version of " +
+        "this plugin, so it is being left alone. Until this one is updated, a conversation " +
+        "deleted here may come back.",
+    };
+  }
+  return {
+    state: seeded,
+    writable: true,
+    rebuilt: true,
+    notice:
+      "This device's record of conversations deleted here could not be read, so it was rebuilt " +
+      "from the sync history. A conversation deleted here a while ago may come back once; " +
+      "deleting it again keeps it deleted.",
   };
 }
 

@@ -100,7 +100,7 @@ describe("a provider whose root lives inside the vault", () => {
     expect(overwrite?.backupPath).toBeTruthy();
   }, 30_000);
 
-  it("pulls the other machine's records, tombstones included", async () => {
+  it("pulls the other machine's records, and a deletion marker without the record it deletes", async () => {
     const a = await harnessWithClaudian();
     await writeRecord(a, META, { id: CONV, providerId: "codex", sessionId: null });
     await writeRecord(a, `${CONV}.deleted.json`, {
@@ -117,11 +117,15 @@ describe("a provider whose root lives inside the vault", () => {
     await b.settle();
 
     const landed = await fsp.readdir(storeDir(b));
-    expect(landed.sort()).toEqual([`${CONV}.deleted.json`, META]);
+    expect(landed.sort()).toEqual([`${CONV}.deleted.json`]);
     // The tombstone arriving IS the record layer's deletion propagation:
-    // Claudian on this machine now hides the conversation, and this plugin's
-    // own admission stops carrying its sessions (ADR-47). No session file was
-    // deleted anywhere — ADR-10 still holds.
+    // Claudian on this machine hides the conversation, and this plugin's own
+    // admission stops carrying its sessions (ADR-47). The record beside it is
+    // not landed (ADR-78): this machine never held it, and Claudian 2.3.3+
+    // would only delete it at its next launch. No session file was deleted
+    // anywhere — ADR-10 still holds.
+    const rows = b.runtime.lastPassReport()?.actions.filter((a) => a.neutralRel === `claudian/${META}`);
+    expect(rows?.map((a) => [a.action, a.reason])).toEqual([["SKIP_RETIRED", "tombstoned-in-replica"]]);
   }, 30_000);
 
   it("turns a genuine fork into a conflict, never a picked side", async () => {

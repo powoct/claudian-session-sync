@@ -19,11 +19,13 @@
  * of one conversation distinct without inventing group machinery §6.6 says
  * not to build early.
  *
- * Deletion rides along for free: a `.deleted.json` tombstone is just a file,
- * so it syncs like one — and when it lands, the other machine's Claudian
- * hides the conversation and this plugin's own admission (ADR-47) stops
- * carrying its sessions. That is deletion propagation of the *record* layer;
- * session files still never propagate a deletion (ADR-10).
+ * Deletion used to ride along for free: Claudian 2.3.2 and older mark a
+ * deleted conversation with a `.deleted.json` tombstone, which syncs like any
+ * file, and when it lands the other machine's Claudian hides the conversation.
+ * 2.3.3 deletes by removing the record and nothing else, which a sync that
+ * restores whatever this machine lacks reads as "not here yet" — so the engine
+ * now keeps a record this machine held, and no longer holds, off it (ADR-78).
+ * Session files still never propagate a deletion (ADR-10).
  *
  * ADR-47's "admission by the vault's records" reads naturally here: this
  * provider's files *are* the records, so the whitelist below is the whole

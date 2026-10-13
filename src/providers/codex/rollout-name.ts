@@ -6,7 +6,8 @@
  * whole thing with one regex including the timestamp format. Claudian — which
  * has to keep working across Codex versions — deliberately does not: it
  * matches `endsWith("-<threadId>.jsonl")` and never parses the prefix
- * (`CodexHistoryStore.ts:1522`). This follows that, because a timestamp
+ * (`findCodexSessionFileAsync` in `CodexHistoryStore.ts`, unchanged through
+ * 2.3.20). This follows that, because a timestamp
  * format change upstream should cost us nothing, and because a session we
  * fail to recognise is a session that silently stops syncing.
  *

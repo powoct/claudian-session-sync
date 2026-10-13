@@ -70,9 +70,11 @@ const STORE_DIRS = [
  *
  * Both layers are real at once: the vault that surfaced this held 111 records
  * at the top level beside two device-scoped ones, and upstream's own reader
- * still consults the flat path (`getUnscopedMetadataPath`) and even
- * `.claude/sessions` before it gives up. So this is not a migration to step
- * over — it is a store with layers.
+ * still consults the flat path (`getUnscopedMetadataPath`). So this is not a
+ * migration to step over — it is a store with layers. (`.claude/sessions` is
+ * still admitted from as well, although Claudian 2.3.6 stopped reading it: a
+ * record there names a session this vault had, and admitting one more is
+ * harmless where missing one is not.)
  *
  * Read from **every** device directory, not just this machine's, and that is
  * deliberate. Upstream's listing is device-scoped on purpose:
@@ -93,10 +95,10 @@ const DEVICE_KEY = /^device-[a-f0-9]{64}$/;
 
 const META_SUFFIX = ".meta.json";
 /**
- * Claudian's deletion is a tombstone, not a removal: `markDeleted` writes
- * `<convId>.deleted.json` and leaves the meta file where it was, and
- * Claudian's own scan filters by the tombstones. Admission does the same —
- * a deleted conversation stops being admitted. Nothing is removed from the
+ * Claudian 2.3.2 and older mark a deletion with a tombstone,
+ * `<convId>.deleted.json`, and filter their scan by it; admission does the
+ * same, so a deleted conversation stops being admitted. From 2.3.3 a delete
+ * removes the meta file instead, which stops admission by itself. Nothing is removed from the
  * sync folder here: that would be deletion propagation, which stays out of
  * scope until it has a design of its own (ADR-10; the resurrection race is
  * real — the other machine may still be extending its copy).

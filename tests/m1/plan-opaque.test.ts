@@ -186,3 +186,91 @@ describe("§7.2b #4b, when the sync tool set this machine's version aside (OQ-18
     }
   });
 });
+
+describe("§7.2b #3h, a Claudian record removed on this device (ADR-78)", () => {
+  const remoteOnly = (over: Partial<OpaquePlanInput> = {}) =>
+    planOpaque(input({ local: ABSENT, remoteSide: side(), lastConvergedHash: "sha256:aaaa", ...over }));
+
+  it("keeps it off this device when the verdict is hold", () => {
+    const decision = remoteOnly({ absentHere: { verdict: "hold", kind: "deleted-here" } });
+    expect([decision.action, decision.reason]).toEqual(["SKIP_DELETED_HERE", "deleted-here"]);
+  });
+
+  it("never lands a retired file", () => {
+    const decision = remoteOnly({ absentHere: { verdict: "retired", reason: "retired-sidecar" } });
+    expect([decision.action, decision.reason]).toEqual(["SKIP_RETIRED", "retired-sidecar"]);
+  });
+
+  it("lands it with the verdict's reason, so the report says why", () => {
+    for (const reason of ["remote-only", "remote-only-history-not-here", "brought-back"] as const) {
+      const decision = remoteOnly({ absentHere: { verdict: "restore", reason } });
+      expect([decision.action, decision.reason]).toEqual(["PULL_NEW", reason]);
+    }
+  });
+
+  it("is today's answer when nothing says otherwise", () => {
+    expect(remoteOnly().action).toBe("PULL_NEW");
+    expect(remoteOnly().reason).toBe("remote-only");
+  });
+
+  it("lets every rule above #3 speak first", () => {
+    const hold = { verdict: "hold", kind: "deleted-here" } as const;
+    expect(remoteOnly({ absentHere: hold, remoteSide: side({ stable: false }) }).action).toBe("DEFER");
+    expect(remoteOnly({ absentHere: hold, remoteSide: side({ size: 0 }) }).action).toBe("DEFER");
+    expect(remoteOnly({ absentHere: hold, remote: "not-ready" }).action).toBe("SKIP_REMOTE_NOT_READY");
+  });
+
+  it("is read nowhere but #3 — it cannot touch a file this device has", () => {
+    const hold = { verdict: "hold", kind: "deleted-here" } as const;
+    // Both present, local at the base: still the ordinary fast-forward.
+    expect(
+      planOpaque(
+        input({
+          local: side({ observedHash: "sha256:base" }),
+          remoteSide: side({ observedHash: "sha256:new" }),
+          lastConvergedHash: "sha256:base",
+          absentHere: hold,
+        }),
+      ).action,
+    ).toBe("PULL_OVERWRITE");
+    expect(planOpaque(input({ remoteSide: ABSENT, absentHere: hold })).action).toBe("PUSH_NEW");
+  });
+});
+
+describe("a sidecar the installed Claudian no longer writes is never published (ADR-78)", () => {
+  it("withholds the push of a local-only one", () => {
+    const decision = planOpaque(input({ remoteSide: ABSENT, neverPublish: true }));
+    expect([decision.action, decision.reason]).toEqual(["SKIP_RETIRED", "retired-sidecar-not-pushed"]);
+  });
+
+  it("withholds the fast-forward push", () => {
+    const decision = planOpaque(
+      input({
+        local: side({ observedHash: "sha256:new" }),
+        remoteSide: side({ observedHash: "sha256:base" }),
+        lastConvergedHash: "sha256:base",
+        neverPublish: true,
+      }),
+    );
+    expect(decision.action).toBe("SKIP_RETIRED");
+  });
+
+  it("leaves pulls and conflicts alone", () => {
+    expect(
+      planOpaque(
+        input({
+          local: side({ observedHash: "sha256:base" }),
+          remoteSide: side({ observedHash: "sha256:new" }),
+          lastConvergedHash: "sha256:base",
+          neverPublish: true,
+        }),
+      ).action,
+    ).toBe("PULL_OVERWRITE");
+    expect(planOpaque(input({ local: ABSENT, neverPublish: true })).action).toBe("PULL_NEW");
+    expect(
+      planOpaque(
+        input({ local: side({ observedHash: "sha256:x" }), remoteSide: side({ observedHash: "sha256:y" }), neverPublish: true }),
+      ).action,
+    ).toBe("CONFLICT");
+  });
+});

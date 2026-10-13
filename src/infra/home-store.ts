@@ -33,6 +33,7 @@ import {
 } from "./state-store";
 import type { NotReadyReason, ReadinessState, RemoteRecord } from "../domain/readiness";
 import { INITIAL_REMOTE_RECORD } from "../domain/readiness";
+import { type HoldKind, claudianRecordOf } from "../domain/deleted-here";
 
 /** 0700: this directory holds absolute paths and a machine identity. */
 const DIR_MODE = 0o700;
@@ -147,6 +148,68 @@ export interface SharedRecordEntry {
   readonly lastSeenMs: number;
 }
 
+/**
+ * `claudian-records.json` (ADR-78) — which of Claudian's records this machine
+ * has held, and which it is keeping off itself because they were removed here.
+ *
+ * Separate from the observation ledger on purpose. The ledger forgets a file
+ * thirty days after it was last seen on this machine, and is rebuilt from
+ * nothing whenever its owner or its sync folder changes — and a record the
+ * user deleted is precisely a file this machine stops seeing. A memory of
+ * deletions that expires is a conversation that comes back a month later.
+ *
+ * Keyed by neutral path (`claudian/<conv>.<kind>.json`). Holds hashes, sizes,
+ * timestamps and booleans — no title, no text: the "changed since" check
+ * compares a digest, never content.
+ */
+export interface ClaudianRecordsFile {
+  readonly schemaVersion: number;
+  readonly records: Readonly<Record<string, ClaudianRecordEntry>>;
+}
+
+export interface ClaudianRecordEntry {
+  /** sha256 of the bytes this machine last converged on for this file. */
+  readonly witnessedHash: string;
+  /**
+   * Consecutive passes whose complete, READY view of the sync folder did not
+   * contain this file. At 2 the entry is dropped: a file gone from both sides
+   * has nothing left to keep off this machine (ADR-78 H5).
+   */
+  readonly goneFromReplicaPasses: number;
+  readonly hold?: HeldRecordEntry;
+}
+
+export interface HeldRecordEntry {
+  readonly kind: HoldKind;
+  readonly sinceMs: number;
+  /** Passes this hold has been applied in, including the first. */
+  readonly passes: number;
+  /** The user has been told about it (deleted-here only). */
+  readonly announced: boolean;
+  /** The sync folder's copy when last looked at, for "changed since". */
+  readonly replicaSize: number;
+  readonly replicaMtimeMs: number;
+  /** `recordDigest` of that copy, or null when it could not be parsed. */
+  readonly replicaDigest: string | null;
+  /** The user asked for it back; the next pass lands it. */
+  readonly releaseRequested: boolean;
+}
+
+/** Why `loadClaudianRecords` came back without a usable file. */
+export type ClaudianRecordsLoad =
+  | { readonly status: "loaded"; readonly file: ClaudianRecordsFile }
+  | { readonly status: "absent" }
+  | { readonly status: "unusable" }
+  /** Written by a newer build of this plugin: not read, and never overwritten. */
+  | { readonly status: "newer" };
+
+const HOLD_KINDS: ReadonlySet<string> = new Set<HoldKind>([
+  "deleted-here",
+  "moved-to-device",
+  "removed-by-tombstone",
+  "tombstone-consumed",
+]);
+
 export interface HomeLayout {
   readonly root: string;
   readonly machineFile: string;
@@ -159,6 +222,7 @@ export interface HomeLayout {
   observationsFile(workspaceId: string): string;
   remoteFile(workspaceId: string): string;
   sharedRecordsFile(workspaceId: string): string;
+  claudianRecordsFile(workspaceId: string): string;
   lockFile(workspaceId: string): string;
 }
 
@@ -177,6 +241,7 @@ export function homeLayout(deps: HomeStoreDeps): HomeLayout {
     observationsFile: (id) => join(root, "state", id, "observations.json"),
     remoteFile: (id) => join(root, "state", id, "remote.json"),
     sharedRecordsFile: (id) => join(root, "state", id, "shared-records.json"),
+    claudianRecordsFile: (id) => join(root, "state", id, "claudian-records.json"),
     lockFile: (id) => join(root, "locks", `${id}.lock`),
   };
 }
@@ -198,6 +263,8 @@ export interface HomeStore {
   saveRemote(workspaceId: WorkspaceId, record: RemoteRecord, context: RemoteContext): Promise<void>;
   loadSharedRecords(workspaceId: WorkspaceId, deviceKey: string): Promise<SharedRecordsFile>;
   saveSharedRecords(workspaceId: WorkspaceId, file: SharedRecordsFile): Promise<void>;
+  loadClaudianRecords(workspaceId: WorkspaceId): Promise<ClaudianRecordsLoad>;
+  saveClaudianRecords(workspaceId: WorkspaceId, file: ClaudianRecordsFile): Promise<void>;
   /** Mints a path under the state root; the only way to get a writable one. */
   mint(absoluteTarget: string): Result<SafeAbsolutePath>;
 }
@@ -335,6 +402,17 @@ export function createHomeStore(deps: HomeStoreDeps): HomeStore {
       await put(layout.sharedRecordsFile(workspaceId), layout.stateDir(workspaceId), file);
     },
 
+    async loadClaudianRecords(workspaceId) {
+      const load = await readJson(deps.fs, layout.claudianRecordsFile(workspaceId));
+      if (load.status === "absent") return { status: "absent" };
+      if (load.status === "unusable") return { status: "unusable" };
+      return parseClaudianRecords(load.raw);
+    },
+
+    async saveClaudianRecords(workspaceId, file) {
+      await put(layout.claudianRecordsFile(workspaceId), layout.stateDir(workspaceId), file);
+    },
+
     mint,
   };
 }
@@ -431,6 +509,65 @@ function parseSharedRecords(raw: unknown): SharedRecordsFile | null {
     };
   }
   return { schemaVersion: c.schemaVersion, deviceKey: c.deviceKey, records };
+}
+
+/**
+ * Drops what it cannot vouch for, entry by entry.
+ *
+ * An entry that does not parse is lost, which can only ever release a hold —
+ * the record comes back once, and deleting it again holds it again. The one
+ * thing that is never guessed is a hold's kind: an unknown one would be a
+ * hold this version cannot explain to the user.
+ */
+function parseClaudianRecords(raw: unknown): ClaudianRecordsLoad {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { status: "unusable" };
+  const c = raw as Partial<ClaudianRecordsFile>;
+  if (typeof c.schemaVersion !== "number") return { status: "unusable" };
+  if (c.schemaVersion > STATE_SCHEMA_VERSION) return { status: "newer" };
+  if (typeof c.records !== "object" || c.records === null || Array.isArray(c.records)) {
+    return { status: "unusable" };
+  }
+
+  const records: Record<string, ClaudianRecordEntry> = {};
+  for (const [rel, value] of Object.entries(c.records)) {
+    if (claudianRecordOf(rel) === null) continue;
+    if (typeof value !== "object" || value === null) continue;
+    const entry = value as Partial<ClaudianRecordEntry>;
+    if (typeof entry.witnessedHash !== "string") continue;
+    const gone = finite(entry.goneFromReplicaPasses) ?? 0;
+    const hold = parseHold(entry.hold);
+    records[rel] = {
+      witnessedHash: entry.witnessedHash,
+      goneFromReplicaPasses: gone,
+      ...(hold ? { hold } : {}),
+    };
+  }
+  return { status: "loaded", file: { schemaVersion: c.schemaVersion, records } };
+}
+
+function parseHold(raw: unknown): HeldRecordEntry | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const h = raw as Partial<HeldRecordEntry>;
+  if (typeof h.kind !== "string" || !HOLD_KINDS.has(h.kind)) return null;
+  const sinceMs = finite(h.sinceMs);
+  const passes = finite(h.passes);
+  const size = finite(h.replicaSize);
+  const mtime = finite(h.replicaMtimeMs);
+  if (sinceMs === null || passes === null || size === null || mtime === null) return null;
+  return {
+    kind: h.kind,
+    sinceMs,
+    passes,
+    announced: h.announced === true,
+    replicaSize: size,
+    replicaMtimeMs: mtime,
+    replicaDigest: typeof h.replicaDigest === "string" ? h.replicaDigest : null,
+    releaseRequested: h.releaseRequested === true,
+  };
+}
+
+function finite(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function parseRemote(raw: unknown): RemoteStateFile | null {

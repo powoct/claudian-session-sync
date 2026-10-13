@@ -30,7 +30,7 @@
  */
 import type { FsGateway } from "./fs-gateway";
 
-/** Claudian's plugin id — unchanged from 2.2.x through 2.3.3. */
+/** Claudian's plugin id — unchanged from 2.2.x through 2.3.20. */
 export const CLAUDIAN_PLUGIN_ID = "realclaudian";
 
 export interface ClaudianVersionDeps {
