@@ -205,21 +205,14 @@ describe("evidence about the sync folder's copy is only ever what was read from 
     await swapIn(path.join(b.replicaRoot, WORKSPACE_ID, rel), twin);
     await a.wiredPass(); // First sight of the moved copy: it settles.
 
-    const failed = await a.wiredPass({
-      barrier: async (point, ctx) => {
-        if (ctx.neutralRel !== rel) return;
-        if (point === "P2:o2-taken") await fsp.chmod(aReplica, 0o000);
-        if (point === "P3:bytes-read") await fsp.chmod(aReplica, 0o644);
-      },
-    });
+    a.readFailures.add(aReplica); // Held by the sync client for this one read.
+    const failed = await a.wiredPass();
     expect(failed.report.actions.find((x) => x.neutralRel === rel)).toMatchObject({
       action: "DEFER",
       reason: "read-failed",
     });
 
-    // The chmod that made the read fail also moved the copy's ctime, so it
-    // settles for a pass first; it is never answered from the cache before
-    // it is read.
+    // Never answered from the cache before it is read again.
     const later: string[] = [];
     for (let i = 0; i < 3; i++) {
       const row = (await a.wiredPass()).report.actions.find((x) => x.neutralRel === rel);

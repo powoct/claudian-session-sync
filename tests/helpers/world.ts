@@ -202,6 +202,12 @@ export class Machine {
    * deleting the manifest must not touch it.
    */
   private readonly localEvidence = new Map<string, CachedContentFacts>();
+  /**
+   * Paths whose next full read fails with EBUSY, once — a sync client or an
+   * antivirus holding the file. Permission bits cannot do this portably:
+   * Windows reads a mode-000 file regardless.
+   */
+  readonly readFailures = new Set<string>();
   /** This machine's own record of the sync folder's copies (ADR-84). */
   private readonly remoteEvidence = new Map<string, CachedContentFacts>();
   /**
@@ -431,7 +437,7 @@ export class Machine {
    */
   async wiredPass(options: WiredPassOptions = {}): Promise<PassOutcome> {
     const guard = await this.pathGuard();
-    const fs = countingGateway(this.nodeGateway(), this.io);
+    const fs = countingGateway(this.nodeGateway(), this.io, this.readFailures);
     const home = createHomeStore({ fs, guard, joinPath: path.join, stateRoot: this.homeRoot });
     const syncDir = createSyncDirStore({
       fs,
@@ -621,7 +627,7 @@ export class Machine {
     localQuietMs?: number;
     remoteQuietMs?: number;
   }): EngineDeps {
-    const fs = countingGateway(this.nodeGateway(), this.io);
+    const fs = countingGateway(this.nodeGateway(), this.io, this.readFailures);
     const adapter = this.adapter();
 
     return {
@@ -864,6 +870,7 @@ class MemoryLedger implements LedgerView {
 function countingGateway(
   inner: FsGateway,
   counts: { readFile: number; readTail: number; readHead: number; lstat: number; readPaths: string[] },
+  readFailures: Set<string> = new Set(),
 ): FsGateway {
   return {
     ...inner,
@@ -874,6 +881,11 @@ function countingGateway(
     async readFile(target) {
       counts.readFile++;
       counts.readPaths.push(target);
+      if (readFailures.delete(target)) {
+        const error: NodeJS.ErrnoException = new Error(`EBUSY: injected, open '${target}'`);
+        error.code = "EBUSY";
+        throw error;
+      }
       return inner.readFile(target);
     },
     async readTail(target, n) {
