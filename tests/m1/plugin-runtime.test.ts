@@ -328,7 +328,11 @@ describe("dry run", () => {
     await h.settle();
 
     await fsp.rm(path.join(h.homedir, ".claudian-session-sync", "machine.json"));
-    h.restart(); // …and a runtime that has not read one, as on launch
+    // …and a runtime that has not read one. A real launch never gets here:
+    // `start()` refreshes with persistence before any pass (testing.md §9.11
+    // H7), so this pins the path for a runtime whose start-up refresh did
+    // not load an identity, rather than a fresh install as such.
+    h.restart();
 
     const before = await fiveTrees(h);
     await h.runtime.syncNow({ dryRun: true });
