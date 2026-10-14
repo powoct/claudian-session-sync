@@ -787,6 +787,34 @@ describe("a recreated store", () => {
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
     expect(seen.rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
     expect(seen.announcements).toEqual([]);
+
+    // Judged, so the recreation is over for it: deleting it now is a delete.
+    await deleteRecord(a, CONV);
+    const after = await restarts(a, 1);
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+    expect(after.rows.some((r) => r.neutralRel === META && r.action === "SKIP_DELETED_HERE")).toBe(true);
+  }, 90_000);
+
+  it("still charges a record that has never been here — only a deletion's first judgement is free", async () => {
+    const a = await machine();
+    await a.settle();
+    const b = await machine("2.3.20", a);
+    const convs = Array.from({ length: 3 }, (_, n) => `conv-178642268710${n}-peer${n}`);
+    for (const conv of convs) await saveRecord(b, conv, { providerId: "codex", sessionId: null });
+    for (let i = 0; i < 3; i++) await pass(b);
+    await a.runtime.updateSettings({ maxFilesPerPass: 1 });
+
+    const reports: PassReport[] = [];
+    // Long enough for the allowance for the starved: at a budget of one, the
+    // pass's scrub sample can take the slot.
+    for (let i = 0; i < 10; i++) reports.push((await pass(a)).report);
+
+    const isPeer = (r: ActionEntry) => convs.some((conv) => r.neutralRel === `claudian/${conv}.meta.json`);
+    const first = reports.find((report) => report.actions.some((r) => isPeer(r) && r.action === "PULL_NEW"));
+    expect(first, "none of them arrived").toBeDefined();
+    expect(first?.actions.filter((r) => isPeer(r) && r.action === "PULL_NEW")).toHaveLength(1);
+    expect(first?.actions.filter((r) => isPeer(r) && r.reason === "budget-exhausted").length).toBeGreaterThan(0);
+    for (const conv of convs) expect(await exists(local(a, `${conv}.meta.json`)), conv).toBe(true);
   }, 90_000);
 });
 

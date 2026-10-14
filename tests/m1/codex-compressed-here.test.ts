@@ -27,7 +27,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PassReport } from "../../src/orchestration/pass-report";
 import { describeUnrecognised } from "../../src/providers/codex/rollout-name";
-import { RuntimeHarness } from "../helpers/runtime-harness";
+import { type HarnessOptions, RuntimeHarness } from "../helpers/runtime-harness";
 import { zstdRawFrame } from "../helpers/zstd-frame";
 
 const SID = "01a003f8-172e-7421-b159-ee512a76e87d";
@@ -50,8 +50,10 @@ const exists = (target: string) =>
     .then(() => true)
     .catch(() => false);
 
-async function machine(): Promise<{ m: RuntimeHarness; replica: (name: string) => string }> {
-  const m = await RuntimeHarness.create();
+async function machine(
+  options: HarnessOptions = {},
+): Promise<{ m: RuntimeHarness; replica: (name: string) => string }> {
+  const m = await RuntimeHarness.create(options);
   machines.push(m);
   await m.configure();
   await m.runtime.setProvider("codex", { enabled: true });
@@ -289,24 +291,56 @@ describe("a rollout Codex compressed on this machine", () => {
     expect(noticesOf(reports)).toContain(UNCOMPARED);
   }, 30_000);
 
-  it("holds back when this machine had added turns of its own before Codex compressed it", async () => {
-    // Seen growing, never converged: the compressed copy holds turns the sync
-    // folder does not, and a plain file landed beside it would hide them.
-    const { m, replica } = await machine();
+  it.each([
+    ["a frame that declares its size", true],
+    ["an older frame that declares none", false],
+  ])(
+    "holds back when this machine had added turns of its own before Codex compressed it — %s",
+    async (_shape, declareSize) => {
+      // Seen growing, never converged: the compressed copy holds turns the
+      // sync folder does not, and a plain file landed beside it would hide
+      // them. For an older frame the modification time matches what was last
+      // seen — it is the size last seen that is not the converged one.
+      const { m, replica } = await machine();
+      const name = rollout(SID);
+      await record(m, SID);
+      await write(activePath(m, name), LINES);
+      await m.settle();
+      await fsp.appendFile(activePath(m, name), MINE);
+      await pass(m); // Seen, still settling — not pushed.
+      await compress(activePath(m, name), { declareSize });
+      await fsp.appendFile(replica(name), MORE);
+
+      const reports = await passes(m, 3);
+
+      expect(await exists(activePath(m, name))).toBe(false);
+      expect(rowIn(reports[2], name)?.action).toBe("SKIP_COMPRESSED_HERE");
+      expect(noticesOf(reports)).toContain(UNCOMPARED);
+    },
+    30_000,
+  );
+
+  it("waits, and writes nothing, when the compressed file cannot be asked about", async () => {
+    // Landing is the one outcome that can hide turns, so a compressed file
+    // whose presence cannot be ruled out holds the pull back.
+    let failing = false;
+    const { m, replica } = await machine({
+      failLstat: (target) => failing && target.includes(`${path.sep}sessions${path.sep}`) && target.endsWith(".jsonl.zst"),
+    });
     const name = rollout(SID);
     await record(m, SID);
     await write(activePath(m, name), LINES);
     await m.settle();
-    await fsp.appendFile(activePath(m, name), MINE);
-    await pass(m); // Seen, still settling — not pushed.
     await compress(activePath(m, name));
     await fsp.appendFile(replica(name), MORE);
+    failing = true;
 
     const reports = await passes(m, 3);
 
+    for (const report of reports) {
+      expect(rowIn(report, name)).toMatchObject({ action: "DEFER", reason: "compressed-unreadable" });
+    }
     expect(await exists(activePath(m, name))).toBe(false);
-    expect(rowIn(reports[2], name)?.action).toBe("SKIP_COMPRESSED_HERE");
-    expect(noticesOf(reports)).toContain(UNCOMPARED);
   }, 30_000);
 
   it("calls a sync-folder copy over the size limit too large, and promises no comparison", async () => {
@@ -361,6 +395,22 @@ describe("a rollout Codex compressed on this machine", () => {
 
     expect(reports.some((r) => rowIn(r, name)?.action === "SKIP_COMPRESSED_HERE")).toBe(false);
     expect(await fsp.readFile(activePath(m, name), "utf8")).toBe(LINES + MORE);
+  }, 30_000);
+
+  it("keeps syncing the plain file it landed beside the compressed one", async () => {
+    // The pair ADR-83 leaves behind is an ordinary session from then on:
+    // Codex reads the plain file, and turns added to it here must travel.
+    const { m, replica, name } = await syncedThenCompressed();
+    await pass(m);
+    await fsp.appendFile(replica(name), MORE);
+    await passes(m, 3);
+    expect(await fsp.readFile(activePath(m, name), "utf8")).toBe(LINES + MORE);
+
+    await fsp.appendFile(activePath(m, name), '{"type":"here"}\n');
+    const reports = await passes(m, 3);
+
+    expect(reports.some((r) => rowIn(r, name)?.action === "SKIP_COMPRESSED_HERE")).toBe(false);
+    expect(await fsp.readFile(replica(name), "utf8")).toBe(`${LINES}${MORE}{"type":"here"}\n`);
   }, 30_000);
 
   it("syncs again once resumed and turned back into a plain file", async () => {
@@ -468,7 +518,8 @@ describe("a rollout archived here and then compressed (ADR-79 with ADR-83)", () 
     // file back into `sessions/`, touched. The converged base ADR-83 decides
     // by has to outlive the ledger's thirty days in the archive.
     const { m, replica, name } = await archivedThenCompressed();
-    for (let i = 0; i < 4; i++) {
+    // Fifty days: well past the thirty an unseen ledger entry survives.
+    for (let i = 0; i < 5; i++) {
       await m.runtime.syncNow();
       m.advanceClock(10 * DAY);
     }

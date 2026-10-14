@@ -35,6 +35,12 @@ export interface HarnessOptions {
    */
   readonly failWrite?: (target: string) => boolean;
   /**
+   * Makes `lstat` of matching paths throw EACCES — a file that is there but
+   * cannot be asked about, which no permission bit on a temp directory gives
+   * for one name and not its siblings.
+   */
+  readonly failLstat?: (target: string) => boolean;
+  /**
    * Obsidian's config folder name. `.obsidian` unless a test is about the
    * "Override config folder" setting, which is the reason the runtime is told
    * rather than assuming it.
@@ -119,11 +125,16 @@ export class RuntimeHarness {
     const fail = options.failWrite;
     const beforeReadDir = options.beforeReadDir;
     // Every full read, by path, so a test can say a file was *not* read.
+    const failLstat = options.failLstat;
     const reading = {
       ...real,
       readFile: async (target: string) => {
         this.reads.push(target);
         return real.readFile(target);
+      },
+      lstat: async (target: string) => {
+        if (failLstat?.(target)) throw refuse(target);
+        return real.lstat(target);
       },
     };
     const listing = beforeReadDir

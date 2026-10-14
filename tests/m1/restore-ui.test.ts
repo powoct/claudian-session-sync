@@ -167,6 +167,31 @@ describe("the list", () => {
     );
   });
 
+  it("offers none for this machine's copy of a conversation archived or compressed here", async () => {
+    // The prose says the restore is refused there (ADR-79, ADR-83); the
+    // button must not say otherwise. The sync folder's row stays restorable.
+    const codex = { providerId: "codex", liveRelation: "absent", liveHashPrefix: null } as const;
+    const modal = new RestoreModal(
+      makeStubApp() as unknown as App,
+      stubRuntime([
+        entry({ ...codex, outcome: "archived-here" }),
+        entry({ ...codex, outcome: "compressed-here" }),
+        entry({ ...codex, outcome: "compressed-here", remote: true }),
+      ]),
+      () => {},
+    );
+    await modal.onOpen();
+
+    const buttons = asFake(modal.contentEl)
+      .descendants()
+      .filter((element) => element.textContent === "Restore this version")
+      .map((element) => (element as unknown as { disabled: boolean }).disabled);
+    expect(buttons).toEqual([true, true, false]);
+    const text = asFake(modal.contentEl).allText();
+    expect(text).toContain("Codex has compressed this conversation on this machine");
+    expect(text).toContain("copies this here only if it continues exactly what was compressed");
+  });
+
   it("says so plainly when nothing has ever been overwritten", async () => {
     const modal = new RestoreModal(makeStubApp() as unknown as App, stubRuntime([]), () => {});
     await modal.onOpen();

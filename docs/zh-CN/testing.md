@@ -539,8 +539,8 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | S-27 | Tier B：连续调用 `reconcileLocalIndex` 两次 | 第二次 `report.changed === 0`（幂等） | M2 |
 | S-28 | replica 里出现 `<uuid>-DESKTOP-ABC.jsonl` | 归类为 `UNKNOWN_FILE`（不匹配 `logicalIdPattern`）；**不落地、不删除、不移动**；报告列出 | M1 |
 | S-29 | replica 里出现合法 UUID 名但内容是垃圾的 `.jsonl` | 白名单通过 → 走决策表；末段不完整 → `DEFER`；**不得 crash** | M1 |
-| S-30 | 六个没变的会话 + `maxFilesPerPass = 2` + 一个对端新会话 | 没变的会话一律 `e1-cache-hit`、不占预算，新会话在它稳定的那一轮落地（ADR-82，[架构 §12.2](./architecture.md)）；四个同时到达的会话在预算 2 下分两轮、全部落地 | M1
-| S-30b | 三个冲突对（每轮都要读）+ `maxFilesPerPass = 1` + 一个对端新会话 | 新会话被挡过（`budget-exhausted`），并在连续被挡 5 轮后由饥饿额度放行（ADR-82） | M1 |
+| S-30 | 六个没变的会话 + `maxFilesPerPass` = 3 + 一个对端新会话;四个同时到达的会话 + 预算 2;三个刚新建(未稳定)的本地会话、一个超过大小上限的会话各在前面;8 个会话 + 预算 2 + Verify all | 没变的会话至少 5/6 为 `e1-cache-hit`(抽样读一个)、整轮没有 `budget-exhausted`,新会话两轮内落地;四个会话第一次落地的那一轮恰好 2 个 `PULL_NEW`、2 个 `budget-exhausted`,其后全部落地;未稳定的、超过上限的不读也不计费(超过上限的一次都不整份读),同步夹未就绪时一个都不整份读;阈值 5 与额度 20 单独钉住;Verify all 挡下的文件之后几轮内各被整份读一次(ADR-82,[架构 §12.2](./architecture.md)) | M1 |
+| S-30b | 三个冲突对(每轮都要读)+ `maxFilesPerPass` = 1 + 一个对端新会话;25 个同时到达的会话 + 预算 1;Grok 组中途被挡;饥饿队列的单元测试 | 新会话**恰好**被挡 5 轮后由饥饿额度放行;25 个会话每轮最多落地 1 + 20 个、全部落地,报告写一句 `waited 5 or more syncs`;Grok 组每个成员一行(缓存命中的是 NOOP,被挡的是 DEFER),之后落地;饥饿队列按等待轮数排、装满 20 即止、排第一的超额也放行、按轮转覆盖全部(ADR-82) | M1 |
 | X-01 | A 支持 `formatVersion=1`、B 支持 `=2`（B 已升级布局） | A 进入**完全只读**：replica 与 A 本机字节零改动 + Notice；B 正常；A 升级后能读到 B 期间产生的全部 session | M2 |
 | X-02 | 迁移中途崩溃（`migration` 已写、文件未搬完） | 重跑迁移收敛到同一结果；恢复点存在；无 session 丢失 | M2 |
 | X-03 | manifest `schemaVersion` 高于本插件 | 文件仍正常搬运（全量扫描）；**manifest 文件字节未变**（与 L0 的 M-03 是同一语义的两层，故同属 M1） | M1 |
@@ -1076,6 +1076,7 @@ codex 的 `FileChangeItem.changes` 是 `HashMap<PathBuf, FileChange>`,Rust 的 H
 |---|---|
 | **H2 ⭐** | 键序变体判 `PULL_OVERWRITE` / `equivalent-serialisation`,不进隔离区,不弹 history-replaced |
 | **H3 ⭐⭐** | **同步夹那一份字节未变**;来回两轮后四份副本全等,且无任何写入动作 |
+| **H4** | 被收敛掉的那份变体在 mac 的备份区里(sha256 等于 H1 留底的变体,I1);恢复面板对它的预测是「同样的记录、只是顺序不同」 |
 | **H5 ⭐** | 本机再次被重新序列化 ⇒ `NOOP` / `equivalent-left-as-is`,文件不被改回去,备份不新增 |
 | **H6 ⭐** | 内容真正不同 ⇒ 仍然 `CONFLICT`,两份都在隔离区 |
 | **H7** | dry run 不创建 `machine.json`,且 Notices 说明少写了什么(ADR-76) |
@@ -1207,37 +1208,43 @@ sha256 未变,B 上能续)、**A2 ✅**(归档期间不拉;Restore 后 `DEFER` �
 
 ✅ **2026-10-14 第 10 轮通过**(两台 macOS,Claudian 2.3.20,插件 main `84f5160`):W1 ⭐⭐、W2 ⭐、W3 ⭐、W4、U1 ⭐⭐、U2、
 U3 全部符合;U4 未单独做。**W2 证实 Claudian 2.3.20 不重启就列不出运行中到达的记录**,弹窗规则的前提成立。
-两处如实交代:① 测试 vault 不做 vault 级同步(记录只经 records provider 走),所以 W1–W3「记录先到 B、transcript
-后到」是这样造的——A 临时关掉 Claude Code provider 只推记录,B 同步收进记录,A 再打开推 transcript;② W1 落地晚了
+两处如实交代:① 测试 vault 不做 vault 级同步(记录只经 records provider 走),所以「记录先到 B、transcript
+后到」是造出来的——W1、W2:A 临时关掉 Claude Code provider 只推记录,B 同步收进记录,A 再打开推 transcript;W3 靠
+1 MB 上限造:A 推完后两机降限,B 同步两次收进记录,transcript 被 `SKIP_TOO_LARGE` 挡住,再重启;② W1 落地晚了
 一轮(重启后 90 秒那次仍是 `DEFER` / `side-unstable`,再下一次才 `PULL_NEW`):同步夹那份大小、mtime 都没变,
-是 Dropbox(File Provider)第一次下载文件时改了 ctime/inode——稳定性签名含这两项;W2 先读过一遍文件就没有再出现。
-与 ADR-81 的判断无关。
+最可能是 Dropbox(File Provider)第一次落地文件时改了属性——稳定性签名的其余项 ctime、ino、tailHash 之一变了,
+未逐项核实;W2 先读过一遍文件就没有再出现。与 ADR-81 的判断无关。
 
 ### 9.15 预算不再饿死、压缩过的 rollout 不拉回(ADR-82、ADR-83,**0.3.6 的闸门**,两机)
 
-两条都来自第 10 轮。**ADR-82** 的验收就是重跑 §9.12 D2 与 §9.13 A3(原样,`maxFilesPerPass` = 3)——它们正是
-因为预算饿死停下的;自动化证据是 `tests/m1/budget-charge.test.ts`(六个没变的会话不再占预算、预算仍约束要读的组、
-被冲突对挡住的组 5 轮后由饥饿额度放行)。**ADR-83** 的自动化证据是 `tests/m1/codex-compressed-here.test.ts`
-(真 runtime、真 Codex adapter、真文件系统;压缩件用一个占位文件——插件从不读它的字节)。**两条都没在真机上跑过**;
-ADR-83 依据的 Codex 行为(压缩、普通文件优先、续接还原)来自读 codex-rs 0.160 的 `rollout/src/compression.rs`。
+两条都来自第 10 轮。**ADR-82** 的验收是重跑 §9.12 D2 与 §9.13 A3(`maxFilesPerPass` = 3)——它们正是因为预算饿死
+停下的;自动化证据是 `tests/m1/budget-charge.test.ts`(S-30、S-30b)与 `tests/m1/deleted-here-runtime.test.ts`(重建的
+store 在预算之下、同步夹那份还在动时仍按重建处理;R2 在预算之下照样当轮判定)。**ADR-83** 的自动化证据是
+`tests/m1/codex-compressed-here.test.ts`(真 runtime、真 Codex adapter、真文件系统;压缩件是真 zstd 帧——不压缩的 raw
+block,`zstd` 解得开;插件只读前 18 字节帧头)与 `tests/m1/zstd-frame.test.ts`(帧头取自 `zstd` 命令行的输出)。
+**两条都没在真机上跑过**;ADR-83 依据的 Codex 行为(压缩、普通文件优先、续接还原、帧头声明原长、mtime 复制到压缩件、
+解档 touch)来自读 codex-rs 0.160 的 `rollout/src/compression.rs`、`seekable_reader.rs` 与 `unarchive_thread.rs`。
 
-**环境**:同 §9.12、§9.13(测试 vault,records、Claude Code、Codex 两机都开)。造压缩件:最好等 Codex 自己压
-(对话 7 天不动、其间 Codex 启动过,且本机开着压缩);等不了就在**退出 Obsidian、Codex 没开着这条会话**时用
-`zstd -q --rm <rollout>`(`brew install zstd`)——产出同名 `.jsonl.zst` 并删掉原文件,与 Codex 的结果同形。
-**只对测试 vault 里新建的会话这样做。**
+**环境**:同 §9.12、§9.13(测试 vault,records、Claude Code、Codex 两机都开)。造压缩件:最好等 Codex 自己压(对话
+7 天不动、距上次压缩运行超过 6 小时,且 Codex 启动时开着压缩开关或经 app-server 的 `rollout/compress` 触发);
+等不了就在**退出 Obsidian、Codex 没开着这条会话**时用 `zstd -q --rm <rollout>`——产出同名 `.jsonl.zst`(默认在帧头写
+原长,并保留原文件的 mtime)并删掉原文件,与 Codex 0.151 起的结果同形。`zstd` 只在 macOS 上用(`brew install
+zstd`);Windows 机器上不造压缩件。**只对测试 vault 里新建的会话这样做。**
 
 | 步 | 断言 |
 |---|---|
-| **B1 ⭐⭐** | 重跑 §9.12 D2:5 条删除在 `maxFilesPerPass` = 3 下两轮内都显示 `SKIP_DELETED_HERE`,B 新建的一条两轮内落到 A;报告里没变的会话一律 `e1-cache-hit`,**不伴随**任何 `budget-exhausted` |
-| **B2 ⭐** | 重跑 §9.13 A3:B 新建的 Codex 对话一轮内(稳定之后)离开 B、落到 A |
-| **Z1 ⭐⭐** | A 上一条已同步、两边一致的 Codex 对话被压缩(`sessions/` 下只剩 `.jsonl.zst`)→ A 上 Sync now ×2:`SKIP_COMPRESSED_HERE` / `compressed-here`;`sessions/` 下**没有**被拉回的普通文件;`.zst` 的 sha256 未变;报告**没有**「cannot compare」;Notices 里那句普查是「Codex has compressed N conversation file(s)」而不是「does not recognise」 |
-| **Z2 ⭐** | Z1 之后 B 用终端 `codex exec resume <thread id> "continue"` 续一轮并同步 → A 上 Sync now ×2:`PULL_NEW`,普通文件落在 `.zst` 旁边,报告一句「received newer turns」;A 上 `codex exec resume` 能看到 B 那一轮 |
-| **Z3** | 另一条对话:A 上压缩后,**在 A 上**续一轮(Codex 把 `.zst` 还原成普通文件、删掉 `.zst`)→ 下一轮起照常推送,B 上能看到 |
-| **Z4** | 在 Claudian 里归档一条对话,再把 `archived_sessions/` 里那份压缩 → A 上 Sync now ×2:`SKIP_ARCHIVED_HERE` / `archived-here`,`sessions/` 下没有副本 |
-| **Z5** | (观察项)审计屏上,一条记录已删、rollout 在本机被压缩的对话显示「on this device, compressed by Codex」 |
+| **B1 ⭐⭐** | **先决**:`maxFilesPerPass` 改为 3、重开 Obsidian 后,先 Sync now 直到报告里只剩 `e1-cache-hit` 与 `SKIP_*`(重启带来的那批推送排空)。然后重跑 §9.12 D2:5 条删除**在同一轮**全部显示 `SKIP_DELETED_HERE`(删除后的首判不受预算约束);B 新建的一条在随后两轮内落到 A;没变的会话一律 `e1-cache-hit`,不出现在 `budget-exhausted` 行里 |
+| **B2 ⭐** | 同样先排空,再重跑 §9.13 A3:B 新建的 Codex 对话在 B 上稳定之后的那一轮离开 B,在 A 上稳定之后的那一轮落到 A |
+| **Z1 ⭐⭐** | A 上一条已同步、两边一致的 Codex 对话被压缩(`sessions/` 下只剩 `.jsonl.zst`)→ A 上 Sync now ×2:`SKIP_COMPRESSED_HERE` / `compressed-here`;`sessions/` 下**没有**被拉回的普通文件;`.zst` 的 sha256 未变;报告**没有**「cannot tell whether it continues」;Notices 里那句普查是「Codex has compressed N of this vault's conversation file(s)」而不是「does not recognise」 |
+| **Z2 ⭐** | Z1 之后 B 用终端 `codex exec resume <thread id> "continue"` 续一轮并同步 → A 上 Sync now ×2(第一次可能是 `DEFER` / `side-unstable`):`PULL_NEW`,普通文件落在 `.zst` 旁边,报告一句「compressed by Codex on this device, and continued on another device since」,点名完整 thread id;A 上 `codex exec resume` 能看到 B 那一轮 |
+| **Z3 ⭐** | 另一条已同步的对话:**退出 A 的 Obsidian**,在 A 的终端 `codex exec resume <id> "one more"` 续一轮(插件没看到这一轮),再 `zstd -q --rm` 压缩;B 也续一轮并同步;开 A 的 Obsidian,Sync now ×2 → `SKIP_COMPRESSED_HERE`,**没有**普通文件落地,报告点名完整 id 并说「cannot tell whether it continues the compressed one」与「quit without sending」。随后按那句话做:Codex 里打开一次、不发送就退出 → Sync now ×2 → `CONFLICT`,两份都在隔离区(两边各有对方没有的一轮) |
+| **Z4** | 另一条对话:A 上压缩后,**在 A 上**续一轮(Codex 把 `.zst` 还原成普通文件、删掉 `.zst`)→ 下一轮起照常推送,B 上能看到 |
+| **Z5** | 在 Claudian 里归档一条对话,再把 `archived_sessions/` 里那份压缩 → A 上 Sync now ×2:`SKIP_ARCHIVED_HERE` / `archived-here`,`sessions/` 下没有副本 |
+| **Z6** | (观察项)在 Claudian 紧凑历史里直接删除(不经归档)一条 Codex 对话,并把它在 `sessions/` 下的 rollout 压缩 → 审计屏「Kept off this device」下该会话显示「on this device, compressed by Codex」 |
+| **Z7** | (观察项)Z1 那条对话若有本机备份,恢复屏上它的行不提供恢复,说明 Codex 压缩了它;用 `zstd --no-content-size` 造一份(模拟 0.151 之前的 Codex)重复 Z2,同样落地(靠 mtime) |
 
-**B1 和 Z1 是核心。** ADR-82 只改「这一轮先处理谁」,不改任何一个文件怎么判;ADR-83 只扣住写入,唯一放行的
-「同步夹那份是延续」与修复前的行为相同。⚠️ **尚未执行。**
+**B1 和 Z1 是核心。** ADR-82 只改「这一轮先处理谁」与「哪些读不必做」,不改任何一个文件怎么判;ADR-83 只扣住写入,
+唯一放行的「同步夹那份是压缩内容的延续」与修复前的行为相同,而且多了压缩件自带的证据。⚠️ **尚未执行。**
 
 ### 9.5 各里程碑 Exit Criteria
 
@@ -1251,7 +1258,7 @@ ADR-83 依据的 Codex 行为(压缩、普通文件优先、续接还原)来自�
 | **2.2.5 兼容** | §9.8 四步全过 ✅（2026-09-01）——0.3.0 的发布闸门 |
 | **搬运对账** | §9.9 E1–E3 ✅（2026-09-04）——0.3.1 的发布闸门；E4 无残留未测 |
 | **Codex 新格式** | §9.10 G1–G4 ✅（2026-09-10）——0.3.3 的发布闸门 |
-| **0.3.6** | §9.11 H2–H7、§9.12 D2 起、§9.13 A3 起、§9.14 ✅（2026-10-14）、§9.15——第 10 轮跑了一部分（见各节），其余待重跑 |
+| **0.3.6** | §9.11 H2–H4、H6、H7(H5 ✅)、§9.12 D2 起、§9.13 A3 起、§9.14 ✅（2026-10-14）、§9.15——第 10 轮跑了一部分（见各节），其余待重跑 |
 
 ---
 

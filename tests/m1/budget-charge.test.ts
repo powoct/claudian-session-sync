@@ -188,6 +188,25 @@ describe("the files-per-pass budget", () => {
     expect(notices).toContain(`waited ${STARVATION_PASSES} or more syncs in a row`);
   }, 120_000);
 
+  it("reads nothing in full while the sync folder is not ready", async () => {
+    // The planner skips every pair from that verdict alone; reading each
+    // stable file whole first, and charging it, decided nothing.
+    const { m } = await machine();
+    for (let n = 0; n < 3; n++) await m.appendSession(sid(n), 2);
+    await m.settle();
+    for (let n = 0; n < 3; n++) await m.appendRaw(sid(n), `{"uuid":"more${n}","type":"user","text":"later"}\n`);
+    await pass(m);
+    const rootPath = path.join(m.syncDir, ".aiss", "root.json");
+    const root = JSON.parse(await fsp.readFile(rootPath, "utf8")) as Record<string, unknown>;
+    await fsp.writeFile(rootPath, JSON.stringify({ ...root, rootId: "somewhere-else" }));
+    m.reads.length = 0;
+
+    const report = await pass(m);
+
+    expect(report.actions.filter((a) => a.action === "SKIP_REMOTE_NOT_READY").length).toBeGreaterThan(0);
+    expect(m.reads.filter((read) => read.endsWith(".jsonl"))).toEqual([]);
+  }, 60_000);
+
   it("verifies on a later pass what Verify all could not fit into this one", async () => {
     // T7 is a read, and a read is charged; a file the budget turned away is
     // read the next time it has room (T3) instead of being quietly dropped.
@@ -252,6 +271,13 @@ describe("a group the budget turns away part-way", () => {
 });
 
 describe("the allowance for the starved", () => {
+  it("has the bounds the architecture states (§12.2)", () => {
+    // Every other test derives its expectations from these constants, so this
+    // is the one place a change to them shows up as a change to the promise.
+    expect(STARVATION_PASSES).toBe(5);
+    expect(STARVED_ALLOWANCE_FILES).toBe(20);
+  });
+
   const candidate = (key: string, waited: number, files = 1) => ({ key, files, waited });
 
   it("serves the longest-waiting first, then listing order", () => {
