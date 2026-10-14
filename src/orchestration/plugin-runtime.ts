@@ -1602,6 +1602,8 @@ export class PluginRuntime {
         const provider = providers.find((p) => p.adapter.id === providerId);
         return provider ? archivedPathsFor(provider.adapter, neutralRel) : [];
       },
+      compressedSiblingOf: (providerId: string, localPath: string) =>
+        providers.find((p) => p.adapter.id === providerId)?.adapter.compressedSiblingOf?.(localPath) ?? null,
       // The same validator the pass writes through: a resolution is an
       // overwrite of a session file and gets the same containment walk.
       mintWritePath: createWritePathMinter({

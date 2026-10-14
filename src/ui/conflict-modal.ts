@@ -90,8 +90,9 @@ export class ConflictModal extends Modal {
     // directly above two live buttons — worse than the screen it replaced.
     const settled = conflict.standing === "settled";
     // An archived copy greys both: there is nothing here to keep, and keeping
-    // the other version would write a second copy beside the archived one.
-    const blocked = settled || conflict.localArchived;
+    // the other version would write a second copy beside the archived one. A
+    // compressed one likewise, with a plain file in front of it (ADR-83).
+    const blocked = settled || conflict.localArchived || conflict.localCompressed;
     const hasLocal = !blocked && conflict.branches.some((branch) => branch.onThisMachine);
     const hasRemote = !blocked && conflict.branches.some((branch) => branch.inSyncFolder);
     this.addChoice(buttons, conflict, "keep-local", "Keep this machine's version", hasLocal);
@@ -102,6 +103,13 @@ export class ConflictModal extends Modal {
         text:
           "This conversation is archived on this machine, so its file here is in Codex's archive " +
           "folder and neither choice can be made from here. Unarchive it, run a sync, and reopen this.",
+      });
+    } else if (conflict.localCompressed) {
+      buttons.createEl("p", {
+        text:
+          "Codex has compressed this conversation on this machine, so neither choice can be made " +
+          "from here. Open the conversation in Codex once and quit without sending — that turns " +
+          "it back into a plain file — then run a sync and reopen this.",
       });
     } else if (conflict.standing === "in-dispute" && (!hasLocal || !hasRemote)) {
       buttons.createEl("p", {
@@ -219,6 +227,11 @@ export function describeOutcome(
       return (
         "This conversation is archived on this machine, so nothing was changed. Unarchive it, " +
         "run a sync, and try again."
+      );
+    case "local-compressed":
+      return (
+        "Codex has compressed this conversation on this machine, so nothing was changed. Open " +
+        "it in Codex once and quit without sending, run a sync, and try again."
       );
     case "kept-unreadable":
       // Not "the state changed": a user told that re-syncs and waits for

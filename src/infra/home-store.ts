@@ -177,6 +177,12 @@ export interface ClaudianRecordsFile {
    * deleting them.
    */
   readonly storeIdentity?: string;
+  /**
+   * Records found missing when the store was recreated whose judgement a pass
+   * put off (their copy in the sync folder was still moving, say). Until a
+   * pass judges them, their absence is still not a deletion.
+   */
+  readonly recreatedPending?: readonly string[];
   readonly records: Readonly<Record<string, ClaudianRecordEntry>>;
 }
 
@@ -581,6 +587,13 @@ function parseClaudianRecords(raw: unknown): ClaudianRecordsLoad {
     file: {
       schemaVersion: c.schemaVersion,
       ...(typeof c.storeIdentity === "string" ? { storeIdentity: c.storeIdentity } : {}),
+      ...(Array.isArray(c.recreatedPending)
+        ? {
+            recreatedPending: c.recreatedPending.filter(
+              (rel): rel is string => typeof rel === "string" && claudianRecordOf(rel) !== null,
+            ),
+          }
+        : {}),
       records,
     },
   };

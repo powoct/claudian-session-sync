@@ -83,6 +83,8 @@ export class RuntimeHarness {
   private stored: unknown = null;
   /** Folders the plugin asked the desktop to open, for the §9.3.4 tests. */
   readonly opened: string[] = [];
+  /** Paths read in full through the plugin's gateway, oldest first. */
+  readonly reads: string[] = [];
   private readonly clock;
 
   private constructor(root: string, options: HarnessOptions) {
@@ -116,15 +118,23 @@ export class RuntimeHarness {
     };
     const fail = options.failWrite;
     const beforeReadDir = options.beforeReadDir;
+    // Every full read, by path, so a test can say a file was *not* read.
+    const reading = {
+      ...real,
+      readFile: async (target: string) => {
+        this.reads.push(target);
+        return real.readFile(target);
+      },
+    };
     const listing = beforeReadDir
       ? {
-          ...real,
+          ...reading,
           readDir: async (target: string) => {
             await beforeReadDir(target);
             return real.readDir(target);
           },
         }
-      : real;
+      : reading;
     const fs = fail
       ? {
           ...listing,

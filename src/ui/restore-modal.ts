@@ -94,7 +94,7 @@ export class RestoreModal extends Modal {
       backup.neutralRel !== null &&
       backup.liveRelation !== "identical" &&
       backup.liveRelation !== "unknown" &&
-      !(backup.outcome === "archived-here" && !backup.remote);
+      !((backup.outcome === "archived-here" || backup.outcome === "compressed-here") && !backup.remote);
     const button = buttons.createEl("button", { text: "Restore this version" });
     button.disabled = !restorable;
     if (restorable) {
@@ -171,6 +171,14 @@ export function describeWhatFollows(backup: BackupEntry): string {
       "conversation first, and this row compares as usual."
     );
   }
+  if (backup.outcome === "compressed-here" && !backup.remote) {
+    return (
+      "Codex has compressed this conversation on this machine. A version put back beside the " +
+      "compressed one would be the one Codex reads from then on, so it is not offered — open " +
+      "the conversation in Codex once to turn it back into a plain file, and this row compares " +
+      "as usual."
+    );
+  }
   const here =
     backup.liveRelation === "absent"
       ? "Nothing is there now, so this puts the session back in place."
@@ -232,6 +240,12 @@ function describeNextSync(backup: BackupEntry): string {
         "This conversation is archived on this machine, so the next sync does not copy it here. " +
         "Unarchive it and the two sides are compared as usual."
       );
+    case "compressed-here":
+      return (
+        "Codex has compressed this conversation on this machine, so the next sync copies this " +
+        "here only if it continues exactly what was compressed. Open the conversation in Codex " +
+        "once and the two sides are compared as usual."
+      );
     default:
       return "What the next sync will do with it cannot be worked out from here.";
   }
@@ -292,6 +306,12 @@ export function describeRestore(
       return (
         "That conversation is archived on this machine, so nothing was put back — it would have " +
         "made a second, active copy. Unarchive it first."
+      );
+    case "target-compressed":
+      return (
+        "Codex has compressed that conversation on this machine, so nothing was put back — " +
+        "Codex would have read this version instead of the compressed one. Open the " +
+        "conversation in Codex once first."
       );
     default:
       return `Could not restore it: ${outcome.reason}.`;

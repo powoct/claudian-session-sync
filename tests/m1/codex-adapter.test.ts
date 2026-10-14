@@ -507,7 +507,26 @@ describe("the census that would have caught this one (OQ-32)", () => {
     await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.zst`), "z");
 
     const text = await warn(adapter);
-    expect(text).toContain("Codex has compressed 1 conversation file(s)");
+    expect(text).toContain("Codex has compressed 1 of this vault's conversation file(s)");
+    expect(text).not.toContain("does not recognise");
+  });
+
+  it("counts only this vault's compressed conversations, and not one Codex no longer reads", async () => {
+    // The sessions folder is every vault's and every Codex client's: another
+    // vault's compressed thread is not this vault's news. And a `.zst` beside
+    // its plain file is what ADR-83 leaves when a peer's turns land — Codex
+    // reads the plain one, so the compressed one is nothing to act on.
+    const THIRD = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    const { adapter, plant, sessions } = await world({ recorded: [SID, THIRD] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${rollout(SID)}.zst`), "z");
+    await fsp.writeFile(path.join(dir, `${rollout(OTHER)}.zst`), "z");
+    await plant(THIRD);
+    await fsp.writeFile(path.join(dir, `${rollout(THIRD)}.zst`), "z");
+
+    const text = await warn(adapter);
+    expect(text).toContain("Codex has compressed 1 of this vault's conversation file(s)");
     expect(text).not.toContain("does not recognise");
   });
 
@@ -532,6 +551,9 @@ describe("the census that would have caught this one (OQ-32)", () => {
       "{}\n",
     );
     await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.aiss-tmp-42-abcd`), "{}\n");
+    // Codex's own, from its compression worker (codex-rs `compression.rs`).
+    await fsp.writeFile(path.join(dir, "rollout-compress-Xq3vT9.tmp"), "z");
+    await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.decompress.4242.0.tmp`), "{}\n");
 
     expect(await warn(adapter)).toBe("");
   });

@@ -163,11 +163,18 @@ export interface ProviderAdapter {
    *
    * Asked of a target path, and of an archived one, that has nothing at it. A
    * regular file here means the session is on this machine, compressed — not
-   * yet to arrive. Never written, never read for its bytes, never listed.
+   * yet to arrive. Never written, never listed, and never decompressed: only
+   * its first `COMPRESSED_HEADER_BYTES` are read, for `compressedContentSize`.
    *
    * Optional: only Codex compresses its sessions.
    */
   compressedSiblingOf?(localPath: string): string | null;
+  /**
+   * How long the file was before it was compressed, as the compressed file's
+   * own header declares it — given at most its first `COMPRESSED_HEADER_BYTES`
+   * — or null when the header does not say (ADR-83).
+   */
+  compressedContentSize?(header: Uint8Array): number | null;
   /**
    * Sessions on this machine that are missing their commit point (§6.6).
    *
@@ -200,6 +207,9 @@ export interface ProviderAdapter {
  * file, and its compressed form — Codex compresses archived rollouts as well
  * (ADR-79, ADR-83). Empty for a provider without an archive.
  */
+/** Enough of a compressed file for any header `compressedContentSize` reads. */
+export const COMPRESSED_HEADER_BYTES = 18;
+
 export function archivedPathsFor(
   adapter: Pick<ProviderAdapter, "archivedPathFor" | "compressedSiblingOf">,
   neutralRel: string,

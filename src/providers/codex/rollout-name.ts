@@ -125,32 +125,52 @@ export { isSessionUuid as isCodexSessionId } from "../vault-scope";
  * upstream turns that on, and for whatever comes next.
  *
  * Names another program is *known* to own are excluded rather than counted:
- * a sync tool's conflict copy and this plugin's own temp files are expected
- * company in that directory, and a warning that is always on is one nobody
- * reads. Everything else counts, including things we could guess at — being
- * wrong about the reason costs a sentence, being silent costs a conversation.
+ * a sync tool's conflict copy, this plugin's own temp files and Codex's are
+ * expected company in that directory, and a warning that is always on is one
+ * nobody reads. So is a compressed rollout whose plain file is beside it:
+ * Codex reads the plain one and ignores the other (ADR-83 leaves exactly
+ * that pair behind when it lands a peer's newer turns). Everything else
+ * counts, including things we could guess at — being wrong about the reason
+ * costs a sentence, being silent costs a conversation.
  */
 export function unrecognisedRolloutNames(names: readonly string[]): string[] {
+  const present = new Set(names);
   return names.filter(
     (name) =>
       rolloutIds(name) === null &&
       classifyExternalArtifact(name, names).kind === "unknown" &&
-      !name.includes(TEMP_MARKER),
+      !name.includes(TEMP_MARKER) &&
+      !CODEX_TEMP.some((pattern) => pattern.test(name)) &&
+      !(isCompressedRollout(name) && present.has(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length))),
   );
 }
 
 /** The plugin's own in-flight writes (`fs-gateway`'s `tempName`). */
 const TEMP_MARKER = ".aiss-tmp-";
+/**
+ * Codex's own, from its compression worker (codex-rs `compression.rs`): the
+ * compressed file before it is renamed into place, and a plain file being
+ * restored from one (`<name>.jsonl.decompress.<pid>.<n>.tmp`).
+ */
+const CODEX_TEMP = [/^rollout-compress-.*\.tmp$/, /\.jsonl\.[a-z]+\.\d+\.\d+\.tmp$/];
 
 /**
  * The sentences an adapter hands `healthCheck` for the names it skipped.
  *
  * Compressed rollouts get their own: "this plugin probably needs to catch up"
  * is the right guess about a name nobody recognises, and the wrong thing to
- * say about one we do — the user can act on the second, by resuming.
+ * say about one we do — the user can act on the second, by resuming. Only
+ * this vault's are counted when the vault's threads are known: the sessions
+ * folder is shared by every vault and every Codex client, and a count of
+ * conversations this vault never syncs is a sentence about nothing.
  */
-export function describeUnrecognised(names: readonly string[]): string[] {
-  const compressed = names.filter(isCompressedRollout);
+export function describeUnrecognised(names: readonly string[], scope?: ReadonlySet<string>): string[] {
+  const compressed = names.filter(
+    (name) =>
+      isCompressedRollout(name) &&
+      (scope === undefined ||
+        scope.has(rolloutIds(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length))?.threadId ?? "")),
+  );
   const unknown = names.filter((name) => !isCompressedRollout(name));
   const sentences: string[] = [];
   if (unknown.length > 0) {
@@ -164,7 +184,7 @@ export function describeUnrecognised(names: readonly string[]): string[] {
   }
   if (compressed.length > 0) {
     sentences.push(
-      `Codex has compressed ${compressed.length} conversation file(s) in its sessions folder ` +
+      `Codex has compressed ${compressed.length} of this vault's conversation file(s) in its sessions folder ` +
         "(.jsonl.zst — it does this to conversations left untouched for a while). This version " +
         "does not sync compressed files: one your other devices do not have yet stays on this " +
         "device until you resume it in Codex, which turns it back into a plain file that syncs " +

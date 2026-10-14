@@ -204,7 +204,7 @@ export class Machine {
    * gateway, so a bare count cannot tell "we re-read every session" from "we
    * loaded our own state".
    */
-  readonly io = { readFile: 0, readTail: 0, lstat: 0, readPaths: [] as string[] };
+  readonly io = { readFile: 0, readTail: 0, readHead: 0, lstat: 0, readPaths: [] as string[] };
 
   constructor(
     readonly name: MachineName,
@@ -255,6 +255,7 @@ export class Machine {
   resetIo(): void {
     this.io.readFile = 0;
     this.io.readTail = 0;
+    this.io.readHead = 0;
     this.io.lstat = 0;
     this.io.readPaths.length = 0;
   }
@@ -836,7 +837,7 @@ class MemoryLedger implements LedgerView {
  */
 function countingGateway(
   inner: FsGateway,
-  counts: { readFile: number; readTail: number; lstat: number; readPaths: string[] },
+  counts: { readFile: number; readTail: number; readHead: number; lstat: number; readPaths: string[] },
 ): FsGateway {
   return {
     ...inner,
@@ -852,6 +853,10 @@ function countingGateway(
     async readTail(target, n) {
       counts.readTail++;
       return inner.readTail(target, n);
+    },
+    async readHead(target, n) {
+      counts.readHead++;
+      return inner.readHead(target, n);
     },
   };
 }

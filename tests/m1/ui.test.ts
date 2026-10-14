@@ -389,6 +389,7 @@ describe("every refusal has a sentence, not a code", () => {
     reason: null,
     externalCopy: null,
     localArchived: false,
+    localCompressed: false,
   } as const;
 
   it.each([
@@ -546,6 +547,7 @@ describe("the conflict panel's four standings", () => {
       reason: null,
       externalCopy: null,
       localArchived: false,
+      localCompressed: false,
     }) as unknown as ConflictEntry;
 
   const settled = entry("settled", [

@@ -71,6 +71,7 @@ const conflictEntry = {
     reason: null,
     externalCopy: null,
     localArchived: false,
+    localCompressed: false,
 } as ConflictEntry;
 
 function stubRuntime(opened: string[], succeeds: boolean) {

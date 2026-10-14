@@ -29,6 +29,7 @@ import type { FsGateway } from "../infra/fs-gateway";
 import { readJson } from "../infra/json-file";
 import type { BackupRequest } from "../infra/backup-writer";
 import type { MintOutcome } from "./sync-engine";
+import { lookForCompressed } from "./compressed-here";
 
 /**
  * Every name the engine has ever given a quarantined copy.
@@ -101,6 +102,14 @@ export interface ConflictEntry {
    * keeping the other one would write a second copy beside the archived one.
    */
   readonly localArchived: boolean;
+  /**
+   * This machine's copy is missing because Codex compressed it where it was
+   * (ADR-83). Neither choice can be made until the conversation is opened in
+   * Codex once: keeping this machine's version has no plain file to read, and
+   * keeping the other one would put a plain file in front of the compressed
+   * one.
+   */
+  readonly localCompressed: boolean;
 }
 
 export type ConflictStanding =
@@ -125,6 +134,8 @@ export interface ConflictCommandDeps {
    * empty when the provider archives nothing.
    */
   readonly archivedPathsFor?: (providerId: string, neutralRel: string) => string[];
+  /** Where a compressed form of the file at a local path would be (ADR-83). */
+  readonly compressedSiblingOf?: (providerId: string, localPath: string) => string | null;
   /**
    * The same validator the engine writes through.
    *
@@ -173,6 +184,8 @@ export type ResolveFailure =
   | "sides-agree"
   /** This machine's copy is archived (ADR-79); unarchive it first. */
   | "local-archived"
+  /** This machine's copy is compressed (ADR-83); open it in Codex first. */
+  | "local-compressed"
   | "remote-not-ready"
   /** A pass is applying right now — the same lock a pass takes (§9.4). */
   | "sync-in-progress"
@@ -230,6 +243,7 @@ export async function resolveConflict(
   // readiness for a write that would change nothing is the worse refusal.
   if (entry.standing === "settled") return { ok: false, reason: "sides-agree" };
   if (entry.localArchived) return { ok: false, reason: "local-archived" };
+  if (entry.localCompressed) return { ok: false, reason: "local-compressed" };
 
   const keepingLocal = resolution === "keep-local";
   // Keeping local means writing into the sync directory, and that is only
@@ -359,6 +373,7 @@ async function readEntry(
     )
     .sort((a, b) => (a.hashPrefix < b.hashPrefix ? -1 : 1));
 
+  const localArchived = localHash === null && (await archivedHere(deps, providerId, neutralRel, localPath));
   return {
     conflictId,
     providerId,
@@ -371,7 +386,16 @@ async function readEntry(
     neutralRel,
     branches,
     standing: standingOf(branches, localHash, remoteHash),
-    localArchived: localHash === null && (await archivedHere(deps, providerId, neutralRel, localPath)),
+    localArchived,
+    localCompressed:
+      localHash === null &&
+      !localArchived &&
+      localPath !== null &&
+      (await lookForCompressed(
+        deps.fs,
+        { compressedSiblingOf: (target) => deps.compressedSiblingOf?.(providerId, target) ?? null },
+        localPath,
+      )).kind !== "none",
   };
 }
 

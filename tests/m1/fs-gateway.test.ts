@@ -161,6 +161,17 @@ describe("reads", () => {
     expect(new TextDecoder().decode(await gateway.readTail(target, 999))).toBe("0123456789");
   });
 
+  it("reads only the head, and never past the end", async () => {
+    const root = makeRoot();
+    const target = path.join(root, "a.jsonl.zst");
+    writeFileSync(target, "0123456789");
+
+    expect(new TextDecoder().decode(await gateway.readHead(target, 4))).toBe("0123");
+    expect(new TextDecoder().decode(await gateway.readHead(target, 999))).toBe("0123456789");
+    writeFileSync(target, "");
+    expect((await gateway.readHead(target, 18)).length).toBe(0);
+  });
+
   it("returns an empty tail for an empty file", async () => {
     const root = makeRoot();
     const target = path.join(root, "empty.jsonl");

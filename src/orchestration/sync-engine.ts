@@ -30,6 +30,7 @@ import {
   shrankBelowConvergedBase,
 } from "../domain/planner";
 import { compareRecordwise } from "../domain/equivalence";
+import { STARVATION_PASSES, STARVED_ALLOWANCE_FILES, servedFromAllowance } from "../domain/budget";
 import {
   type AbsentHere,
   type TranscriptWhere,
@@ -49,12 +50,14 @@ import type { FsGateway } from "../infra/fs-gateway";
 import { isDenylisted, isTransferArtifact } from "../infra/path-guard";
 import type { Clock, IdGen } from "../infra/clock";
 import {
+  COMPRESSED_HEADER_BYTES,
   type ProviderAdapter,
   type SessionFileRef,
   type SessionGroup,
   archivedPathsFor,
 } from "../providers/provider-adapter";
 import type { ClaudianRecordsState } from "./claudian-records";
+import { type CompressedLook, lookForCompressed } from "./compressed-here";
 import {
   type ActionEntry,
   type ActionResult,
@@ -227,14 +230,6 @@ export interface EngineSettings {
   readonly clockSkewToleranceMs: number;
 }
 
-/**
- * ADR-82's bound on "not this pass": a group the budget has turned away this
- * many passes running comes through from an allowance of this many files,
- * kept apart from `maxFilesPerPass` (architecture §12.2, B0).
- */
-const STARVATION_PASSES = 5;
-const STARVED_ALLOWANCE_FILES = 20;
-
 export interface LedgerEntryView {
   readonly sig: E0Signature;
   readonly firstSeenMs: number;
@@ -326,9 +321,9 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const changedSinceDeleted: string[] = [];
   const restoredHistoryMissing: string[] = [];
   // ADR-83: Codex rollouts compressed on this machine whose sync-folder copy
-  // was let through to land beside them, and ones this machine could not
-  // compare with theirs.
-  const landingBesideCompressed = new Set<string>();
+  // was let through to land beside them (neutral path → id), and ones this
+  // machine could not compare with theirs.
+  const landingBesideCompressed = new Map<string, string>();
   const compressedUncompared: string[] = [];
   /** Opened inside the lock, in `runPassBody`. */
   let records: ClaudianRecordsSession | null = null;
@@ -368,8 +363,13 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   if (records?.notice) notices.push(records.notice);
   // A recreated store is a vault downloaded again or a folder somebody
   // removed, and every record missing from it at once is not the user
-  // deleting them. This pass treats it like a store that is not there.
+  // deleting them. This pass treats it like a store that is not there — and a
+  // record it could not judge this pass (its copy in the sync folder was
+  // still moving) carries that into the pass that can, rather than being
+  // judged then as if the store had always been there.
   const storeRecreated = records ? records.state.observeStore(await records.storeIdentity()) : false;
+  /** Records missing here whose recreated-store judgement was put off this pass. */
+  const recreationCarried = new Set<string>();
   if (storeRecreated) {
     notices.push(
       "Claudian's conversation folder on this device was recreated since the last sync, so " +
@@ -458,7 +458,9 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   }
 
   let budget = deps.settings.maxFilesPerPass;
-  let starvedAllowance = STARVED_ALLOWANCE_FILES;
+  const allowanceFor = starvedFirst();
+  /** Files turned away again after `STARVATION_PASSES` or more passes running. */
+  let stillStarved = 0;
 
   for (const { adapter, group } of groups) {
     // `derived` stays refused: a derived file is rebuilt locally, never
@@ -558,15 +560,18 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     }
 
     // ADR-83. A rollout Codex compressed on this machine, settled before the
-    // budget for the archive's reasons: two stats, and a standing state. The
-    // exception — the sync folder's copy carries turns this machine has not
-    // seen — plans normally below and lands beside the compressed one.
+    // budget for the archive's reasons: a few stats and an 18-byte header
+    // read, and a standing state. The exception — the sync folder's copy
+    // continues exactly what was compressed — is read to prove it, charged
+    // like any read, and then plans normally below to land beside it.
+    let precharged = false;
     if (adapter.compressedSiblingOf && planned.length === 1) {
-      const row = await compressedHere(group, adapter, planned[0] as SessionFileRef);
-      if (row !== null) {
-        actions.push(row);
+      const outcome = await compressedHere(group, adapter, planned[0] as SessionFileRef);
+      if (outcome.row) {
+        actions.push(outcome.row);
         continue;
       }
+      precharged = outcome.charged;
     }
 
     // ADR-78. Before the budget, so a record already held, or retired, costs
@@ -588,7 +593,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // writes nothing; charging it here spent the whole budget on the first
     // groups in a fixed order, and the ones after them — a peer's new
     // sessions, the conversation records — waited for ever (round 10, D2/A3).
-    let charged = false;
+    let charged = precharged;
 
     // Watched so a half-assembled group is said out loud rather than left in
     // the action rows to be noticed. See the notice below for why it matters.
@@ -679,17 +684,44 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         continue;
       }
 
+      // Read only what can change the outcome. A pass whose sync folder is not
+      // ready, or a pair with a side over the size limit, is skipped by the
+      // planner's first rules from the stats alone — reading it in full every
+      // pass, and charging the budget for it, decided nothing (review
+      // 2026-10-14: a file over the limit was read whole on every pass).
+      const decidable =
+        deps.remoteReadiness === "ready" &&
+        (localO2.stat?.size ?? 0) <= deps.settings.maxFileSizeBytes &&
+        (remoteO2.stat?.size ?? 0) <= deps.settings.maxFileSizeBytes;
+      const readLocal = decidable && localO2.exists && localStable.stable;
+      const readRemote = decidable && remoteO2.exists && remoteStable.stable;
+
+      // ADR-78's first judgement of a record this device remembers and no
+      // longer has is never put off by the budget. Two of its inputs hold only
+      // on the pass they are seen — a transcript this pass pulled, a store
+      // this pass found recreated — and the judgement a pass later, without
+      // them, holds the record as the user's own delete (review 2026-10-14).
+      // It costs one small read, once per record.
+      const firstJudgement =
+        records !== null &&
+        adapter.id === "claudian" &&
+        !localO2.exists &&
+        remoteO2.exists &&
+        (records.state.witnessed(file.neutralRel) || deps.ledger.converged(file.neutralRel) !== null);
+
       // ADR-82: the first member that has to be read is where the group is
-      // charged. Every member before it answered from the cache and wrote
-      // nothing, so turning the group away here leaves nothing half-landed.
-      const reads = (localO2.exists && localStable.stable) || (remoteO2.exists && remoteStable.stable);
-      if (reads && !charged) {
-        if (!chargeBudget(planned)) {
-          // Observed all the same, so the quiet window keeps running and the
-          // pass that has room finds the file settled rather than new — and so
-          // the ledger has an entry to count this turn-away against.
+      // charged. No member before it read bytes or wrote — each answered from
+      // the cache, or was not readable yet — so turning the group away here
+      // leaves nothing half-landed.
+      if ((readLocal || readRemote) && !charged && !firstJudgement) {
+        if (!chargeBudget(planned, group, adapter)) {
+          // Observed all the same, so a side seen for the first time starts its
+          // quiet window now, and the pass that has room finds it settled.
           recordLedger(deps, file.neutralRel, "local", localO2, nowMs, null);
           recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, null);
+          if (planned.some((member) => (deps.ledger.budgetSkips?.(member.neutralRel) ?? 0) >= STARVATION_PASSES)) {
+            stillStarved += planned.length;
+          }
           for (const rest of planned.slice(planned.indexOf(file))) {
             actions.push(entry(group, rest.neutralRel, adapter.id, "DEFER", "budget-exhausted", "SKIPPED_BUDGET"));
           }
@@ -700,8 +732,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
 
       // Bytes are read here and nowhere else, and the hash behind any decision
       // that writes comes from this read (E2). Nothing cached may substitute.
-      const localBytes = localO2.exists && localStable.stable ? await readBytes(deps, localPath) : null;
-      const remoteBytes = remoteO2.exists && remoteStable.stable ? await readBytes(deps, remotePath) : null;
+      const localBytes = readLocal ? await readBytes(deps, localPath) : null;
+      const remoteBytes = readRemote ? await readBytes(deps, remotePath) : null;
       await barrier("P3:bytes-read", { neutralRel: file.neutralRel });
 
       // O3: the file must not have moved while we were reading it.
@@ -814,6 +846,19 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
             })
           : plan(input);
 
+      // Not asked this pass — the copy was moving, the sync folder was not
+      // ready, the memory could not be read — so the question waits for a
+      // pass that can ask it, and the recreation waits with it.
+      if (
+        records &&
+        record &&
+        !localFacts.exists &&
+        remoteFacts.exists &&
+        (absentHere === undefined || absentHere.verdict === "wait") &&
+        (storeRecreated || records.state.recreatedFor(file.neutralRel))
+      ) {
+        recreationCarried.add(file.neutralRel);
+      }
       if (records && record && decision.action === "SKIP_DELETED_HERE" && absentHere?.verdict === "hold") {
         records.state.hold(
           file.neutralRel,
@@ -1124,23 +1169,41 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
 
   if (records) notices.push(...claudianNotices());
 
-  // ADR-83, once per pass, by rollout id prefix like the replaced-history line.
-  const broughtInBesideCompressed = actions.filter(
-    (a) => landingBesideCompressed.has(a.neutralRel) && a.action === "PULL_NEW" && a.result === "APPLIED",
-  ).length;
-  if (broughtInBesideCompressed > 0) {
+  // ADR-83, once per pass, naming whole ids: a Codex id's first characters
+  // are a timestamp, and conversations started a minute apart share them.
+  const broughtInBesideCompressed = actions
+    .filter(
+      (a) => landingBesideCompressed.has(a.neutralRel) && a.action === "PULL_NEW" && a.result === "APPLIED",
+    )
+    .map((a) => landingBesideCompressed.get(a.neutralRel) as string);
+  if (broughtInBesideCompressed.length > 0) {
     notices.push(
-      `codex: ${broughtInBesideCompressed} conversation(s) that Codex had compressed on this device ` +
-        "received newer turns from another device. Codex reads the new plain file from now on; the " +
-        "compressed copy stays beside it, unused.",
+      `codex: ${named(broughtInBesideCompressed)}: compressed by Codex on this device, and continued ` +
+        "on another device since. Its newer turns were copied here as a plain file, which Codex " +
+        "reads from now on. The older compressed copy (.jsonl.zst) is still beside it, or in " +
+        "Codex's sessions folder if you archive the conversation; Codex does not use it, and it " +
+        "can be deleted.",
     );
   }
   if (compressedUncompared.length > 0) {
     notices.push(
-      `codex: ${named(compressedUncompared.map((id) => id.slice(0, 8)))}: compressed by Codex on this ` +
-        "device, with a different copy in the sync folder that is not being brought here — this " +
-        "device cannot compare it with the compressed one. Resuming the conversation in Codex turns " +
-        "it back into a plain file, and the next sync compares the two.",
+      `codex: ${named(compressedUncompared)}: compressed by Codex on this device. The copy in the ` +
+        "sync folder is not being brought here, because this device cannot tell whether it " +
+        "continues the compressed one. To compare them, open the conversation in Codex once and " +
+        "quit without sending — that turns it back into a plain file — and let the next sync run " +
+        "before you continue it; sending first may split the conversation into two versions.",
+    );
+  }
+
+  // ADR-82. Said only when the allowance for the starved could not take
+  // everyone: a pass that defers a few files to the next is the setting doing
+  // its job, and is not news.
+  if (stillStarved > 0) {
+    notices.push(
+      `${stillStarved} session file(s) have waited ${STARVATION_PASSES} or more syncs in a row for ` +
+        `room under maxFilesPerPass (${deps.settings.maxFilesPerPass}). They are coming through ` +
+        `${STARVED_ALLOWANCE_FILES} files per sync, longest-waiting first; raising maxFilesPerPass ` +
+        "in the plugin's data.json (with Obsidian closed) clears them sooner.",
     );
   }
 
@@ -1177,6 +1240,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   await barrier("P8:before-commit", {});
   await barrier("P8:committed", {});
 
+  records?.state.carryRecreation(recreationCarried);
   // Inside the lock, which `runPass` releases only after this returns.
   await records?.commit();
 
@@ -1189,37 +1253,42 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
    * …with a floor. A group larger than `maxFilesPerPass` would otherwise
    * defer for ever — the budget resets each pass and the group never
    * shrinks, so "wait for room" becomes "never sync this session". A group
-   * that cannot fit an untouched budget is instead allowed to run alone: it
-   * is the only work this pass does, which is the smallest departure from
-   * the setting that still makes progress.
+   * that cannot fit an untouched budget is instead allowed to run first and
+   * alone, apart from the allowance below: the smallest departure from the
+   * setting that still makes progress.
    *
-   * And with an allowance for the starved (architecture §12.2, B0). Charging
-   * only groups that read makes the budget bind only when more of them need
-   * reading than it allows — but some need it every pass (a pair in
-   * conflict, a file over the size limit, an equivalent pair left as is),
-   * and enough of those ahead in the fixed order would turn the rest away
-   * for ever again. A group turned away `STARVATION_PASSES` passes running
-   * comes through from a separate allowance instead, so "not this pass" has
-   * a bound.
+   * And with the allowance for the starved (`domain/budget.ts`): a group the
+   * budget has turned away `STARVATION_PASSES` passes running may come
+   * through from it instead, reserved for it at the start of the pass. A
+   * reservation, not a charge: one reserved that turns out to have nothing to
+   * read this pass leaves its share unused.
    */
-  function chargeBudget(planned: readonly SessionFileRef[]): boolean {
+  function chargeBudget(planned: readonly SessionFileRef[], group: SessionGroup, adapter: ProviderAdapter): boolean {
     if (planned.length <= budget || budget >= deps.settings.maxFilesPerPass) {
       budget -= planned.length;
       return true;
     }
-    const starved = planned.some(
-      (file) => (deps.ledger.budgetSkips?.(file.neutralRel) ?? 0) >= STARVATION_PASSES,
+    return allowanceFor.has(groupKey(adapter, group));
+  }
+
+  /** `servedFromAllowance` over this pass's groups, in listing order. */
+  function starvedFirst(): Set<string> {
+    return servedFromAllowance(
+      groups.map(({ adapter, group }) => {
+        const members = orderedForCommit(group);
+        return {
+          key: groupKey(adapter, group),
+          files: members.length,
+          waited: Math.max(0, ...members.map((file) => deps.ledger.budgetSkips?.(file.neutralRel) ?? 0)),
+        };
+      }),
     );
-    if (starved && planned.length <= starvedAllowance) {
-      starvedAllowance -= planned.length;
-      return true;
-    }
-    return false;
   }
 
   /**
-   * A rollout Codex compressed on this machine (ADR-83); null to plan it
-   * normally.
+   * A rollout Codex compressed on this machine (ADR-83): a row that settles
+   * it, or none to plan it normally — `charged` when the read that proved it
+   * has already been paid for.
    *
    * Codex compresses a rollout left untouched for a week into
    * `<name>.jsonl.zst` and removes the plain file, reads the plain file
@@ -1229,57 +1298,95 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
    * compressed, and a quiet loss when the compressed copy holds turns the sync
    * folder does not — they stay on disk, unread.
    *
-   * The compressed bytes are not readable here, so this decides from what the
-   * ledger remembers: the size and hash of what both sides held at the last
-   * convergence this machine witnessed, and the size of the plain file when it
-   * was last seen. Only when Codex compressed exactly that — and the sync
-   * folder's copy is that, extended — is there news to land. Everything else
-   * is held back and said: holding back costs a pass's worth of someone
-   * else's turns until the session is resumed here, landing wrongly costs
-   * turns the user cannot see.
+   * The compressed bytes are not decoded here, so the question "is the sync
+   * folder's copy what was compressed, extended?" is answered in two halves.
+   * What was compressed: as long as what both sides held at the last
+   * convergence this machine witnessed — the size the zstd frame header
+   * declares, or, for a frame that declares none, the plain file's last-seen
+   * modification time, which Codex copies onto the compressed one. And the
+   * sync folder's copy: read, and its first that-many bytes hashed against
+   * the converged base. Only both together let it land; everything else is
+   * held back and said. Holding back costs another device's turns until the
+   * conversation is resumed here; landing wrongly costs turns the user cannot
+   * see.
    */
   async function compressedHere(
     group: SessionGroup,
     adapter: ProviderAdapter,
     file: SessionFileRef,
-  ): Promise<ActionEntry | null> {
-    const target = await adapter.targetPathFor(file.neutralRel);
-    const compressed = adapter.compressedSiblingOf?.(target) ?? null;
-    if (compressed === null) return null;
-    try {
-      if ((await deps.fs.lstat(target)) !== null) return null;
-      const st = await deps.fs.lstat(compressed);
-      if (st === null || !st.isFile) return null;
-    } catch {
-      return null;
-    }
+  ): Promise<{ readonly row: ActionEntry | null; readonly charged: boolean }> {
+    const plan = { row: null, charged: false } as const;
+    const look = await lookForCompressed(deps.fs, adapter, await adapter.targetPathFor(file.neutralRel));
+    if (look.kind === "none") return plan;
     const remotePath = deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel);
     const remote = await observe(deps, remotePath);
-    if (remote.stat === null) return null;
+    if (remote.stat === null) return plan;
 
     const nowMs = deps.clock.nowMs();
+    const hold = (action: Action, reason: string, result: ActionResult) => {
+      // Watched while withheld, as an archived rollout's copy is (NR-8).
+      recordLedger(deps, file.neutralRel, "remote", remote, nowMs, null);
+      return { row: entry(group, file.neutralRel, adapter.id, action, reason, result), charged: false };
+    };
+    // Could not even tell whether it is there: writing beside it is the one
+    // outcome that can hide turns, so this waits.
+    if (look.kind === "unknown") return hold("DEFER", "compressed-unreadable", "SKIPPED_POLICY");
+
     const lastSeen = deps.ledger.local(file.neutralRel);
     // Kept alive while the file is compressed: the ledger forgets an entry
     // unseen for thirty days, and this one is the memory the rule runs on.
     if (lastSeen !== null) deps.ledger.record(file.neutralRel, "local", lastSeen);
+    // What the planner would say once the session is resumed here, said now:
+    // a copy too large to read is not one this device could compare either.
+    if (remote.stat.size > deps.settings.maxFileSizeBytes) {
+      return hold("SKIP_TOO_LARGE", "over-size-limit", "SKIPPED_POLICY");
+    }
+
     const baseSize = deps.ledger.convergedSize(file.neutralRel);
     const baseHash = deps.ledger.converged(file.neutralRel);
-    const compressedTheBase = baseSize !== null && baseHash !== null && lastSeen?.sig.size === baseSize;
+    const compressedTheBase =
+      baseSize !== null &&
+      baseHash !== null &&
+      lastSeen?.sig.size === baseSize &&
+      (await compressedLength(adapter, look, lastSeen.sig.mtimeMs, baseSize));
 
-    if (compressedTheBase && remote.stat.size > baseSize && remote.stat.size <= deps.settings.maxFileSizeBytes) {
+    if (compressedTheBase && remote.stat.size > baseSize) {
+      const remoteStable = judgeSide(deps, remote, deps.ledger.remote(file.neutralRel), nowMs, "remote");
+      if (!remoteStable.stable) return hold("DEFER", "side-unstable", "SKIPPED_POLICY");
+      if (!chargeBudget([file], group, adapter)) {
+        if ((deps.ledger.budgetSkips?.(file.neutralRel) ?? 0) >= STARVATION_PASSES) stillStarved += 1;
+        return hold("DEFER", "budget-exhausted", "SKIPPED_BUDGET");
+      }
       const bytes = await readBytes(deps, remotePath);
       if (bytes !== null && bytes.length > baseSize && deps.hashBytes(bytes.subarray(0, baseSize)) === baseHash) {
-        landingBesideCompressed.add(file.neutralRel);
-        return null;
+        landingBesideCompressed.set(file.neutralRel, group.logicalId);
+        return { row: null, charged: true };
       }
     }
-    // Watched while withheld, as an archived rollout's copy is (NR-8).
-    recordLedger(deps, file.neutralRel, "remote", remote, nowMs, null);
     // Said when the sync folder's copy may hold what this machine lacks; a
     // copy the same size as what was compressed is the common case and news
     // to nobody.
     if (!compressedTheBase || remote.stat.size !== baseSize) compressedUncompared.push(group.logicalId);
-    return entry(group, file.neutralRel, adapter.id, "SKIP_COMPRESSED_HERE", "compressed-here", "SKIPPED_POLICY");
+    return hold("SKIP_COMPRESSED_HERE", "compressed-here", "SKIPPED_POLICY");
+  }
+
+  /**
+   * Is what Codex compressed `baseSize` bytes long? From the frame header when
+   * it declares a size; otherwise from the modification time, which Codex
+   * copies from the plain file it compressed — the plain file this machine
+   * last saw, if it was not touched since. Within a millisecond, because a
+   * copy through an API that rounds to one is still the same instant.
+   */
+  async function compressedLength(
+    adapter: ProviderAdapter,
+    look: Extract<CompressedLook, { kind: "compressed" }>,
+    lastSeenMtimeMs: number,
+    baseSize: number,
+  ): Promise<boolean> {
+    const header = await deps.fs.readHead(look.path, COMPRESSED_HEADER_BYTES).catch(() => null);
+    const declared = header === null ? null : (adapter.compressedContentSize?.(header) ?? null);
+    if (declared !== null) return declared === baseSize;
+    return Math.abs(look.stat.mtimeMs - lastSeenMtimeMs) < 1;
   }
 
   /**
@@ -1353,6 +1460,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // would have recorded that it had content.
     const remote = await observe(deps, deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel));
     recordLedger(deps, file.neutralRel, "remote", remote, deps.clock.nowMs(), null);
+    // And this machine's memory of it stays too. Codex compresses the archive
+    // as well, and unarchiving puts the compressed file back in `sessions/`:
+    // the converged base is what ADR-83 then decides by, and the ledger
+    // forgets an entry unseen for thirty days.
+    const lastSeen = deps.ledger.local(file.neutralRel);
+    if (lastSeen !== null) deps.ledger.record(file.neutralRel, "local", lastSeen);
     return entry(group, file.neutralRel, adapter.id, "SKIP_ARCHIVED_HERE", "archived-here", "SKIPPED_POLICY");
   }
 
@@ -1375,7 +1488,8 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       {
         kind: record.kind,
         markerless: claudian.markerless,
-        storeHealthy: healthy.has(adapter.id) && !storeRecreated,
+        storeHealthy:
+          healthy.has(adapter.id) && !storeRecreated && !claudian.state.recreatedFor(neutralRel),
         witnessed: claudian.state.witnessed(neutralRel) || deps.ledger.converged(neutralRel) !== null,
         releaseRequested: held?.releaseRequested === true,
         tombstoneBeside,
@@ -2043,6 +2157,10 @@ function errnoOf(error: unknown): string | undefined {
  * `derived` members are already excluded: they are refused above, and no
  * adapter lists them.
  */
+function groupKey(adapter: ProviderAdapter, group: SessionGroup): string {
+  return `${adapter.id}\u0000${group.logicalId}`;
+}
+
 function orderedForCommit(group: SessionGroup): SessionFileRef[] {
   const syncable = group.files.filter((file) => file.mode !== "derived");
   return [
