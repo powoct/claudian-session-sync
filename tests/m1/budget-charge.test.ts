@@ -239,6 +239,10 @@ describe("a group the budget turns away part-way", () => {
     await m.runtime.setProvider("grok", { enabled: true });
     await m.runtime.refresh();
     await m.appendSession(sid(0), 2);
+    // Forty settled sessions besides, so the pass's one-file scrub sample
+    // seldom lands on the Grok members — a sampled member has to be read, and
+    // the shape this asserts needs them answered from the cache.
+    for (let n = 1; n <= 40; n++) await m.appendSession(sid(200 + n), 1);
     await m.writeGrokSession(GROK, { turns: 2 });
     await m.settle();
     await m.appendRaw(sid(0), '{"uuid":"here","type":"user","text":"this machine"}\n');
@@ -251,7 +255,7 @@ describe("a group the budget turns away part-way", () => {
     await fsp.writeFile(summary, JSON.stringify({ ...parsed, title: "renamed" }));
 
     const shapes: Array<Record<string, string>> = [];
-    for (let i = 0; i < STARVATION_PASSES + 4; i++) {
+    for (let i = 0; i < STARVATION_PASSES + 8; i++) {
       const rows = (await pass(m)).actions.filter((a) => a.neutralRel.startsWith(`grok/${GROK}/`));
       const byMember = Object.fromEntries(rows.map((a) => [a.neutralRel.split("/").pop(), `${a.action}/${a.reason}`]));
       // One row per member, never a cache hit and a deferral for the same file.

@@ -11,8 +11,10 @@
  *
  *  - the **ledger** is what this machine watched happen — signatures, quiet
  *    windows, streaks. Nothing in it has crossed a network;
- *  - the **evidence cache** is content facts remembered from full reads, whose
- *    remote half lives in the sync directory and is written by other machines.
+ *  - the **evidence cache** is content facts remembered from full reads — this
+ *    machine's own for both sides, with the shared manifest in the sync
+ *    directory, written by every machine, as a fallback for the sync
+ *    folder's copy (ADR-84).
  *
  * They are both allowed to be wrong. The ledger being wrong costs a slow pass;
  * the cache being wrong costs a missed one. Neither can cost a write, and that

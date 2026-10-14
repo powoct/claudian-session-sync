@@ -202,6 +202,8 @@ export class Machine {
    * deleting the manifest must not touch it.
    */
   private readonly localEvidence = new Map<string, CachedContentFacts>();
+  /** This machine's own record of the sync folder's copies (ADR-84). */
+  private readonly remoteEvidence = new Map<string, CachedContentFacts>();
   /**
    * Counts the reads a pass performs, which is how E1 is observable at all.
    *
@@ -253,9 +255,15 @@ export class Machine {
   }
 
   /** Forgets in-process state, as an Obsidian restart would. */
+  /** This machine's own record of the sync folder's copies, lost — as a wiped ledger half. */
+  forgetRemoteEvidence(): void {
+    this.remoteEvidence.clear();
+  }
+
   restart(): void {
     this.ledger.clear();
     this.localEvidence.clear();
+    this.remoteEvidence.clear();
   }
 
   resetIo(): void {
@@ -335,9 +343,9 @@ export class Machine {
   /**
    * Builds the pass's E1 cache from the two stores it actually has.
    *
-   * Remote entries come from the manifest in the sync directory — untrusted,
-   * transported by `flush()`, deletable. Local entries come from this
-   * machine's own memory. A manifest that is missing or unreadable forces a
+   * Both sides come first from this machine's own memory; the sync folder's
+   * copy falls back to the manifest in the sync directory — untrusted,
+   * transported by `flush()`, deletable — as production does since ADR-84. A manifest that is missing or unreadable forces a
    * full-read pass (trigger T4), which is what makes losing it cost I/O rather
    * than correctness.
    */
@@ -360,14 +368,26 @@ export class Machine {
     // Arrow properties, not shorthand methods: `this` has to stay the machine.
     return {
       lookup: (rel, side) =>
-        side === "remote" ? entries[key(rel)] : this.localEvidence.get(rel),
+        side === "remote"
+          ? (this.remoteEvidence.get(rel) ?? entries[key(rel)])
+          : this.localEvidence.get(rel),
       scrub: (): ScrubTrigger | null => (forceFullRead ? "T4-manifest" : null),
       record: (rel, side, facts) => {
         if (side === "local") {
           this.localEvidence.set(rel, facts);
           return;
         }
+        this.remoteEvidence.set(rel, facts);
         const previous = entries[key(rel)];
+        // The same content verified again is not rewritten (ADR-84).
+        if (
+          previous &&
+          previous.size === facts.e0.size &&
+          previous.lineCount === facts.lineCount &&
+          previous.contentHash === facts.contentHash
+        ) {
+          return;
+        }
         entries[key(rel)] = {
           provider: rel.slice(0, rel.indexOf("/")),
           workspaceId: WORKSPACE_ID,

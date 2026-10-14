@@ -120,22 +120,25 @@ describe("two machines syncing, each with its own copy of the sync folder (ADR-8
     // last made the other miss it: with both syncing, every unchanged session
     // was read in full on every pass, and with a small `maxFilesPerPass` the
     // budget went on that (round 12, B1).
+    // The sync tool carries only what changed and keeps the mtime, as Dropbox
+    // does: the two copies of a file differ only in inode and ctime.
+    const CARRY = { changedOnly: true, mtime: "preserve" } as const;
     const w = newWorld();
     const a = w.machine("A");
     const b = w.machine("B");
     await a.initialiseSyncDir();
     for (let i = 0; i < 50; i++) await a.cli.session(sessionId(i)).append(3);
     await a.wiredSettle();
-    await w.flush("A", "B", { changedOnly: true });
+    await w.flush("A", "B", CARRY);
     await b.wiredSettle();
     for (let round = 0; round < 2; round++) {
-      await w.flush("B", "A", { changedOnly: true });
+      await w.flush("B", "A", CARRY);
       await a.wiredPass();
-      await w.flush("A", "B", { changedOnly: true });
+      await w.flush("A", "B", CARRY);
       await b.wiredPass();
     }
 
-    await w.flush("B", "A", { changedOnly: true });
+    await w.flush("B", "A", CARRY);
     const manifest = path.join(a.replicaRoot, ".aiss", "manifest.json");
     const manifestBefore = await fsp.readFile(manifest, "utf8");
     a.resetIo();
@@ -143,7 +146,7 @@ describe("two machines syncing, each with its own copy of the sync folder (ADR-8
     // Nor is the shared manifest rewritten to swap B's signature for A's:
     // the same content verified again is not news to anyone.
     expect(await fsp.readFile(manifest, "utf8")).toBe(manifestBefore);
-    await w.flush("A", "B", { changedOnly: true });
+    await w.flush("A", "B", CARRY);
     b.resetIo();
     const atB = await b.wiredPass();
 
