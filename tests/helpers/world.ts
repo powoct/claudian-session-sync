@@ -98,6 +98,12 @@ export interface TransportOptions {
   readonly zeroByte?: boolean;
   /** Preserve the source mtime (many sync tools do), or stamp it now. */
   readonly mtime?: "preserve" | "rewrite-now" | "future";
+  /**
+   * Carry only files whose bytes differ, as a real sync tool does. Without
+   * it every flush rewrites every file, which no machine could tell from
+   * somebody appending to all of them.
+   */
+  readonly changedOnly?: boolean;
 }
 
 interface Version {
@@ -894,6 +900,10 @@ async function copyTree(
     if (options.zeroByte) bytes = Buffer.alloc(0);
     else if (options.truncateBytes !== undefined) bytes = bytes.subarray(0, options.truncateBytes);
 
+    if (options.changedOnly) {
+      const existing = await fsp.readFile(to).catch(() => null);
+      if (existing !== null && Buffer.compare(existing, bytes) === 0) continue;
+    }
     await fsp.mkdir(path.dirname(to), { recursive: true });
     await fsp.writeFile(to, bytes);
 

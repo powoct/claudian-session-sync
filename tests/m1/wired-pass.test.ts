@@ -112,6 +112,52 @@ describe("the wired pass carries a session between machines", () => {
   }, 60_000);
 });
 
+describe("two machines syncing, each with its own copy of the sync folder (ADR-84)", () => {
+  it("reads an unchanged session on neither, however often the other has read it", async () => {
+    // The E1 evidence for the sync folder's copy used to live only in the
+    // shared manifest, keyed by a signature that carries the reader's inode
+    // and ctime. Each machine's copy has its own, so whichever read a file
+    // last made the other miss it: with both syncing, every unchanged session
+    // was read in full on every pass, and with a small `maxFilesPerPass` the
+    // budget went on that (round 12, B1).
+    const w = newWorld();
+    const a = w.machine("A");
+    const b = w.machine("B");
+    await a.initialiseSyncDir();
+    for (let i = 0; i < 50; i++) await a.cli.session(sessionId(i)).append(3);
+    await a.wiredSettle();
+    await w.flush("A", "B", { changedOnly: true });
+    await b.wiredSettle();
+    for (let round = 0; round < 2; round++) {
+      await w.flush("B", "A", { changedOnly: true });
+      await a.wiredPass();
+      await w.flush("A", "B", { changedOnly: true });
+      await b.wiredPass();
+    }
+
+    await w.flush("B", "A", { changedOnly: true });
+    const manifest = path.join(a.replicaRoot, ".aiss", "manifest.json");
+    const manifestBefore = await fsp.readFile(manifest, "utf8");
+    a.resetIo();
+    const atA = await a.wiredPass();
+    // Nor is the shared manifest rewritten to swap B's signature for A's:
+    // the same content verified again is not news to anyone.
+    expect(await fsp.readFile(manifest, "utf8")).toBe(manifestBefore);
+    await w.flush("A", "B", { changedOnly: true });
+    b.resetIo();
+    const atB = await b.wiredPass();
+
+    for (const [machine, outcome] of [
+      [a, atA],
+      [b, atB],
+    ] as const) {
+      const levels = outcome.report.actions.map((x) => x.evidence.level);
+      expect(levels.filter((level) => level === "E1/E1").length, machine.name).toBeGreaterThanOrEqual(48);
+      expect(machine.sessionReads(), `${machine.name} re-reads only the sample`).toHaveLength(2);
+    }
+  }, 60_000);
+});
+
 describe("S-16: an empty sync directory is never initialised for the user", () => {
   it("writes nothing at all — not even .aiss — until they say so", async () => {
     const w = newWorld();

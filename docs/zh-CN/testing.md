@@ -541,6 +541,7 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | S-29 | replica 里出现合法 UUID 名但内容是垃圾的 `.jsonl` | 白名单通过 → 走决策表；末段不完整 → `DEFER`；**不得 crash** | M1 |
 | S-30 | 六个没变的会话 + `maxFilesPerPass` = 3 + 一个对端新会话;四个同时到达的会话 + 预算 2;三个刚新建(未稳定)的本地会话、一个超过大小上限的会话各在前面;8 个会话 + 预算 2 + Verify all | 没变的会话至少 5/6 为 `e1-cache-hit`(抽样读一个)、整轮没有 `budget-exhausted`,新会话两轮内落地;四个会话第一次落地的那一轮恰好 2 个 `PULL_NEW`、2 个 `budget-exhausted`,其后全部落地;未稳定的、超过上限的不读也不计费(超过上限的一次都不整份读),同步夹未就绪时一个都不整份读;阈值 5 与额度 20 单独钉住;Verify all 挡下的文件之后几轮内各被整份读一次(ADR-82,[架构 §12.2](./architecture.md)) | M1 |
 | S-30b | 三个冲突对(每轮都要读)+ `maxFilesPerPass` = 1 + 一个对端新会话;25 个同时到达的会话 + 预算 1;Grok 组中途被挡;饥饿队列的单元测试 | 新会话**恰好**被挡 5 轮后由饥饿额度放行;25 个会话每轮最多落地 1 + 20 个、全部落地,报告写一句 `waited 5 or more syncs`;Grok 组每个成员一行(缓存命中的是 NOOP,被挡的是 DEFER),之后落地;饥饿队列按等待轮数排、装满 20 即止、排第一的超额也放行、按轮转覆盖全部(ADR-82) | M1 |
+| S-31 | 两台机器各有自己的同步夹副本(传输只搬变了的文件),50 个会话收敛后两台交替同步若干轮 | 每台每轮 ≥ 48 个 `E1/E1`,只整份读抽检那一份的两侧;同步夹里的 manifest 不因复核同一内容而被改写(ADR-84) | M1 |
 | X-01 | A 支持 `formatVersion=1`、B 支持 `=2`（B 已升级布局） | A 进入**完全只读**：replica 与 A 本机字节零改动 + Notice；B 正常；A 升级后能读到 B 期间产生的全部 session | M2 |
 | X-02 | 迁移中途崩溃（`migration` 已写、文件未搬完） | 重跑迁移收敛到同一结果；恢复点存在；无 session 丢失 | M2 |
 | X-03 | manifest `schemaVersion` 高于本插件 | 文件仍正常搬运（全量扫描）；**manifest 文件字节未变**（与 L0 的 M-03 是同一语义的两层，故同属 M1） | M1 |
@@ -574,6 +575,7 @@ it("S-01 · A 写 → 同步 → B 读 → B 续写 → 同步 → A 读", async
 | S-13 / S-28 / S-29 | ⏳ 批 4 | `classifyFileName` 的 L0 覆盖已全，缺引擎级"记录后忽略且不动源文件"的端到端断言 |
 | S-14a/b/c / S-15 | ⏳ M1 收尾 | 时钟差、删除不传播 |
 | S-30 / S-30b | ✅ `tests/m1/budget-charge.test.ts`（ADR-82，2026-10-15） | 按读计费、饥饿额度；原设计的环形游标未采用（架构 §12.2） |
+| S-31 | ✅ `tests/m1/wired-pass.test.ts`「two machines syncing, each with its own copy of the sync folder」(ADR-84,2026-10-15) | 旧代码上两台的 `E1/E1` 都是 0 |
 | R-02 / R-03 / R-07 / R-08 / R-11 / R-13 | ⏳ M1 收尾 | 竞态矩阵的后半段；R-08 的残余窗口断言尤其要按"不断言无损"的口径写 |
 | S-21 | — | 已退役（OQ-8 实测） |
 | S-22…S-27 / X-01 / X-02 / R-14 | — | M2 |
@@ -1243,6 +1245,11 @@ zstd`);Windows 机器上不造压缩件。**只对测试 vault 里新建的会�
 | **Z5** | 在 Claudian 里归档一条对话,再把 `archived_sessions/` 里那份压缩 → A 上 Sync now ×2:`SKIP_ARCHIVED_HERE` / `archived-here`,`sessions/` 下没有副本 |
 | **Z6** | (观察项)Claudian 2.3.20 没有不经归档的删除(Delete 只在 Archive 视图里,Codex 对话一归档 rollout 就进了 `archived_sessions/`),所以用一条已删除且已归档的 Codex 对话,把它归档里的 rollout 压缩 → 审计屏「Kept off this device」下该会话显示「on this device, archived」(压缩过的归档也算在本机)。「on this device, compressed by Codex」那个分支要先在 Codex 里取消归档再压 `sessions/` 下那份,做不了记「未测」 |
 | **Z7** | (观察项)用 `zstd --no-content-size` 造一份(模拟 0.152 之前的 Codex),压缩后用 `fs.utimesSync` 把 `.zst` 的 mtime 设回压缩前那份的精确值(macOS 上 zstd 只保留到整秒),重复 Z2,同样落地(靠 mtime) |
+
+**第 12 轮(2026-10-15)**:B1 的删除部分全部成立(新删的 5 条同一轮 `SKIP_DELETED_HERE`、第二轮恰好一条合并 Notice 与一次弹窗、
+B 那条两次内 `PULL_NEW`),但「没变的会话不出现在 `budget-exhausted` 里」**不成立**(5 轮里 17/15/12/9/7 行)。原因不在 ADR-82:
+同步夹那一侧的 E1 证据只查共用的 manifest,而 manifest 里的签名属于最后读它的那台机器,两台交替同步时互相覆盖、谁都不命中
+——每个没变的会话每轮都整份读、都计费。ADR-84 改为先查本机记忆,S-31 钉住。**B1 的这一条在 ADR-84 之后重跑**;其余部分已过。
 
 **B1 和 Z1 是核心。** ADR-82 只改「这一轮先处理谁」与「哪些读不必做」,不改任何一个文件怎么判;ADR-83 只扣住写入,
 唯一放行的「同步夹那份是压缩内容的延续」与修复前的行为相同,而且多了压缩件自带的证据。⚠️ **尚未执行。**
