@@ -578,7 +578,7 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     // a stat and no share of the pass: a bulk delete of fifty conversations is
     // fifty holds, and charging each one every pass would starve the peer's
     // new records that sort after them — this provider's groups come last.
-    // A delete's *first* judgement is still charged once, like any read.
+    // A delete's *first* judgement is not charged either (ADR-82, below).
     if (records && adapter.id === "claudian" && planned.length === 1) {
       const row = await claudianShortCircuit(group, adapter, planned[0] as SessionFileRef);
       if (row !== null) {
