@@ -14,6 +14,7 @@ import { OrphanModal } from "./ui/orphan-modal";
 import { SharingModal } from "./ui/sharing-modal";
 import { RestoreModal } from "./ui/restore-modal";
 import { BringBackModal } from "./ui/bring-back-modal";
+import { AuditModal } from "./ui/audit-modal";
 import { launchNotice } from "./domain/claudian-compat";
 
 /**
@@ -98,6 +99,11 @@ export default class AiSessionSyncPlugin extends Plugin {
       id: "bring-back-deleted-records",
       name: "Bring back conversations deleted on this device",
       callback: () => this.openBringBack(),
+    });
+    this.addCommand({
+      id: "audit-sync-folder",
+      name: "Audit the sync folder (read-only)",
+      callback: () => this.openAudit(),
     });
 
     // The three resolutions of §8.1 as palette entries. Each acts directly
@@ -291,6 +297,11 @@ export default class AiSessionSyncPlugin extends Plugin {
 
   private openBringBack(): void {
     new BringBackModal(this.getRuntime(), this.app).open();
+  }
+
+  /** ADR-81 H8: measures and labels, and has no button that removes anything. */
+  private openAudit(): void {
+    new AuditModal(this.getRuntime(), this.app).open();
   }
 
   /**

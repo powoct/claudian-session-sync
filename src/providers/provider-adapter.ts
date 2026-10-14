@@ -169,8 +169,29 @@ export interface ProviderAdapter {
    */
   listIncompleteSessions?(): Promise<SessionGroup[]>;
 
+  /**
+   * How this vault's Claudian records name this provider's sessions — for the
+   * read-only audit only (ADR-81, H8), never for a decision about a file.
+   *
+   * Optional: the records provider names nothing but itself.
+   */
+  readonly records?: RecordNaming;
+
   /** Tier B only; a no-op elsewhere. */
   reconcileLocalIndex(desired: readonly SessionGroup[]): Promise<void>;
+}
+
+export interface RecordNaming {
+  /** Claudian's spelling of this provider — `claude` for Claude Code. */
+  readonly claudianProviderId: string;
+  /**
+   * The session id a record names for this file of the sync folder, or null
+   * for a path this provider does not use. Codex records name the thread, and
+   * a rollout's file name carries the thread in its tail.
+   */
+  sessionIdOf(neutralRel: string): string | null;
+  /** Every id this vault's records name for this provider, in every layer Claudian has used. */
+  recordedSessionIds(): Promise<ReadonlySet<string>>;
 }
 
 /**

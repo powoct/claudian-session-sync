@@ -33,6 +33,7 @@
 import type { LogicalId } from "../../domain/types";
 import type {
   FileMode,
+  NeutralClassification,
   ProviderAdapter,
   SessionFileRef,
   SessionGroup,
@@ -128,6 +129,16 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
     deps.providerRoot,
     deps.customDirName ?? grokProjectDirName(deps.vaultRealPath),
   );
+
+  function classifyNeutral(neutralRel: string): NeutralClassification | null {
+    const parts = neutralRel.split("/");
+    if (parts.length !== 3 || parts[0] !== GROK_PROVIDER_ID) return null;
+    const [, sessionId, name] = parts as [string, string, string];
+    if (!GROK_SESSION_DIR.test(sessionId)) return null;
+    const known = MEMBERS.get(name);
+    if (known === undefined) return null;
+    return { logicalId: sessionId as LogicalId, role: known.role, mode: known.mode };
+  }
 
   return {
     id: GROK_PROVIDER_ID,
@@ -278,14 +289,13 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
       return groups;
     },
 
-    classifyNeutral(neutralRel) {
-      const parts = neutralRel.split("/");
-      if (parts.length !== 3 || parts[0] !== GROK_PROVIDER_ID) return null;
-      const [, sessionId, name] = parts as [string, string, string];
-      if (!GROK_SESSION_DIR.test(sessionId)) return null;
-      const known = MEMBERS.get(name);
-      if (known === undefined) return null;
-      return { logicalId: sessionId as LogicalId, role: known.role, mode: known.mode };
+    classifyNeutral,
+
+    records: {
+      claudianProviderId: CLAUDIAN_PROVIDER_ID,
+      // The session is the directory, and its name is the id a record names.
+      sessionIdOf: (neutralRel) => classifyNeutral(neutralRel)?.logicalId ?? null,
+      recordedSessionIds: async () => (await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid)).sessionIds,
     },
 
     async targetPathFor(neutralRel) {

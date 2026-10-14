@@ -58,6 +58,8 @@ import {
   shareOwnConversations,
 } from "./conversation-sharing";
 import { createClaudianRecordsState } from "./claudian-records";
+import { type HistoryNotHere, findHistoryNotHere } from "./resume-warning";
+import { type SyncFolderAudit, auditSyncFolder } from "./sync-folder-audit";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
 import { createFileLock } from "./lock-file";
@@ -219,6 +221,14 @@ export class PluginRuntime {
    * pop-up, and the hold it announced is already marked announced.
    */
   private announcements: string[] = [];
+  /**
+   * Conversations the last real pass warned about (ADR-81). The pop-up comes
+   * again only for one not already on this list, so a transcript held back
+   * for hours is a report line every pass and one pop-up, not one per pass.
+   * In memory: a restart is when Claudian reopens tabs, which is exactly when
+   * the warning is worth repeating.
+   */
+  private warnedNotHere: ReadonlySet<string> = new Set();
   private readonly listeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(private readonly host: RuntimeHost) {
@@ -337,12 +347,21 @@ export class PluginRuntime {
         ...compatNotices(this.compatInput()),
         ...(this.identityWithheld ? [this.identityWithheld] : []),
       ];
+      // After the pass, so a transcript it just brought is not warned about.
+      // A dry run brought nothing, and its report is the plan, not the state.
+      const notHere = options.dryRun ? null : await this.historyNotHere(prepared.deps.providers);
+      const trailing = notHere === null ? [] : describeHistoryNotHere(notHere, outcome.report);
       this.lastReport =
-        leading.length > 0
-          ? { ...outcome.report, notices: [...leading, ...outcome.report.notices] }
+        leading.length > 0 || trailing.length > 0
+          ? { ...outcome.report, notices: [...leading, ...outcome.report.notices, ...trailing] }
           : outcome.report;
       const announcement = options.dryRun ? null : announce(outcome.report.claudianRecords);
       if (announcement !== null) this.announcements.push(announcement);
+      if (notHere !== null) {
+        const fresh = notHere.filter((entry) => !this.warnedNotHere.has(entry.conversationId));
+        if (fresh.length > 0) this.announcements.push(announceHistoryNotHere(notHere.length));
+        this.warnedNotHere = new Set(notHere.map((entry) => entry.conversationId));
+      }
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -916,13 +935,22 @@ export class PluginRuntime {
     };
   }
 
-  private async providerRuntimes(binding: WorkspaceBinding): Promise<ProviderRuntime[]> {
+  /**
+   * An adapter per provider switched on here — or, for the read-only audit,
+   * per provider at all: the sync folder holds whatever any device pushed, and
+   * whether a session is on this machine is asked at the root this machine
+   * would use.
+   */
+  private async providerRuntimes(
+    binding: WorkspaceBinding,
+    options: { readonly includeDisabled?: boolean } = {},
+  ): Promise<ProviderRuntime[]> {
     const runtimes: ProviderRuntime[] = [];
     for (const descriptor of PROVIDERS) {
       const configured = binding.providers[descriptor.id];
-      if (!configured?.enabled) continue;
+      if (!configured?.enabled && !options.includeDisabled) continue;
       const root =
-        configured.rootOverride ??
+        configured?.rootOverride ??
         descriptor.defaultRoot(
           { homedir: this.host.homedir, vaultRealPath: this.host.vaultRoot },
           this.host.joinPath,
@@ -1091,6 +1119,32 @@ export class PluginRuntime {
   }
 
   /**
+   * Claude conversations listed here whose history is in the sync folder and
+   * not on this machine yet (ADR-81, H10), or null when there is no asking.
+   *
+   * The transcript is looked for where this plugin's own Claude Code provider
+   * puts it, so with that provider off there is nothing to say: no transcript
+   * is on its way, and "wait for the next sync" would be a promise nobody
+   * keeps. The records are Claudian's, read from the vault whether or not the
+   * records provider is on — they usually travel with the vault.
+   */
+  private async historyNotHere(providers: readonly ProviderRuntime[]): Promise<readonly HistoryNotHere[] | null> {
+    const claudeCode = providers.find((p) => p.adapter.id === CLAUDE_CODE.id);
+    const syncDir = this.binding?.syncDirPath;
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!claudeCode || !syncDir || !workspaceId) return null;
+    const { fs, joinPath, vaultRoot } = this.host;
+    return findHistoryNotHere({
+      fs,
+      joinPath,
+      storeDir: joinPath(vaultRoot, ".claudian", "sessions"),
+      deviceKey: this.host.claudianDeviceKey?.() ?? null,
+      projectDir: claudeCodeProjectDir({ providerRoot: claudeCode.root, vaultRealPath: vaultRoot, joinPath }),
+      replicaDir: joinPath(syncDir, workspaceId, CLAUDE_CODE.id),
+    }).catch(() => null);
+  }
+
+  /**
    * Records this device is keeping off itself, for the bring-back screen.
    *
    * Read-only. Titles are read from the sync folder's copy now, for display,
@@ -1175,6 +1229,39 @@ export class PluginRuntime {
     } catch {
       return { title: null };
     }
+  }
+
+  /**
+   * What the sync folder holds that this vault no longer lists (ADR-81, H8).
+   *
+   * Read-only: nothing here writes to the sync folder, the vault or a CLI's
+   * folder, and it takes no lock — a pass running alongside can only make a
+   * count one file stale. Titles are read for the screen and kept nowhere.
+   */
+  async auditSyncFolder(): Promise<AuditOutcome> {
+    const binding = this.binding;
+    const workspaceId = this.identity?.file?.workspaceId;
+    if (!binding || !workspaceId || binding.syncDirPath.length === 0) return { ok: false, reason: "not-set-up" };
+    const { fs, joinPath } = this.host;
+    // The sync folder, not this workspace's folder inside it: that one does
+    // not exist until something has been pushed, and then it holds nothing.
+    const folder = await fs.lstat(binding.syncDirPath).catch(() => null);
+    if (folder === null || !folder.isDirectory) return { ok: false, reason: "unreachable" };
+    const replicaRoot = joinPath(binding.syncDirPath, workspaceId);
+    const load = await (await this.homeStore()).loadClaudianRecords(workspaceId).catch(() => null);
+    const providers = await this.providerRuntimes(binding, { includeDisabled: true });
+    return {
+      ok: true,
+      audit: await auditSyncFolder({
+        fs,
+        joinPath,
+        replicaRoot,
+        vaultRealPath: this.host.vaultRoot,
+        providers: providers.map((p) => p.adapter),
+        claudianRecords: load?.status === "loaded" ? load.file : null,
+        maxRecordBytes: this.settings.maxFileSizeMB * 1024 * 1024,
+      }),
+    };
   }
 
   /** Is this machine moving its conversation records into the shared layer? */
@@ -1637,6 +1724,10 @@ export interface HeldRecordView {
   readonly title: string | null;
 }
 
+export type AuditOutcome =
+  | { readonly ok: true; readonly audit: SyncFolderAudit }
+  | { readonly ok: false; readonly reason: "not-set-up" | "unreachable" };
+
 export type BringBackOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "sync-in-progress" | "unavailable" | "provider-off" };
@@ -1663,6 +1754,38 @@ function announce(summary: ClaudianRecordsSummary | undefined): string | null {
     );
   }
   return parts.length === 0 ? null : parts.join(" ");
+}
+
+/** Report lines named per conversation; the rest are counted. */
+const NOT_HERE_LISTED = 20;
+
+/**
+ * One report line per conversation whose history is not here yet (ADR-81),
+ * with what this pass did about the transcript — "deferred, still settling"
+ * and "skipped, too large" are different waits, and only the report can say
+ * which. Ids only: the report never carries a title.
+ */
+function describeHistoryNotHere(entries: readonly HistoryNotHere[], report: PassReport): string[] {
+  const lines = entries.slice(0, NOT_HERE_LISTED).map((entry) => {
+    const rel = `${CLAUDE_CODE.id}/${entry.sessionId}.jsonl`;
+    const action = report.actions.find((a) => a.neutralRel === rel);
+    const thisPass = action ? ` This pass: ${action.action} (${action.reason}).` : "";
+    return (
+      `History not here yet: Claude conversation ${entry.conversationId} resumes ${rel}, which the ` +
+      "sync folder has and this device does not. Don't send in it here until it arrives — Claudian " +
+      `deletes or resets a conversation whose history it cannot find.${thisPass}`
+    );
+  });
+  const rest = entries.length - NOT_HERE_LISTED;
+  if (rest > 0) lines.push(`History not here yet: ${rest} more Claude conversation(s) like the above.`);
+  return lines;
+}
+
+function announceHistoryNotHere(count: number): string {
+  return (
+    `History for ${count} Claude conversation(s) has not reached this device yet. Don't send in ` +
+    "them until it has — Claudian deletes or resets a conversation whose history it cannot find."
+  );
 }
 
 function describe(error: unknown): string {

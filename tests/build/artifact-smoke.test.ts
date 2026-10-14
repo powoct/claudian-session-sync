@@ -41,6 +41,7 @@ const EXPECTED_COMMAND_IDS = [
   "show-conflicts",
   "repair-shared-records",
   "bring-back-deleted-records",
+  "audit-sync-folder",
   "conflict-keep-local",
   "conflict-keep-remote",
   "conflict-reveal",
