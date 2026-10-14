@@ -35,7 +35,7 @@ import { QUARANTINE_DIR } from "./conflict-commands";
 import { parseBackupName } from "../infra/backup-store";
 import type { LogicalId } from "../domain/types";
 import type { MintOutcome } from "./sync-engine";
-import type { ProviderAdapter } from "../providers/provider-adapter";
+import { type ProviderAdapter, archivedPathsFor } from "../providers/provider-adapter";
 import { compareRecordwise } from "../domain/equivalence";
 
 /** Only ever compared and displayed as a prefix (§11.1). */
@@ -632,8 +632,9 @@ async function archivedHere(
   provider: RestoreCommandDeps["providers"][number],
   neutralRel: string,
 ): Promise<boolean> {
-  const archived = provider.adapter.archivedPathFor?.(neutralRel) ?? null;
-  if (archived === null) return false;
-  const st = await deps.fs.lstat(archived).catch(() => null);
-  return st !== null && st.isFile;
+  for (const archived of archivedPathsFor(provider.adapter, neutralRel)) {
+    const st = await deps.fs.lstat(archived).catch(() => null);
+    if (st !== null && st.isFile) return true;
+  }
+  return false;
 }

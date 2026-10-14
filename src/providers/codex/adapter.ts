@@ -28,10 +28,17 @@
  * adapter says about it is `archivedPathFor`: where the file would be, so the
  * engine can see that a rollout missing from `sessions/` is archived here, not
  * yet to arrive, and leave the sync folder's copy where it is (ADR-79).
+ *
+ * Compressed rollouts (`<name>.jsonl.zst`, ADR-83) are neither listed nor
+ * written either. `compressedSiblingOf` names where one would be, for the same
+ * reason: a rollout Codex compressed here is on this machine, and the sync
+ * folder's plain copy lands beside it only when it carries history this
+ * machine has not seen.
  */
 import type { LogicalId } from "../../domain/types";
 import type { NeutralClassification, ProviderAdapter, SessionGroup } from "../provider-adapter";
 import {
+  CODEX_COMPRESSED_SUFFIX,
   CODEX_DATE_SEGMENT,
   CODEX_LOGICAL_ID_PATTERN,
   isCodexSessionId,
@@ -211,6 +218,12 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       if (classifyNeutral(neutralRel) === null) return null;
       const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
       return deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR, name);
+    },
+
+    compressedSiblingOf(localPath) {
+      // codex-rs `rollout/src/compression.rs`: `<name>.jsonl` → `<name>.jsonl.zst`,
+      // in the same directory, in `sessions/` and in the archive alike.
+      return localPath.endsWith(".jsonl") ? `${localPath}${CODEX_COMPRESSED_SUFFIX}` : null;
     },
 
     async reconcileLocalIndex() {

@@ -38,7 +38,7 @@
  */
 import type { FsGateway } from "../infra/fs-gateway";
 import type { ClaudianRecordsFile } from "../infra/home-store";
-import type { ProviderAdapter } from "../providers/provider-adapter";
+import { type ProviderAdapter, archivedPathsFor } from "../providers/provider-adapter";
 import { claudeBoundSessionIds, claudeResume, claudianRecordOf } from "../domain/deleted-here";
 import { isSessionUuid } from "../providers/vault-scope";
 
@@ -80,7 +80,7 @@ export interface AuditDeps {
 }
 
 /** Where a session is on this device; "unchecked" for a provider switched off here. */
-export type Whereabouts = "here" | "archived-here" | "not-here" | "unchecked";
+export type Whereabouts = "here" | "compressed-here" | "archived-here" | "not-here" | "unchecked";
 
 export interface AuditSession {
   readonly providerId: string;
@@ -254,8 +254,17 @@ async function finish(deps: AuditDeps, provider: ProviderSessions, draft: Draft)
       here = "here";
       break;
     }
-    const archived = provider.adapter.archivedPathFor?.(rel) ?? null;
-    if (archived !== null && (await isFile(deps, archived))) here = "archived-here";
+    // Compressed in place (ADR-83): Codex reads it as the session, and it
+    // outranks an archived copy for the same reason the plain file does.
+    const compressed = target === null ? null : (provider.adapter.compressedSiblingOf?.(target) ?? null);
+    if (compressed !== null && (await isFile(deps, compressed))) {
+      here = "compressed-here";
+      continue;
+    }
+    if (here === "compressed-here") continue;
+    for (const archived of archivedPathsFor(provider.adapter, rel)) {
+      if (await isFile(deps, archived)) here = "archived-here";
+    }
   }
   return {
     providerId: draft.providerId,

@@ -148,6 +148,11 @@ export function createPassState(input: PassStateInput): PassState {
         lastConvergedSize: size,
       });
     },
+    budgetSkips(rel) {
+      // `recordOutcomes` counts on whichever sides have an entry; a file only
+      // the sync folder has carries its count on the remote one.
+      return Math.max(local.get(rel)?.skippedForBudgetPasses ?? 0, remote.get(rel)?.skippedForBudgetPasses ?? 0);
+    },
   };
 
   const evidence: EvidenceCache = {

@@ -89,6 +89,22 @@ export function rolloutLogicalId(name: string): LogicalId | null {
   return rolloutIds(name)?.rolloutId ?? null;
 }
 
+/**
+ * Codex's compressed form of a rollout, `<name>.jsonl.zst` (codex-rs
+ * `rollout/src/compression.rs`, ADR-83). Not a shape this version syncs —
+ * zstd output has no prefix relation, and two machines compressing the same
+ * history produce different bytes — but a shape it knows, so the census can
+ * say what it is instead of guessing.
+ */
+export const CODEX_COMPRESSED_SUFFIX = ".zst";
+
+/** A rollout Codex compressed, as opposed to a name nobody recognises. */
+export function isCompressedRollout(name: string): boolean {
+  return (
+    name.endsWith(CODEX_COMPRESSED_SUFFIX) && rolloutIds(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length)) !== null
+  );
+}
+
 /** Codex ids are the shared session-uuid shape; the check lives with the store reader. */
 export { isSessionUuid as isCodexSessionId } from "../vault-scope";
 
@@ -126,14 +142,34 @@ export function unrecognisedRolloutNames(names: readonly string[]): string[] {
 /** The plugin's own in-flight writes (`fs-gateway`'s `tempName`). */
 const TEMP_MARKER = ".aiss-tmp-";
 
-/** The sentence an adapter hands `healthCheck` for the names it skipped. */
+/**
+ * The sentences an adapter hands `healthCheck` for the names it skipped.
+ *
+ * Compressed rollouts get their own: "this plugin probably needs to catch up"
+ * is the right guess about a name nobody recognises, and the wrong thing to
+ * say about one we do — the user can act on the second, by resuming.
+ */
 export function describeUnrecognised(names: readonly string[]): string[] {
-  if (names.length === 0) return [];
-  const shown = names.slice(0, 2).join(", ");
-  const rest = names.length > 2 ? ` and ${names.length - 2} more` : "";
-  return [
-    `Codex's sessions folder has ${names.length} file(s) this version does not recognise ` +
-      `and will not sync (${shown}${rest}). If Codex has been updated, this plugin probably ` +
-      "needs to catch up — the conversations in them are not travelling.",
-  ];
+  const compressed = names.filter(isCompressedRollout);
+  const unknown = names.filter((name) => !isCompressedRollout(name));
+  const sentences: string[] = [];
+  if (unknown.length > 0) {
+    const shown = unknown.slice(0, 2).join(", ");
+    const rest = unknown.length > 2 ? ` and ${unknown.length - 2} more` : "";
+    sentences.push(
+      `Codex's sessions folder has ${unknown.length} file(s) this version does not recognise ` +
+        `and will not sync (${shown}${rest}). If Codex has been updated, this plugin probably ` +
+        "needs to catch up — the conversations in them are not travelling.",
+    );
+  }
+  if (compressed.length > 0) {
+    sentences.push(
+      `Codex has compressed ${compressed.length} conversation file(s) in its sessions folder ` +
+        "(.jsonl.zst — it does this to conversations left untouched for a while). This version " +
+        "does not sync compressed files: one your other devices do not have yet stays on this " +
+        "device until you resume it in Codex, which turns it back into a plain file that syncs " +
+        "as usual.",
+    );
+  }
+  return sentences;
 }

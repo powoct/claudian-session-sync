@@ -155,6 +155,20 @@ export interface ProviderAdapter {
    */
   archivedPathFor?(neutralRel: string): string | null;
   /**
+   * Where the CLI keeps a compressed form of the file at `localPath`, or null
+   * (ADR-83). Codex compresses a rollout left untouched for a week into
+   * `<name>.jsonl.zst` beside it and removes the original; it reads the plain
+   * file whenever both exist, and turns the compressed one back into a plain
+   * file when the session is resumed.
+   *
+   * Asked of a target path, and of an archived one, that has nothing at it. A
+   * regular file here means the session is on this machine, compressed — not
+   * yet to arrive. Never written, never read for its bytes, never listed.
+   *
+   * Optional: only Codex compresses its sessions.
+   */
+  compressedSiblingOf?(localPath: string): string | null;
+  /**
    * Sessions on this machine that are missing their commit point (§6.6).
    *
    * Separate from `listSessions` on purpose: that one deliberately drops a
@@ -179,6 +193,21 @@ export interface ProviderAdapter {
 
   /** Tier B only; a no-op elsewhere. */
   reconcileLocalIndex(desired: readonly SessionGroup[]): Promise<void>;
+}
+
+/**
+ * Every path at which the provider's archive holds this session: the archived
+ * file, and its compressed form — Codex compresses archived rollouts as well
+ * (ADR-79, ADR-83). Empty for a provider without an archive.
+ */
+export function archivedPathsFor(
+  adapter: Pick<ProviderAdapter, "archivedPathFor" | "compressedSiblingOf">,
+  neutralRel: string,
+): string[] {
+  const archived = adapter.archivedPathFor?.(neutralRel) ?? null;
+  if (archived === null) return [];
+  const compressed = adapter.compressedSiblingOf?.(archived) ?? null;
+  return compressed === null ? [archived] : [archived, compressed];
 }
 
 export interface RecordNaming {

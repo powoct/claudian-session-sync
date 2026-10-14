@@ -47,6 +47,7 @@ import { judgeIdentity } from "../infra/state-store";
 import { createSyncDirStore, newRootFile } from "../infra/sync-dir-store";
 import { CLAUDE_CODE, PROVIDERS, providerById } from "../providers/registry";
 import { claudeCodeProjectDir } from "../providers/claude-code/adapter";
+import { archivedPathsFor } from "../providers/provider-adapter";
 import {
   type BackupEntry,
   type RestoreOutcome,
@@ -1597,8 +1598,10 @@ export class PluginRuntime {
         const runtime = providers.find((p) => p.adapter.id === providerId);
         return runtime ? runtime.adapter.targetPathFor(neutralRel) : null;
       },
-      archivedPathFor: (providerId: string, neutralRel: string) =>
-        providers.find((p) => p.adapter.id === providerId)?.adapter.archivedPathFor?.(neutralRel) ?? null,
+      archivedPathsFor: (providerId: string, neutralRel: string) => {
+        const provider = providers.find((p) => p.adapter.id === providerId);
+        return provider ? archivedPathsFor(provider.adapter, neutralRel) : [];
+      },
       // The same validator the pass writes through: a resolution is an
       // overwrite of a session file and gets the same containment walk.
       mintWritePath: createWritePathMinter({

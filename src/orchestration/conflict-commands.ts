@@ -120,8 +120,11 @@ export interface ConflictCommandDeps {
   readonly replicaRoot: string;
   /** Where a neutral-relative path lands on this machine, per provider. */
   readonly localPathFor: (providerId: string, neutralRel: string) => Promise<string | null>;
-  /** Where it would be once archived (ADR-79), when the provider archives at all. */
-  readonly archivedPathFor?: (providerId: string, neutralRel: string) => string | null;
+  /**
+   * Where it would be once archived (ADR-79), plain or compressed (ADR-83);
+   * empty when the provider archives nothing.
+   */
+  readonly archivedPathsFor?: (providerId: string, neutralRel: string) => string[];
   /**
    * The same validator the engine writes through.
    *
@@ -379,12 +382,15 @@ async function archivedHere(
   neutralRel: string,
   localPath: string | null,
 ): Promise<boolean> {
-  const archived = deps.archivedPathFor?.(providerId, neutralRel) ?? null;
-  if (archived === null || localPath === null) return false;
+  const archived = deps.archivedPathsFor?.(providerId, neutralRel) ?? [];
+  if (archived.length === 0 || localPath === null) return false;
   try {
     if ((await deps.fs.lstat(localPath)) !== null) return false;
-    const st = await deps.fs.lstat(archived);
-    return st !== null && st.isFile;
+    for (const candidate of archived) {
+      const st = await deps.fs.lstat(candidate);
+      if (st !== null && st.isFile) return true;
+    }
+    return false;
   } catch {
     return false;
   }

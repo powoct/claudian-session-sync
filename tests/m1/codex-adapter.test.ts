@@ -495,16 +495,20 @@ describe("the census that would have caught this one (OQ-32)", () => {
     expect(text, "the consequence, not just the fact").toContain("not travelling");
   });
 
-  it("fires for a compressed sibling, which is the next shape upstream will ship", async () => {
-    // `local_thread_store_compression` is off by default today, but when it is
-    // turned on the rollout becomes `.jsonl.zst` and the plain file is
-    // deleted. That must arrive as a sentence, not as silence.
+  it("fires for a compressed sibling, and says what it is", async () => {
+    // `local_thread_store_compression` is off by default upstream, and on for
+    // real on both machines of round 10 (OQ-31): the rollout becomes
+    // `.jsonl.zst` and the plain file is deleted. That must arrive as a
+    // sentence, not as silence — and since ADR-83 a sentence about
+    // compression, not about an update.
     const { adapter, sessions } = await world({ recorded: [SID] });
     const dir = path.join(sessions, "2026", "08", "06");
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.zst`), "z");
 
-    expect(await warn(adapter)).toContain("does not recognise");
+    const text = await warn(adapter);
+    expect(text).toContain("Codex has compressed 1 conversation file(s)");
+    expect(text).not.toContain("does not recognise");
   });
 
   it("says nothing when every file is one it knows", async () => {

@@ -15,6 +15,7 @@ import type { AuditSession, SyncFolderAudit, Whereabouts } from "../orchestratio
 
 const HERE_TEXT: Record<Whereabouts, string> = {
   here: "also on this device",
+  "compressed-here": "on this device, compressed by Codex",
   "archived-here": "on this device, archived",
   "not-here": "not on this device",
   unchecked: "not checked on this device — its provider is off here",
@@ -144,7 +145,7 @@ function render(el: HTMLElement, audit: SyncFolderAudit): void {
     el.createEl("p", {
       text:
         `${audit.recordsUnread} of this vault's record folders or records could not be read (or were ` +
-        "larger than Max file size), so this list may include sessions they name.",
+        "larger than Maximum file size), so this list may include sessions they name.",
     });
   }
   if (audit.unrecorded.length === 0) el.createEl("p", { text: "None." });
