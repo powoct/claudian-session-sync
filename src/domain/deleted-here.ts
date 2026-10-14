@@ -265,7 +265,7 @@ export async function judgeClaudeHistory(
  * this, which is right for admission and wrong here.
  */
 export function claudeBoundSessionIds(
-  text: string,
+  text: string | Record<string, unknown>,
   conversationId: string,
 ):
   | { readonly status: "unreadable" }
@@ -285,30 +285,45 @@ export function claudeBoundSessionIds(
 }
 
 /**
- * The session a send in this Claude conversation resumes, read the way
- * Claudian reads it — or null when there is none to speak of.
+ * What a send in this Claude conversation resumes, read the way Claudian
+ * reads it — or null for a record that cannot be read or is not Claude's.
  *
- * Upstream's `resolveSessionIdForConversation`: `providerSessionId ??
- * sessionId ?? forkSource.sessionId`, over the conversation `createShell`
- * built (so an absent `sessionId` key means the record's own `id`). This is
- * the id a failed resume is compared against before Claudian deletes or
- * resets the conversation; the older ids in `previousProviderSessionIds` are
- * only consulted after that, and never resumed.
+ * `resumes` is `ClaudeResumeState`'s pick, over the conversation `createShell`
+ * built (an absent `sessionId` key means the record's own `id`): the
+ * conversation's `sessionId` when it is set — the resume seed — else the
+ * persisted `providerSessionId` when it is a string, else a pending fork's
+ * source, and only a source with both its ids, the only one Claudian forks
+ * from. `forked` says the id is that source, another conversation's session.
  *
- * Null for a record that cannot be read, is not Claude's, or names no
- * current session. Returned unvalidated otherwise: the caller decides what an
- * id it cannot use means.
+ * `comparedWith` is what a failed resume is held against before Claudian
+ * deletes or resets the conversation (`resolveSessionIdForConversation`:
+ * `providerSessionId ?? sessionId ?? forkSource.sessionId`). The two orders
+ * disagree only in states Claudian 2.3.20 does not write on its own — it keeps
+ * `sessionId` and `providerSessionId` equal — and where they disagree, a
+ * failed resume is compared against the other id and preserved.
+ *
+ * Takes the record's text, or the record already parsed. Returned
+ * unvalidated: the caller decides what an id it cannot use means.
  */
-export function currentClaudeSessionId(text: string, conversationId: string): unknown {
+export function claudeResume(
+  text: string | Record<string, unknown>,
+  conversationId: string,
+): { readonly resumes: unknown; readonly forked: boolean; readonly comparedWith: unknown } | null {
   const shell = claudeShell(text, conversationId);
   if (shell.status !== "ok") return null;
   const { state, sessionId, forkSource } = shell;
-  return state.providerSessionId ?? sessionId ?? forkSource?.sessionId ?? null;
+  const comparedWith = state.providerSessionId ?? sessionId ?? forkSource?.sessionId ?? null;
+  const established = sessionId ? sessionId : typeof state.providerSessionId === "string" ? state.providerSessionId : null;
+  if (established !== null) return { resumes: established, forked: false, comparedWith };
+  const validFork = typeof forkSource?.sessionId === "string" && typeof forkSource.resumeAt === "string";
+  return validFork
+    ? { resumes: forkSource?.sessionId, forked: true, comparedWith }
+    : { resumes: null, forked: false, comparedWith };
 }
 
 /** A Claude record with `createShell`'s defaults applied. */
 function claudeShell(
-  text: string,
+  text: string | Record<string, unknown>,
   conversationId: string,
 ):
   | { readonly status: "unreadable" }
@@ -319,7 +334,7 @@ function claudeShell(
       readonly sessionId: unknown;
       readonly forkSource: Record<string, unknown> | undefined;
     } {
-  const record = parseObject(text);
+  const record = typeof text === "string" ? parseObject(text) : text;
   if (record === null) return { status: "unreadable" };
   const providerId = record.providerId ?? "claude";
   if (providerId !== "claude") return { status: "not-claude" };

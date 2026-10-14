@@ -198,7 +198,6 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         classifyNeutral(neutralRel) === null
           ? null
           : (rolloutIds(neutralRel.slice(neutralRel.lastIndexOf("/") + 1))?.threadId ?? null),
-      recordedSessionIds: async () => (await readVaultScope(deps, CODEX_PROVIDER_ID, isCodexSessionId)).sessionIds,
     },
 
     async targetPathFor(neutralRel) {

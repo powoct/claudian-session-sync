@@ -19,7 +19,13 @@ import {
   serialiseSettings,
 } from "../domain/settings";
 import type { ConflictResolution } from "../domain/conflict";
-import { type CompatWarnings, compatNotices, compatWarnings, isMarkerless } from "../domain/claudian-compat";
+import {
+  type CompatWarnings,
+  compatNotices,
+  compatWarnings,
+  isMarkerless,
+  readsLegacySessionFolder,
+} from "../domain/claudian-compat";
 import { type HoldKind, claudianRecordOf } from "../domain/deleted-here";
 import type { NotReadyReason, ReadinessObservation, ReadinessState } from "../domain/readiness";
 import type { LogicalId, MachineId, WorkspaceId } from "../domain/types";
@@ -58,7 +64,7 @@ import {
   shareOwnConversations,
 } from "./conversation-sharing";
 import { createClaudianRecordsState } from "./claudian-records";
-import { type HistoryNotHere, findHistoryNotHere } from "./resume-warning";
+import { type HistoryNotHere, type HistoryNotHereResult, findHistoryNotHere } from "./resume-warning";
 import { type SyncFolderAudit, auditSyncFolder } from "./sync-folder-audit";
 import { type OrphanGroup, type RemoveOutcome, listOrphans, removeOrphan } from "./orphan-commands";
 import type { ResolveOutcome } from "./conflict-commands";
@@ -222,13 +228,22 @@ export class PluginRuntime {
    */
   private announcements: string[] = [];
   /**
-   * Conversations the last real pass warned about (ADR-81). The pop-up comes
-   * again only for one not already on this list, so a transcript held back
-   * for hours is a report line every pass and one pop-up, not one per pass.
-   * In memory: a restart is when Claudian reopens tabs, which is exactly when
+   * ADR-81's memory, in three parts, all in memory: a restart is when
+   * Claudian reads its records again and reopens tabs, which is exactly when
    * the warning is worth repeating.
+   *
+   * `notHereKnown` is the last answer a real pass got — null until the first
+   * one this run — and `notHereAsked` whether a real pass has asked at all,
+   * answered or not. `warnedNotHere` is who the user has been shown a pop-up for;
+   * a conversation leaves it when it is no longer at risk, so one that comes
+   * back is news again. `pendingNotHere` is the pop-up the last real pass asks
+   * for — replaced, not queued, so a pop-up a commanded pass asked for and
+   * nobody showed is never shown after the transcript has landed.
    */
+  private notHereKnown: ReadonlyMap<string, HistoryNotHere> | null = null;
+  private notHereAsked = false;
   private warnedNotHere: ReadonlySet<string> = new Set();
+  private pendingNotHere: readonly HistoryNotHere[] = [];
   private readonly listeners = new Set<(status: RuntimeStatus) => void>();
 
   constructor(private readonly host: RuntimeHost) {
@@ -257,10 +272,15 @@ export class PluginRuntime {
    * kept off this device, or brought back without being asked for.
    */
   takeAnnouncement(): string | null {
-    if (this.announcements.length === 0) return null;
-    const message = `Claudian Session Sync: ${this.announcements.join(" ")} Details in the sync report.`;
+    const parts = [...this.announcements];
+    if (this.pendingNotHere.length > 0) {
+      parts.push(announceHistoryNotHere(this.pendingNotHere));
+      this.warnedNotHere = new Set([...this.warnedNotHere, ...this.pendingNotHere.map((entry) => entry.conversationId)]);
+      this.pendingNotHere = [];
+    }
     this.announcements = [];
-    return message;
+    if (parts.length === 0) return null;
+    return `Claudian Session Sync: ${parts.join(" ")} Details in the sync report.`;
   }
 
   onChange(listener: (status: RuntimeStatus) => void): () => void {
@@ -348,20 +368,21 @@ export class PluginRuntime {
         ...(this.identityWithheld ? [this.identityWithheld] : []),
       ];
       // After the pass, so a transcript it just brought is not warned about.
-      // A dry run brought nothing, and its report is the plan, not the state.
-      const notHere = options.dryRun ? null : await this.historyNotHere(prepared.deps.providers);
-      const trailing = notHere === null ? [] : describeHistoryNotHere(notHere, outcome.report);
+      // Not after a pass that never got the lock: another is moving files
+      // right now, and what this would see is the middle of it.
+      const trailing = lockAborted(outcome.report)
+        ? []
+        : this.foldHistoryNotHere(
+            await this.historyNotHere(prepared.deps.providers),
+            outcome.report,
+            options.dryRun ?? false,
+          );
       this.lastReport =
         leading.length > 0 || trailing.length > 0
           ? { ...outcome.report, notices: [...leading, ...outcome.report.notices, ...trailing] }
           : outcome.report;
       const announcement = options.dryRun ? null : announce(outcome.report.claudianRecords);
       if (announcement !== null) this.announcements.push(announcement);
-      if (notHere !== null) {
-        const fresh = notHere.filter((entry) => !this.warnedNotHere.has(entry.conversationId));
-        if (fresh.length > 0) this.announcements.push(announceHistoryNotHere(notHere.length));
-        this.warnedNotHere = new Set(notHere.map((entry) => entry.conversationId));
-      }
       for (const action of outcome.report.actions) {
         if (action.action === "CONFLICT") this.conflicted.add(action.neutralRel);
         else if (
@@ -937,9 +958,9 @@ export class PluginRuntime {
 
   /**
    * An adapter per provider switched on here — or, for the read-only audit,
-   * per provider at all: the sync folder holds whatever any device pushed, and
-   * whether a session is on this machine is asked at the root this machine
-   * would use.
+   * per provider at all: the sync folder holds whatever any device pushed.
+   * The audit asks a switched-off provider's adapter about the sync folder
+   * only, never about this machine's folder for it.
    */
   private async providerRuntimes(
     binding: WorkspaceBinding,
@@ -1120,7 +1141,8 @@ export class PluginRuntime {
 
   /**
    * Claude conversations listed here whose history is in the sync folder and
-   * not on this machine yet (ADR-81, H10), or null when there is no asking.
+   * not on this machine yet (ADR-81, H10): "off" when there is no asking,
+   * null when the answer is unknown.
    *
    * The transcript is looked for where this plugin's own Claude Code provider
    * puts it, so with that provider off there is nothing to say: no transcript
@@ -1128,11 +1150,11 @@ export class PluginRuntime {
    * keeps. The records are Claudian's, read from the vault whether or not the
    * records provider is on — they usually travel with the vault.
    */
-  private async historyNotHere(providers: readonly ProviderRuntime[]): Promise<readonly HistoryNotHere[] | null> {
+  private async historyNotHere(providers: readonly ProviderRuntime[]): Promise<HistoryNotHereResult | null | "off"> {
     const claudeCode = providers.find((p) => p.adapter.id === CLAUDE_CODE.id);
     const syncDir = this.binding?.syncDirPath;
     const workspaceId = this.identity?.file?.workspaceId;
-    if (!claudeCode || !syncDir || !workspaceId) return null;
+    if (!claudeCode || !syncDir || !workspaceId) return "off";
     const { fs, joinPath, vaultRoot } = this.host;
     return findHistoryNotHere({
       fs,
@@ -1141,7 +1163,62 @@ export class PluginRuntime {
       deviceKey: this.host.claudianDeviceKey?.() ?? null,
       projectDir: claudeCodeProjectDir({ providerRoot: claudeCode.root, vaultRealPath: vaultRoot, joinPath }),
       replicaDir: joinPath(syncDir, workspaceId, CLAUDE_CODE.id),
+      maxRecordBytes: this.settings.maxFileSizeMB * 1024 * 1024,
     }).catch(() => null);
+  }
+
+  /**
+   * One pass's H10 answer folded into what this runtime knows; returns the
+   * report lines for it. A dry run gets the lines and changes nothing.
+   *
+   * The pop-up is for the conversations Claudian is listing, and Claudian
+   * 2.3.20 reads its records from disk when it starts and not again: a record
+   * that arrives with the vault later is not in its list until the next
+   * launch, so it cannot be sent in. Every new shared conversation arrives
+   * that way — record first, transcript a pass or two later — and a pop-up for
+   * each would be one the user learns to dismiss. So a conversation is
+   * announced by the first real pass this run (Claudian has just read every
+   * record on disk), or once it has been at risk for two answers running;
+   * the report names every one, every pass. A pass whose answer is unknown
+   * changes nothing it remembers, and says so.
+   */
+  private foldHistoryNotHere(result: HistoryNotHereResult | null | "off", report: PassReport, dryRun: boolean): string[] {
+    if (result === "off") {
+      if (!dryRun) {
+        this.notHereKnown = null;
+        this.notHereAsked = false;
+        this.warnedNotHere = new Set();
+        this.pendingNotHere = [];
+      }
+      return [];
+    }
+    const known = this.notHereKnown;
+    const firstAsked = !this.notHereAsked;
+    if (!dryRun) this.notHereAsked = true;
+    if (result === null) {
+      return known !== null && known.size > 0
+        ? [
+            "History not here yet: this pass could not check (a folder did not answer); the last check named " +
+              `${known.size} Claude conversation(s).`,
+          ]
+        : [];
+    }
+    const current = new Map(result.entries.map((entry) => [entry.conversationId, entry]));
+    // A record caught mid-write is not a conversation that stopped being at risk.
+    for (const conversationId of result.unsure) {
+      const before = known?.get(conversationId);
+      if (before) current.set(conversationId, before);
+    }
+    const entries = [...current.values()].sort(newestFirst);
+    if (!dryRun) {
+      const warned = new Set([...this.warnedNotHere].filter((id) => current.has(id)));
+      this.pendingNotHere = entries.filter(
+        (entry) => !warned.has(entry.conversationId) && (firstAsked || known?.has(entry.conversationId) === true),
+      );
+      this.warnedNotHere = warned;
+      this.notHereKnown = current;
+    }
+    return describeHistoryNotHere(entries, report);
   }
 
   /**
@@ -1249,7 +1326,9 @@ export class PluginRuntime {
     if (folder === null || !folder.isDirectory) return { ok: false, reason: "unreachable" };
     const replicaRoot = joinPath(binding.syncDirPath, workspaceId);
     const load = await (await this.homeStore()).loadClaudianRecords(workspaceId).catch(() => null);
+    const file = load?.status === "loaded" ? load.file : null;
     const providers = await this.providerRuntimes(binding, { includeDisabled: true });
+    await this.detectClaudian();
     return {
       ok: true,
       audit: await auditSyncFolder({
@@ -1257,8 +1336,17 @@ export class PluginRuntime {
         joinPath,
         replicaRoot,
         vaultRealPath: this.host.vaultRoot,
-        providers: providers.map((p) => p.adapter),
-        claudianRecords: load?.status === "loaded" ? load.file : null,
+        providers: providers.map((p) => ({ adapter: p.adapter, enabled: this.providerEnabled(p.adapter.id) })),
+        deletedHere: {
+          status:
+            load === null || (load.status !== "loaded" && load.status !== "absent")
+              ? "unreadable"
+              : this.providerEnabled("claudian")
+                ? "tracked"
+                : "records-provider-off",
+          file,
+        },
+        legacyStillListed: readsLegacySessionFolder(this.claudianVersion),
         maxRecordBytes: this.settings.maxFileSizeMB * 1024 * 1024,
       }),
     };
@@ -1758,12 +1846,27 @@ function announce(summary: ClaudianRecordsSummary | undefined): string | null {
 
 /** Report lines named per conversation; the rest are counted. */
 const NOT_HERE_LISTED = 20;
+/** Titles a pop-up names; the rest are counted. */
+const NOT_HERE_TITLED = 3;
+const TITLE_CHARS = 60;
+
+/** The aborts that mean another pass holds the lock right now. */
+function lockAborted(report: PassReport): boolean {
+  return report.outcome === "aborted" && ["ALREADY_RUNNING", "LOCK_HELD", "lock-unavailable"].includes(report.abortReason ?? "");
+}
+
+function newestFirst(a: HistoryNotHere, b: HistoryNotHere): number {
+  return (
+    b.lastActivityMs - a.lastActivityMs ||
+    (a.conversationId < b.conversationId ? 1 : a.conversationId > b.conversationId ? -1 : 0)
+  );
+}
 
 /**
  * One report line per conversation whose history is not here yet (ADR-81),
- * with what this pass did about the transcript — "deferred, still settling"
- * and "skipped, too large" are different waits, and only the report can say
- * which. Ids only: the report never carries a title.
+ * newest first, with what this pass did about the transcript — "deferred,
+ * still settling" and "skipped, too large" are different waits, and only the
+ * report can say which. Ids only: the report never carries a title.
  */
 function describeHistoryNotHere(entries: readonly HistoryNotHere[], report: PassReport): string[] {
   const lines = entries.slice(0, NOT_HERE_LISTED).map((entry) => {
@@ -1771,20 +1874,36 @@ function describeHistoryNotHere(entries: readonly HistoryNotHere[], report: Pass
     const action = report.actions.find((a) => a.neutralRel === rel);
     const thisPass = action ? ` This pass: ${action.action} (${action.reason}).` : "";
     return (
-      `History not here yet: Claude conversation ${entry.conversationId} resumes ${rel}, which the ` +
-      "sync folder has and this device does not. Don't send in it here until it arrives — Claudian " +
-      `deletes or resets a conversation whose history it cannot find.${thisPass}`
+      `History not here yet: Claude conversation ${entry.conversationId}${entry.shared ? " (shared)" : ""} ` +
+      `resumes ${rel}, which the sync folder has and this device's Claude folder does not. Don't send ` +
+      "in it here until it arrives — Claudian deletes or resets a conversation whose history it cannot " +
+      `find${entry.shared ? ", and this one is shared: the change would reach your other devices with the vault" : ""}.` +
+      thisPass
     );
   });
   const rest = entries.length - NOT_HERE_LISTED;
-  if (rest > 0) lines.push(`History not here yet: ${rest} more Claude conversation(s) like the above.`);
+  if (rest > 0) lines.push(`History not here yet: ${rest} more Claude conversation(s) like the above, less recent.`);
   return lines;
 }
 
-function announceHistoryNotHere(count: number): string {
+/**
+ * The pop-up, naming conversations the way Claudian lists them — by title.
+ * Read for this text alone and kept nowhere else: the report has ids.
+ */
+function announceHistoryNotHere(entries: readonly HistoryNotHere[]): string {
+  const named = entries.slice(0, NOT_HERE_TITLED).map((entry) => {
+    if (entry.title === null) return "(untitled)";
+    const title = entry.title.replace(/\s+/g, " ").trim();
+    return `"${title.length > TITLE_CHARS ? `${title.slice(0, TITLE_CHARS - 1)}…` : title}"`;
+  });
+  const rest = entries.length - named.length;
   return (
-    `History for ${count} Claude conversation(s) has not reached this device yet. Don't send in ` +
-    "them until it has — Claudian deletes or resets a conversation whose history it cannot find."
+    `History has not reached this device yet for ${entries.length} Claude conversation(s): ` +
+    `${named.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}. Don't send in them until it has — Claudian ` +
+    "deletes or resets a conversation whose history it cannot find" +
+    (entries.some((entry) => entry.shared)
+      ? ", and for a shared one that change reaches your other devices with the vault."
+      : ".")
   );
 }
 

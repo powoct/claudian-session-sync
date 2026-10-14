@@ -172,6 +172,26 @@ describe("every listed session classifies as itself", () => {
   );
 
   it.each(FIXTURES.map((fixture) => [fixture.id, fixture] as const))(
+    "%s: the audit's record naming gives every listed file the id its record names (ADR-81)",
+    async (_id, fixture) => {
+      // The audit's list ② is "sessions no record names": a file whose id
+      // drifts from what the fixture's record names would land there while
+      // its conversation is listed.
+      const adapter = await fixture.build();
+      if (adapter.id === "claudian") {
+        expect(adapter.records, "the records provider names nothing but itself").toBeUndefined();
+        return;
+      }
+      expect(adapter.records, `${adapter.id} has no record naming`).toBeDefined();
+      for (const group of await adapter.listSessions()) {
+        for (const file of group.files) {
+          expect(adapter.records?.sessionIdOf(file.neutralRel), file.neutralRel).toBe(SID);
+        }
+      }
+    },
+  );
+
+  it.each(FIXTURES.map((fixture) => [fixture.id, fixture] as const))(
     "%s: classifyNeutral still refuses shapes the listing never makes",
     async (_id, fixture) => {
       // The reverse direction, so the consistency test cannot be satisfied by

@@ -150,7 +150,6 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
       // The file name is the session id, for the transcript and for this
       // plugin's own `.origin.json` beside it alike.
       sessionIdOf: (neutralRel) => classifyNeutral(neutralRel)?.logicalId ?? null,
-      recordedSessionIds: async () => (await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid)).sessionIds,
     },
 
     async targetPathFor(neutralRel) {

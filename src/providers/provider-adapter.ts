@@ -190,8 +190,6 @@ export interface RecordNaming {
    * a rollout's file name carries the thread in its tail.
    */
   sessionIdOf(neutralRel: string): string | null;
-  /** Every id this vault's records name for this provider, in every layer Claudian has used. */
-  recordedSessionIds(): Promise<ReadonlySet<string>>;
 }
 
 /**

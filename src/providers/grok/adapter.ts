@@ -295,7 +295,6 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
       claudianProviderId: CLAUDIAN_PROVIDER_ID,
       // The session is the directory, and its name is the id a record names.
       sessionIdOf: (neutralRel) => classifyNeutral(neutralRel)?.logicalId ?? null,
-      recordedSessionIds: async () => (await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid)).sessionIds,
     },
 
     async targetPathFor(neutralRel) {

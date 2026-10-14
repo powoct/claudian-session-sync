@@ -106,6 +106,15 @@ export function launchNotice(warnings: CompatWarnings): string | null {
   );
 }
 
+/**
+ * Whether this Claudian still lists conversations from `.claude/sessions` —
+ * 2.3.5 and older do, 2.3.6 stopped. Null when the version is not known.
+ */
+export function readsLegacySessionFolder(version: string | null): boolean | null {
+  if (version === null || !/^(\d+)\.(\d+)\.(\d+)/.test(version.trim())) return null;
+  return !atLeast(version, [2, 3, 6]);
+}
+
 /** Leading `major.minor.patch` at or above `floor`; false for anything unreadable. */
 function atLeast(version: string, floor: readonly [number, number, number]): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
