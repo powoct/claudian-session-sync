@@ -21,10 +21,10 @@
  *
  * The default path — admission reading records, the CLI session files
  * themselves — never depended on the markers. Two later Claudian changes do
- * reach it, and are documented rather than warned about here: from 2.3.6 the
- * old `.claude/sessions` folder is no longer read, and from 2.3.11 archiving a
- * Codex conversation moves its session file out of the folder this plugin
- * syncs (OQ-35).
+ * reach it, and neither is warned about here: from 2.3.6 the old
+ * `.claude/sessions` folder is no longer read (documented), and from 2.3.11
+ * archiving a Codex conversation moves its session file out of the folder
+ * this plugin syncs — handled, not warned about, by ADR-79.
  *
  * Pure: the version arrives as a string (or null when it could not be read),
  * and null is silence. A warning that fires on a guess about which Claudian is

@@ -60,6 +60,7 @@ async function world(options: { readonly recorded?: readonly string[]; readonly 
     providerRoot: sessions,
     vaultRealPath: vault,
     joinPath: (...parts) => path.join(...parts),
+    dirnameOf: (target: string) => path.dirname(target),
     listDir: async (dir) =>
       (await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])).map((entry) => ({
         name: entry.name,
@@ -276,6 +277,31 @@ describe("the shape of a Codex session", () => {
   });
 });
 
+describe("where an archived rollout is (ADR-79)", () => {
+  it("is the flat archive beside the sessions root, under the same file name", async () => {
+    const { adapter, sessions } = await world();
+    expect(adapter.archivedPathFor?.(`codex/2026/08/06/${rollout(SID)}`)).toBe(
+      path.join(path.dirname(sessions), "archived_sessions", rollout(SID)),
+    );
+  });
+
+  it("answers only for a path the adapter would admit", async () => {
+    // Nothing else in a neutral path may reach a filesystem call.
+    const { adapter } = await world();
+    for (const rel of [
+      `codex/2026/08/${rollout(SID)}`,
+      `codex/2026/08/06/extra/${rollout(SID)}`,
+      `claude-code/2026/08/06/${rollout(SID)}`,
+      `codex/2026/08/xx/${rollout(SID)}`,
+      "codex/2026/08/06/session_index.jsonl",
+      `codex/2026/08/06/${rollout(SID)}.zst`,
+      "codex/2026/08/06/..",
+    ]) {
+      expect(adapter.archivedPathFor?.(rel), rel).toBeNull();
+    }
+  });
+});
+
 describe("session id validation", () => {
   it.each([SID, OTHER])("accepts a uuid: %s", (id) => {
     expect(isCodexSessionId(id)).toBe(true);
@@ -315,6 +341,7 @@ describe("a real pass with the Codex adapter registered", () => {
         providerRoot: sessions,
         vaultRealPath: machine.vaultPath,
         joinPath: (...parts) => path.join(...parts),
+        dirnameOf: (target: string) => path.dirname(target),
         listDir: async (target) =>
           (await fsp.readdir(target, { withFileTypes: true }).catch(() => [])).map((entry) => ({
             name: entry.name,

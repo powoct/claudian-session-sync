@@ -15,6 +15,12 @@
  * propagated, so a workspace subtree's file count only ever grows. That makes
  * any decrease suspicious enough to act on, and lets the thresholds be
  * sensitive rather than cautious.
+ *
+ * Bytes grow too, but only where files are appended to. Claudian's records are
+ * rewritten whole, and since Claudian 2.3.8 a rewrite strips the images out of
+ * them — a vault's records can drop from tens of megabytes to a few kilobytes
+ * in one save, with nothing wrong anywhere (OQ-36). So the byte count leaves
+ * that subtree out (ADR-80); its files still count.
  */
 
 export type ReadinessState = "UNCONFIGURED" | "PROBING" | "AWAIT_INIT" | "READY" | "NOT_READY";
@@ -83,10 +89,34 @@ export interface Counts {
   readonly bytes: number;
 }
 
+/**
+ * Top-level directories of a workspace subtree whose bytes are not counted
+ * (ADR-80). Their files are.
+ *
+ * The provider id, spelled out rather than imported: the domain does not
+ * depend on providers, and the neutral layout fixes the name anyway (§5.1).
+ */
+export const BYTES_NOT_COUNTED_UNDER: ReadonlySet<string> = new Set(["claudian"]);
+
+/**
+ * What `Counts.bytes` measures. 1: every file in the subtree (until ADR-80);
+ * 2: every file outside `BYTES_NOT_COUNTED_UNDER`.
+ *
+ * Recorded beside the high-water mark because the two are only comparable on
+ * the same basis — a mark taken on 1 is larger by however much the records
+ * weighed, and compared against a reading taken on 2 it is the very drop
+ * ADR-80 exists to stop reporting.
+ */
+export const BYTE_COUNT_BASIS = 2;
+/** What a `remote.json` that does not say has. */
+export const LEGACY_BYTE_COUNT_BASIS = 1;
+
 export interface RemoteRecord {
   readonly state: ReadinessState;
   readonly rootId: string | null;
   readonly lastKnownCounts: Counts;
+  /** The basis `lastKnownCounts.bytes` was measured on (ADR-80). */
+  readonly byteCountBasis: number;
   readonly consecutiveStableProbes: number;
   readonly firstProbeMs: number | null;
   readonly notReadyReason: NotReadyReason | null;
@@ -121,6 +151,7 @@ export const INITIAL_REMOTE_RECORD: RemoteRecord = {
   state: "UNCONFIGURED",
   rootId: null,
   lastKnownCounts: { files: 0, bytes: 0 },
+  byteCountBasis: BYTE_COUNT_BASIS,
   consecutiveStableProbes: 0,
   firstProbeMs: null,
   notReadyReason: null,
@@ -179,22 +210,40 @@ export function evaluateReadiness(
     return notReady(previous, "NR-8-remote-regression", observed);
   }
 
-  const shrink = detectShrink(previous.lastKnownCounts, observed.counts, thresholds);
-  if (shrink) return notReady(previous, shrink, observed);
+  // A byte mark taken on another basis is not a mark on this one, and there is
+  // no converting it: how much of it the records were is not recorded anywhere.
+  // So the first reading that got this far becomes the mark (ADR-80). Not
+  // earlier — an unreachable directory reads as zero, and a refusal above has
+  // not established that this reading describes the directory at all.
+  //
+  // The cost is one pass in which a byte drop already under way is not caught.
+  // The file mark is kept, so NR-6 is not blind, and NR-8 does not use marks.
+  const rebased: RemoteRecord =
+    previous.byteCountBasis === BYTE_COUNT_BASIS
+      ? previous
+      : {
+          ...previous,
+          lastKnownCounts: { files: previous.lastKnownCounts.files, bytes: observed.counts.bytes },
+          byteCountBasis: BYTE_COUNT_BASIS,
+        };
+
+  const shrink = detectShrink(rebased.lastKnownCounts, observed.counts, thresholds);
+  if (shrink) return notReady(rebased, shrink, observed);
 
   // Counts are holding or growing. Two consecutive probes spanning minAgeMs is
   // the observable proxy for "hydration finished" — there is no API that says
   // so, and a single reading cannot distinguish a settled folder from one that
   // is halfway through downloading.
-  const firstProbeMs = previous.firstProbeMs ?? observed.nowMs;
-  const probes = previous.consecutiveStableProbes + 1;
+  const firstProbeMs = rebased.firstProbeMs ?? observed.nowMs;
+  const probes = rebased.consecutiveStableProbes + 1;
   const spanned = observed.nowMs - firstProbeMs;
   const settled = probes >= thresholds.probes && spanned >= thresholds.minAgeMs;
 
   const record: RemoteRecord = {
     state: settled ? "READY" : "PROBING",
     rootId: observed.root.rootId,
-    lastKnownCounts: maxCounts(previous.lastKnownCounts, observed.counts),
+    lastKnownCounts: maxCounts(rebased.lastKnownCounts, observed.counts),
+    byteCountBasis: BYTE_COUNT_BASIS,
     consecutiveStableProbes: probes,
     firstProbeMs,
     notReadyReason: null,
@@ -248,7 +297,10 @@ function notReady(
   };
 }
 
-/** Counts only ever rise, because M1 does not propagate deletion. */
+/**
+ * Counts only ever rise, because M1 does not propagate deletion — and bytes
+ * are counted only where files are appended to (ADR-80).
+ */
 function maxCounts(a: Counts, b: Counts): Counts {
   return { files: Math.max(a.files, b.files), bytes: Math.max(a.bytes, b.bytes) };
 }

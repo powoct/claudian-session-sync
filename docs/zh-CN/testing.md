@@ -1125,6 +1125,32 @@ records provider 两机都开(E2c),或 E2b 加至少一条 flat 层记录。在�
 **D1 是核心。** 它失败就说明这次修复在真的 Claudian 上不成立,其余各步都没有意义。
 ⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.11 一起跑;跑完把 ADR-78 的 ⚠️ 改成 ✅。
 
+### 9.13 归档留在本机、records 瘦身不停同步(ADR-79、ADR-80,**下一版的闸门**,两机)
+
+两条都来自对 Claudian 2.3.20 的读代码复核(OQ-35、OQ-36),自动化证据是 `tests/m1/codex-archived-here.test.ts`
+(真 runtime、真 Codex adapter、真文件系统,归档按 codex-rs `archive_thread.rs` 的 rename 复刻)和
+`tests/m1/wired-pass.test.ts` 里 OQ-36 那一组。**没有一条跑在真的 Claudian 或 Codex app-server 上。**
+
+**环境**:同 §9.12,Claudian **2.3.20 发布版**,Codex provider 两机都开;R1–R3 另开 records provider。
+每一步都记:报告里的行、`~/.codex/sessions/…` 与 `~/.codex/archived_sessions/` 的列表(只记文件名)、
+`~/.claudian-session-sync/state/<ws>/remote.json` 的 `state`、`lastKnownCounts`、`byteCountBasis`。
+
+| 步 | 断言 |
+|---|---|
+| **A1 ⭐⭐** | A 上一条已同步过的 Codex 对话,在 Claudian 里 Archive → Sync now:报告 `SKIP_ARCHIVED_HERE` / `archived-here`;`sessions/` 下**没有**被拉回的副本;`archived_sessions/` 里只有 Codex 移过去的那一份,字节未变;B 上照常列出、可 resume |
+| **A2 ⭐** | B 继续在那条对话里聊,推上去 → A 仍是 `archived-here`,不拉;A 上 Unarchive → 下一轮把 B 新增的部分拉下(`PULL_OVERWRITE`),A 上能 resume 到最新一轮,**没有** `local-shrank-below-converged` 冲突 |
+| **A3** | Archive 视图里批量归档 5 条以上,把 Max files per pass 调到 3 → 归档的那几条每轮都是 `archived-here`,B 新建的一条在一轮内落到 A |
+| **A4** | `sessionAutoArchiveAfter` 设 7 天档,用一条超过 7 天未活动的对话触发自动归档 → 同 A1 |
+| **A5** | 在 A 上用 Codex CLI 自己的归档(若当前版本提供)→ 同 A1,与 Claudian 无关 |
+| **R1 ⭐⭐** | records provider 开着,A 上打开一条带图片、记录在 1 MB 以上的旧对话(2.3.8 之前保存的),让 Claudian 重新保存(发一句话即可)→ 记录缩小、推上去;**两机**下一轮都不进 `NOT_READY`,`remote.json` 的 `byteCountBasis` 为 2 |
+| **R2** | (可选)升级前先在一台机器上用 0.3.5 复现 OQ-36 的冻结(`NR-7-byte-count-dropped`),再升级本插件 → 第一轮回到 `PROBING`,随后 `READY`,无需删除 `remote.json` |
+
+追加写文件的字节照计、照样触发 NR-7,由 `tests/m1/readiness.test.ts` 与 `stores.test.ts` 的扫描用例钉住,
+不在真机上做——要在同步夹里造一次真实的字节下降,就得截断一份真的 transcript。
+
+**A1 和 R1 是核心。** 两条都只扣住写入,失败的最坏结果是修复前的行为(重复副本、冻结)。
+⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.12 一起跑;跑完把 ADR-79、ADR-80 的 ⚠️ 改成 ✅。
+
 ### 9.5 各里程碑 Exit Criteria
 
 | 里程碑 | 通过标准 |

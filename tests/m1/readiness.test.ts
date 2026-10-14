@@ -264,3 +264,71 @@ describe("only READY permits writing", () => {
     expect(evaluateReadiness(record, observation, SUPPORTED_FORMAT).mayWrite).toBe(false);
   });
 });
+
+describe("a byte mark from before ADR-80", () => {
+  // Every remote.json written so far measured bytes with Claudian's records
+  // in. A vault whose records carried images can have a mark tens of
+  // megabytes above any reading that leaves them out.
+  const MB = 1024 * 1024;
+  const legacy = (overrides: Partial<RemoteRecord> = {}) =>
+    known({ lastKnownCounts: { files: 40, bytes: 40 * MB }, byteCountBasis: 1, ...overrides });
+
+  it("is replaced by the first reading, not compared with it", () => {
+    const verdict = evaluateReadiness(legacy(), observed({ counts: { files: 40, bytes: 2 * MB } }), SUPPORTED_FORMAT);
+    expect(verdict.state).toBe("READY");
+    expect(verdict.record.lastKnownCounts).toEqual({ files: 40, bytes: 2 * MB });
+    expect(verdict.record.byteCountBasis).toBe(2);
+  });
+
+  it("lets a device frozen by OQ-36 resume on its own, after the usual probing", () => {
+    // NR-7 from a records shrink is what 0.3.5 users can be stuck in today.
+    const stuck = legacy({
+      state: "NOT_READY",
+      notReadyReason: "NR-7-byte-count-dropped",
+      consecutiveStableProbes: 0,
+      firstProbeMs: T0,
+    });
+    const first = evaluateReadiness(stuck, observed({ counts: { files: 40, bytes: 2 * MB } }), SUPPORTED_FORMAT);
+    expect(first.state).toBe("PROBING");
+    expect(first.reason).toBeNull();
+    const second = evaluateReadiness(
+      first.record,
+      observed({ counts: { files: 40, bytes: 2 * MB }, nowMs: T0 + DEFAULT_READINESS.minAgeMs }),
+      SUPPORTED_FORMAT,
+    );
+    expect(second.state).toBe("READY");
+  });
+
+  it("keeps the file mark, so a file drop on the same pass still stops it", () => {
+    const verdict = evaluateReadiness(legacy(), observed({ counts: { files: 20, bytes: 2 * MB } }), SUPPORTED_FORMAT);
+    expect(verdict.reason).toBe("NR-6-file-count-dropped");
+    // Rebased all the same: the reading got far enough to be about this folder.
+    expect(verdict.record.lastKnownCounts).toEqual({ files: 40, bytes: 2 * MB });
+    expect(verdict.record.byteCountBasis).toBe(2);
+  });
+
+  it("is kept as it is by a pass that never got as far as reading the folder", () => {
+    // An unreachable folder reads as zero bytes; adopting that as the mark
+    // would make the next real reading look like growth from nothing.
+    for (const observation of [
+      observed({ reachable: false, counts: { files: 0, bytes: 0 } }),
+      observed({ root: { status: "corrupt" }, counts: { files: 0, bytes: 0 } }),
+      observed({ remoteRegression: true }),
+    ]) {
+      const verdict = evaluateReadiness(legacy(), observation, SUPPORTED_FORMAT);
+      expect(verdict.state).toBe("NOT_READY");
+      expect(verdict.record.lastKnownCounts.bytes).toBe(40 * MB);
+      expect(verdict.record.byteCountBasis).toBe(1);
+    }
+  });
+
+  it("on the current basis, a byte drop still stops the pass", () => {
+    const verdict = evaluateReadiness(
+      known({ lastKnownCounts: { files: 40, bytes: 40 * MB } }),
+      observed({ counts: { files: 40, bytes: 2 * MB } }),
+      SUPPORTED_FORMAT,
+    );
+    expect(verdict.reason).toBe("NR-7-byte-count-dropped");
+    expect(verdict.record.byteCountBasis).toBe(2);
+  });
+});

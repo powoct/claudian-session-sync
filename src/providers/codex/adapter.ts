@@ -19,14 +19,18 @@
  *
  * Discovery is a directory scan with no index to maintain (OQ-2 measured the
  * CLI finding a copied-in rollout immediately), which is what lets this be a
- * Tier A shape at all. `archived_sessions/` is deliberately **not** scanned:
- * Codex moves rollouts there, and until that lifecycle is measured on a real
- * machine, a file leaving `sessions/` is a fact this plugin only has to *not*
- * misread as a deletion — which it does not, because deletion propagation
- * does not exist.
+ * Tier A shape at all.
+ *
+ * `archived_sessions/` is deliberately **not** scanned, and never written.
+ * Archiving a thread renames its rollout from `sessions/Y/M/D/` into that flat
+ * folder beside `sessions/` (codex-rs `archive_thread.rs`), and Claudian 2.3.11
+ * archives through it — by hand, in bulk, or on a timer. The one thing this
+ * adapter says about it is `archivedPathFor`: where the file would be, so the
+ * engine can see that a rollout missing from `sessions/` is archived here, not
+ * yet to arrive, and leave the sync folder's copy where it is (ADR-79).
  */
 import type { LogicalId } from "../../domain/types";
-import type { ProviderAdapter, SessionGroup } from "../provider-adapter";
+import type { NeutralClassification, ProviderAdapter, SessionGroup } from "../provider-adapter";
 import {
   CODEX_DATE_SEGMENT,
   CODEX_LOGICAL_ID_PATTERN,
@@ -44,12 +48,19 @@ export const CODEX_PROVIDER_ID = "codex";
 const NEUTRAL_SEGMENTS = 5;
 /** Depth of the date tree below the sessions root. */
 const DATE_DEPTH = 3;
+/**
+ * Beside the sessions root, flat (codex-rs `ARCHIVED_SESSIONS_SUBDIR`).
+ * Claudian finds it the same way — the parent of whatever the sessions root
+ * is — so an overridden root is followed rather than guessed at.
+ */
+const ARCHIVED_DIR = "archived_sessions";
 
 export interface CodexAdapterDeps {
   /** `<CODEX_HOME>/sessions`, already realpath'd. */
   readonly providerRoot: string;
   readonly vaultRealPath: string;
   readonly joinPath: (...parts: string[]) => string;
+  readonly dirnameOf: (path: string) => string;
   readonly listDir: (path: string) => Promise<Array<{ name: string; isFile: boolean }>>;
   readonly statFile: (path: string) => Promise<{ mtimeMs: number } | null>;
   readonly readTextFile: (path: string) => Promise<string | null>;
@@ -87,6 +98,19 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
     }
   }
 
+  function classifyNeutral(neutralRel: string): NeutralClassification | null {
+    const parts = neutralRel.split("/");
+    if (parts.length !== NEUTRAL_SEGMENTS || parts[0] !== CODEX_PROVIDER_ID) return null;
+    if (!parts.slice(1, 4).every((segment) => CODEX_DATE_SEGMENT.test(segment))) return null;
+    const logicalId = rolloutLogicalId(parts[4] as string);
+    if (logicalId === null) return null;
+    // Deliberately *not* filtered by the vault scope. Scope decides what
+    // leaves this machine; the replica's `codex/` subtree is written only by
+    // this plugin, from the other machine's already-scoped push. Filtering
+    // here as well would make a pulled session look like a foreign file for
+    // however long the vault takes to carry its conversation record over.
+    return { logicalId, role: "primary", mode: "append-jsonl" };
+  }
 
   return {
     id: CODEX_PROVIDER_ID,
@@ -160,22 +184,19 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       }
     },
 
-    classifyNeutral(neutralRel) {
-      const parts = neutralRel.split("/");
-      if (parts.length !== NEUTRAL_SEGMENTS || parts[0] !== CODEX_PROVIDER_ID) return null;
-      if (!parts.slice(1, 4).every((segment) => CODEX_DATE_SEGMENT.test(segment))) return null;
-      const logicalId = rolloutLogicalId(parts[4] as string);
-      if (logicalId === null) return null;
-      // Deliberately *not* filtered by the vault scope. Scope decides what
-      // leaves this machine; the replica's `codex/` subtree is written only by
-      // this plugin, from the other machine's already-scoped push. Filtering
-      // here as well would make a pulled session look like a foreign file for
-      // however long the vault takes to carry its conversation record over.
-      return { logicalId, role: "primary", mode: "append-jsonl" };
-    },
+    classifyNeutral,
 
     async targetPathFor(neutralRel) {
       return deps.joinPath(deps.providerRoot, ...neutralRel.split("/").slice(1));
+    },
+
+    archivedPathFor(neutralRel) {
+      // Only a path this adapter would admit, and only its file name: the
+      // date directories do not exist in the archive, and nothing else in the
+      // neutral path may reach a filesystem call.
+      if (classifyNeutral(neutralRel) === null) return null;
+      const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
+      return deps.joinPath(deps.dirnameOf(deps.providerRoot), ARCHIVED_DIR, name);
     },
 
     async reconcileLocalIndex() {

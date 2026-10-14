@@ -219,6 +219,11 @@ function describeNextSync(backup: BackupEntry): string {
         "the next sync does not copy it here. Run \"Bring back conversations deleted on this " +
         "device\" if you want it back on this machine."
       );
+    case "archived-here":
+      return (
+        "This conversation is archived on this machine, so the next sync does not copy it here. " +
+        "Unarchive it and the two sides are compared as usual."
+      );
     default:
       return "What the next sync will do with it cannot be worked out from here.";
   }

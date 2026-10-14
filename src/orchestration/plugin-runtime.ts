@@ -936,6 +936,7 @@ export class PluginRuntime {
           providerRoot: real,
           vaultRealPath: this.host.vaultRoot,
           joinPath: this.host.joinPath,
+          dirnameOf: this.host.dirnameOf,
           listDir: async (dir) =>
             (await this.host.fs.readDir(dir).catch(() => [])).map((entry) => ({
               name: entry.name,
@@ -1588,9 +1589,9 @@ const NOT_READY_MESSAGES: Record<NotReadyReason, string> = {
     "The sync folder is holding fewer files than before. Usually this is a download still in " +
     "progress; syncing resumes on its own once the count stops falling.",
   "NR-7-byte-count-dropped":
-    "The sync folder is holding fewer bytes than before. Usually a download in progress, and " +
-    "syncing resumes once the bytes are back. If they will not come back — Claudian 2.3.8 and " +
-    "later shrink conversation records that carried images — see this plugin's README.",
+    "The sync folder is holding fewer bytes than before. Usually a download still in progress; " +
+    "syncing resumes on its own once the bytes are back. Claudian's conversation records are " +
+    "not counted, so their shrinking cannot cause this.",
   "NR-8-remote-regression":
     "A file in the sync folder that had content is now empty. That is a sync-tool problem, not " +
     "a change anyone made, so nothing is copied over it.",

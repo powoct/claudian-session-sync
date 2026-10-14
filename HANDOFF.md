@@ -1,6 +1,6 @@
 # HANDOFF — 交接说明
 
-> 更新时间：**2026-10-14**（**0.3.5 已发布；ADR-78 在分支 `adr-78-deleted-here`，未发布**；M1/M2/M4 完成；M3 主体交付；Claudian 2.2.5 兼容性已通过两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
+> 更新时间：**2026-10-14**（**0.3.5 已发布；ADR-78 已合入 main（#54），ADR-79/80 在分支 `codex-archive-and-byte-basis`，均未发布**；M1/M2/M4 完成；M3 主体交付；Claudian 2.2.5 兼容性已通过两机验收）。本文描述**当前进度快照**，供下一个会话（或下一个人）接手。
 > 读本文前先读 [CLAUDE.md](CLAUDE.md)（产品边界）→ [docs/zh-CN/architecture.md](docs/zh-CN/architecture.md)（实现规范）→ [docs/zh-CN/testing.md](docs/zh-CN/testing.md)（测试与验收）。
 
 ## 当前状态（2026-09-25）
@@ -146,6 +146,21 @@ ADR-78 按维护者 2026-09-25 接受的七项决定实现（H1–H7 + H9 + 锁�
 成全部删除、sharing 的 base 30 天后被 GC 等。收尾的完整性审查再抓到一条 high：transcript 被 Claude Code
 30 天清理掉的旧对话，删了会被当成 R2 恢复——现在要求至少一份 transcript 在同步夹里（正在路上）才算 R2。教训：**「什么时候可以忘」比「怎么记」更容易错**——
 对端只要还有这份对话，就一定会在 replica 缺它时再推上来，所以「replica 没有了」从来不是「可以忘了」。
+
+### 2026-10-14（续）：归档留在本机、records 瘦身不再冻结（ADR-79、ADR-80）
+
+#54 合入后，维护者对复核查出的两个问题拍板：OQ-35 新立 ADR「本机已经归档的就不拉」，OQ-36「把 `claudian/`
+排除在字节统计之外」；DeepSeek（Claudian 2.3.17）当前版本暂不加入，README 维持「不支持」。
+
+- **ADR-79**：Codex rollout 只在同步夹里有、本机 `sessions/` 下没有、而 `archived_sessions/<同名文件>` 是普通
+  文件 ⇒ `SKIP_ARCHIVED_HERE`，引擎在扣预算前判定。**无状态**，判断依据是本机此刻的文件系统；归档目录从不写、
+  不读字节。取消归档后照常同步，对端期间追加的部分正常拉下。
+- **ADR-80**：readiness 的字节数不再计 `claudian/`（文件数照计）。`remote.json` 新增 `byteCountBasis`，旧口径
+  的字节高水位不换算、由第一次有效观测取代——所以 0.3.5 上已经停在 NR-7 的机器升级后自己恢复，README 里删
+  `remote.json` 的绕过办法随之撤掉。
+
+两条都只朝「不写」方向动作，**⚠️ 未经真机验收**，步骤在 testing.md §9.13（A1、R1 最要紧），与 §9.12 一起跑。
+H8 只读审计与 H10 R2 预警仍在下一个 PR。
 
 ### 发布记录
 

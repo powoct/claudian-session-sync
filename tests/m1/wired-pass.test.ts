@@ -205,6 +205,63 @@ describe("S-17 / S-18: the workspace subtree is emptied and comes back", () => {
   });
 });
 
+describe("OQ-36 / ADR-80: Claudian's records shrink, and nothing is wrong", () => {
+  const RECORD = "conv-1786422687897-15ktes7p9.meta.json";
+  const MB = 1024 * 1024;
+
+  it("does not read a records rewrite as a sync folder emptying", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    await a.initialiseSyncDir();
+    await a.cli.session(SID).append(6);
+    await a.wiredSettle();
+
+    // A record that carried images, then the same record saved by Claudian
+    // 2.3.8, which strips them. Before ADR-80 that drop was NR-7, and NR-7
+    // only clears when the bytes come back — which these never do.
+    const records = path.join(a.replicaRoot, WORKSPACE_ID, "claudian");
+    await fsp.mkdir(records, { recursive: true });
+    await fsp.writeFile(path.join(records, RECORD), "x".repeat(8 * MB));
+    expect((await a.wiredPass()).readiness.state).toBe("READY");
+    await fsp.writeFile(path.join(records, RECORD), "x".repeat(1024));
+
+    const after = await a.wiredPass();
+    expect(after.readiness.state).toBe("READY");
+    await a.cli.session(SID).append(2);
+    const settled = await a.wiredSettle();
+    expect(
+      settled.report.actions.some((x) => x.action === "PUSH_OVERWRITE" && x.result === "APPLIED"),
+    ).toBe(true);
+  });
+
+  it("frees a device that an older version froze, on the first pass after the update", async () => {
+    const w = newWorld();
+    const a = w.machine("A");
+    await a.initialiseSyncDir();
+    await a.cli.session(SID).append(6);
+    await a.wiredSettle();
+
+    // What 0.3.5 leaves behind after a records shrink: a byte mark that
+    // counted 40 MB of records, no basis, and NR-7.
+    const rel = (await tree(a.homeRoot)).find((name) => name.endsWith("remote.json"));
+    expect(rel).toBeDefined();
+    const target = path.join(a.homeRoot, rel as string);
+    const raw = JSON.parse(await fsp.readFile(target, "utf8"));
+    delete raw.byteCountBasis;
+    raw.lastKnownCounts.bytes += 40 * MB;
+    raw.state = "NOT_READY";
+    raw.notReadyReason = "NR-7-byte-count-dropped";
+    raw.consecutiveStableProbes = 0;
+    await fsp.writeFile(target, JSON.stringify(raw));
+
+    const first = await a.wiredPass();
+    expect(first.readiness.state).toBe("READY");
+    const saved = JSON.parse(await fsp.readFile(target, "utf8"));
+    expect(saved.byteCountBasis).toBe(2);
+    expect(saved.lastKnownCounts.bytes).toBeLessThan(MB);
+  });
+});
+
 describe("S-19: the sync directory is not the one we know", () => {
   it("stops and does not recover by itself", async () => {
     const w = newWorld();

@@ -95,6 +95,11 @@ export interface BackupEntry {
      * it over — "will propagate" would be the wrong promise.
      */
     | "held-here"
+    /**
+     * A Codex rollout this machine has archived (ADR-79): the next sync does
+     * not copy the sync folder's version into `sessions/` either.
+     */
+    | "archived-here"
     | "unknown";
 }
 
@@ -247,6 +252,7 @@ export async function listBackups(
     }
     const own = remote ? sides.remote : sides.local;
     const other = remote ? sides.local : sides.remote;
+    const archived = remote && other === null && neutralRel !== null && (await archivedHere(deps, provider, neutralRel));
     entries.push({
       path,
       name,
@@ -268,7 +274,7 @@ export async function listBackups(
               ? "identical"
               : "differs",
       liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
-      outcome: predict(deps, bytes, other, neutralRel, provider),
+      outcome: predict(deps, bytes, other, neutralRel, provider, archived),
     });
   }
 
@@ -536,10 +542,14 @@ function predict(
   other: Uint8Array | null,
   neutralRel: string | null,
   provider: RestoreCommandDeps["providers"][number],
+  archived: boolean,
 ): BackupEntry["outcome"] {
   if (neutralRel === null) return "unknown";
   const mode = provider.adapter.classifyNeutral(neutralRel)?.mode ?? null;
-  if (other === null) return deps.heldHere?.has(neutralRel) === true ? "held-here" : "will-propagate";
+  if (other === null) {
+    if (deps.heldHere?.has(neutralRel) === true) return "held-here";
+    return archived ? "archived-here" : "will-propagate";
+  }
   if (deps.hashBytes(other) === deps.hashBytes(bytes)) return "nothing";
   if (mode !== "append-jsonl") return "whole-file";
   if (bytes.length < other.length && isPrefix(bytes, other)) return "will-be-undone";
@@ -598,4 +608,20 @@ function countLines(bytes: Uint8Array): number {
 function shortHash(hash: string): string {
   const bare = hash.startsWith("sha256:") ? hash.slice(7) : hash;
   return bare.slice(0, 8);
+}
+
+/**
+ * The engine's ADR-79 question, asked of a row whose local side is missing:
+ * is the session archived on this machine? A read that fails answers no,
+ * which predicts the copy the engine would then also make.
+ */
+async function archivedHere(
+  deps: RestoreCommandDeps,
+  provider: RestoreCommandDeps["providers"][number],
+  neutralRel: string,
+): Promise<boolean> {
+  const archived = provider.adapter.archivedPathFor?.(neutralRel) ?? null;
+  if (archived === null) return false;
+  const st = await deps.fs.lstat(archived).catch(() => null);
+  return st !== null && st.isFile;
 }

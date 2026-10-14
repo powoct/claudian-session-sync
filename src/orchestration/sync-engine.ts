@@ -520,6 +520,21 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       continue;
     }
 
+    // ADR-79. A rollout only the sync folder has, which this machine has
+    // archived: Codex moved it from `sessions/` into its archive, and landing
+    // the sync folder's copy would give the CLI two files for one thread —
+    // and on unarchive, Codex's rename would replace ours, and a peer's turns
+    // in it would come back as a shrink. Settled before the budget for the
+    // same reason as a held record: archiving is often in bulk, and it is a
+    // standing state, not news.
+    if (adapter.archivedPathFor && planned.length === 1) {
+      const row = await archivedHere(group, adapter, planned[0] as SessionFileRef);
+      if (row !== null) {
+        actions.push(row);
+        continue;
+      }
+    }
+
     // ADR-78. Before the budget, so a record already held, or retired, costs
     // a stat and no share of the pass: a bulk delete of fifty conversations is
     // fifty holds, and charging each one every pass would starve the peer's
@@ -1131,6 +1146,38 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     }
     if (records.state.continueHold(file.neutralRel)) newlyHeld.push(record.conversationId);
     return entry(group, file.neutralRel, adapter.id, "SKIP_DELETED_HERE", held.kind, "SKIPPED_POLICY");
+  }
+
+  /**
+   * A rollout archived on this machine and missing from where it was written
+   * (ADR-79); null to plan it normally.
+   *
+   * Only ever withholds a write. Anything at the target path at all, or an
+   * archive entry that is not a plain file, or a path that cannot be asked
+   * about, plans as before — which for a rollout that really is archived is
+   * the duplicate this exists to avoid, and loses nothing.
+   */
+  async function archivedHere(
+    group: SessionGroup,
+    adapter: ProviderAdapter,
+    file: SessionFileRef,
+  ): Promise<ActionEntry | null> {
+    // Listed means found in `sessions/`.
+    if (file.absPath !== "") return null;
+    const archived = adapter.archivedPathFor?.(file.neutralRel) ?? null;
+    if (archived === null) return null;
+    try {
+      if ((await deps.fs.lstat(await adapter.targetPathFor(file.neutralRel))) !== null) return null;
+      const st = await deps.fs.lstat(archived);
+      if (st === null || !st.isFile) return null;
+    } catch {
+      return null;
+    }
+    // Kept current, so the pass after an unarchive finds the copy as quiet as
+    // it is rather than restarting its quiet window.
+    const remote = await observe(deps, deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel));
+    recordLedger(deps, file.neutralRel, "remote", remote, deps.clock.nowMs(), null);
+    return entry(group, file.neutralRel, adapter.id, "SKIP_ARCHIVED_HERE", "archived-here", "SKIPPED_POLICY");
   }
 
   /** The facts `decideAbsentHere` needs, each gathered only when asked. */

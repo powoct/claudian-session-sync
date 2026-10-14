@@ -36,7 +36,12 @@ export type Action =
   /** A Claudian record removed on this device, kept off it (ADR-78). */
   | "SKIP_DELETED_HERE"
   /** A Claudian file the installed Claudian no longer reads (ADR-78). */
-  | "SKIP_RETIRED";
+  | "SKIP_RETIRED"
+  /**
+   * A Codex rollout this machine has archived, kept out of `sessions/`
+   * (ADR-79). Decided by the engine before the budget, never by `plan()`.
+   */
+  | "SKIP_ARCHIVED_HERE";
 
 export type RemoteReadiness = "ready" | "not-ready" | "unsupported-format";
 

@@ -26,7 +26,7 @@ import {
   parseManifest,
   serialiseManifest,
 } from "../domain/manifest";
-import type { Counts, ReadinessObservation } from "../domain/readiness";
+import { BYTES_NOT_COUNTED_UNDER, type Counts, type ReadinessObservation } from "../domain/readiness";
 import type { FsGateway } from "./fs-gateway";
 import { type PathGuardDeps, isTransferArtifact, resolveUnderRoot } from "./path-guard";
 import { createJsonExclusive, readJson, writeJson } from "./json-file";
@@ -249,12 +249,17 @@ export function manifestSchemaVersion(): number {
  * is now empty is the loudest single signal that the sync tool is misbehaving
  * — a placeholder, an interrupted transfer, a rollback — and it is worth
  * detecting before the pass starts rather than one file at a time inside it.
+ *
+ * Files under `BYTES_NOT_COUNTED_UNDER` are counted and listed, but their
+ * bytes are not added (ADR-80): they are rewritten whole, and shrinking is
+ * something they do.
  */
 async function walk(
   deps: SyncDirStoreDeps,
   dir: string,
   prefix: string,
   into: { counts: Counts; zeroByteRels: string[] },
+  countBytes = true,
 ): Promise<void> {
   const entries = await deps.fs.readDir(dir).catch(() => []);
   for (const entry of entries) {
@@ -262,13 +267,13 @@ async function walk(
     const child = deps.joinPath(dir, entry.name);
     const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
     if (entry.isDirectory) {
-      await walk(deps, child, rel, into);
+      await walk(deps, child, rel, into, countBytes && !(prefix === "" && BYTES_NOT_COUNTED_UNDER.has(entry.name)));
       continue;
     }
     if (!entry.isFile) continue;
     const st = await deps.fs.lstat(child);
     if (st === null) continue;
-    into.counts = { files: into.counts.files + 1, bytes: into.counts.bytes + st.size };
+    into.counts = { files: into.counts.files + 1, bytes: into.counts.bytes + (countBytes ? st.size : 0) };
     if (st.size === 0) into.zeroByteRels.push(rel);
   }
 }

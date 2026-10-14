@@ -24,6 +24,7 @@ export interface AdapterEnvironment {
   /** Realpath of the vault — the escape rule's measured input (§6.3). */
   readonly vaultRealPath: string;
   readonly joinPath: (...parts: string[]) => string;
+  readonly dirnameOf: (path: string) => string;
   readonly listDir: (path: string) => Promise<Array<{ name: string; isFile: boolean }>>;
   readonly statFile: (path: string) => Promise<{ mtimeMs: number } | null>;
   /**
