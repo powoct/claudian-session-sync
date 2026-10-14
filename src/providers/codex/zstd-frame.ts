@@ -2,7 +2,7 @@
  * The uncompressed size a zstd frame header declares (ADR-83).
  *
  * Codex writes it into every rollout it compresses — `set_pledged_src_size`
- * with the plain file's length, since rust-v0.151 (codex-rs
+ * with the plain file's length, since rust-v0.152 (codex-rs
  * `rollout/src/compression.rs`) — and reads it back itself to bound a prefix
  * without decoding (`seekable_reader.rs`, `rollout_contains_prefix`). Here it
  * answers the one question ADR-83 needs about a compressed rollout without a

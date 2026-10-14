@@ -18,11 +18,15 @@ describe("the size a zstd frame declares", () => {
     ["two bytes, offset by 256", "28b52ffd64b0039d0000606865", 1200],
     ["four bytes, with a checksum", "28b52ffda4a086010001350c48d4a9cc58a2", 100_000],
     ["four bytes, without one", "28b52ffda0a086010055000010000001009b", 100_000],
+    // Not single segment: a window byte before the size — the shape the
+    // streaming encoder gives a large rollout (`zstd --stream-size`).
+    ["four bytes after a window byte (a 9 MB rollout)", "28b52ffd845840548900000010fba09f633d", 9_000_000],
+    ["two bytes, from the streaming encoder", "28b52ffd642c004d00001030300100272ac0", 300],
   ])("reads %s", (_shape, header, size) => {
     expect(zstdFrameContentSize(hex(header))).toBe(size);
   });
 
-  it("says nothing for a frame that declares no size, as Codex before 0.151 wrote them", () => {
+  it("says nothing for a frame that declares no size, as Codex before 0.152 wrote them", () => {
     // `zstd --no-content-size`: descriptor 0x04, then a window byte.
     expect(zstdFrameContentSize(hex("28b52ffd04089d0000606865"))).toBeNull();
   });

@@ -80,6 +80,8 @@ export interface CodexAdapterDeps {
 }
 
 export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
+  const archiveDir = () => deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR);
+
   /**
    * Names only — no `stat`, no read, no vault scope.
    *
@@ -89,6 +91,11 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
    */
   async function unrecognised(): Promise<string[]> {
     const found: string[] = [];
+    const archived = new Set(
+      (await deps.listDir(archiveDir()).catch(() => []))
+        .filter((entry) => entry.isFile)
+        .map((entry) => entry.name),
+    );
     await walkNames(deps.providerRoot, 0);
     return found;
 
@@ -98,7 +105,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       // recognisable next to the file it copied.
       if (depth === DATE_DEPTH) {
         const names = entries.filter((entry) => entry.isFile).map((entry) => entry.name);
-        found.push(...unrecognisedRolloutNames(names));
+        found.push(...unrecognisedRolloutNames(names, archived));
         return;
       }
       for (const entry of entries) {
@@ -219,7 +226,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       // neutral path may reach a filesystem call.
       if (classifyNeutral(neutralRel) === null) return null;
       const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
-      return deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR, name);
+      return deps.joinPath(archiveDir(), name);
     },
 
     compressedSiblingOf(localPath) {

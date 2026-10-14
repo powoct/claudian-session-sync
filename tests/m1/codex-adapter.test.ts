@@ -511,6 +511,21 @@ describe("the census that would have caught this one (OQ-32)", () => {
     expect(text).not.toContain("does not recognise");
   });
 
+  it("does not count a compressed copy left in sessions/ after its plain file was archived", async () => {
+    // A pair ADR-83 left, then archived in Codex: the plain file moves to the
+    // archive and the compressed one stays where it was (archive_thread.rs).
+    // It is not a conversation that has not travelled.
+    const { adapter, sessions } = await world({ recorded: [SID] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${rollout(SID)}.zst`), "z");
+    const archive = path.join(path.dirname(sessions), "archived_sessions");
+    await fsp.mkdir(archive, { recursive: true });
+    await fsp.writeFile(path.join(archive, rollout(SID)), "{}\n");
+
+    expect(await warn(adapter)).toBe("");
+  });
+
   it("counts only this vault's compressed conversations, and not one Codex no longer reads", async () => {
     // The sessions folder is every vault's and every Codex client's: another
     // vault's compressed thread is not this vault's news. And a `.zst` beside

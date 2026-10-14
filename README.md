@@ -250,7 +250,7 @@ the switch). This version does not sync compressed files, and reads only a compr
 18-byte header, never its contents. A compressed conversation is left compressed: the plugin
 does not copy the sync folder's version back beside it (`compressed-here` in the report),
 except when that version is exactly what was compressed plus turns another device added — the
-header's recorded length (or, for files from Codex before 0.151, the modification time Codex
+header's recorded length (or, for files from Codex before 0.152, the modification time Codex
 copies onto them) shows what was compressed. Then it lands next to it, Codex reads it from then
 on, and the older compressed copy, which Codex no longer uses, can be deleted. When it cannot
 tell, it holds back and names the conversation: open it in Codex once and quit without sending,

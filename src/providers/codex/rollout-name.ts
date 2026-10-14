@@ -129,11 +129,17 @@ export { isSessionUuid as isCodexSessionId } from "../vault-scope";
  * expected company in that directory, and a warning that is always on is one
  * nobody reads. So is a compressed rollout whose plain file is beside it:
  * Codex reads the plain one and ignores the other (ADR-83 leaves exactly
- * that pair behind when it lands a peer's newer turns). Everything else
+ * that pair behind when it lands a peer's newer turns) — or in the archive,
+ * which is where the plain one goes when that conversation is archived and
+ * the compressed one stays put (codex-rs `archive_thread.rs`). Everything else
  * counts, including things we could guess at — being wrong about the reason
  * costs a sentence, being silent costs a conversation.
  */
-export function unrecognisedRolloutNames(names: readonly string[]): string[] {
+export function unrecognisedRolloutNames(
+  names: readonly string[],
+  /** Plain rollout names in the archive: a `.zst` left behind when its plain one was archived. */
+  archived: ReadonlySet<string> = new Set(),
+): string[] {
   const present = new Set(names);
   return names.filter(
     (name) =>
@@ -141,7 +147,11 @@ export function unrecognisedRolloutNames(names: readonly string[]): string[] {
       classifyExternalArtifact(name, names).kind === "unknown" &&
       !name.includes(TEMP_MARKER) &&
       !CODEX_TEMP.some((pattern) => pattern.test(name)) &&
-      !(isCompressedRollout(name) && present.has(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length))),
+      !(
+        isCompressedRollout(name) &&
+        (present.has(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length)) ||
+          archived.has(name.slice(0, -CODEX_COMPRESSED_SUFFIX.length)))
+      ),
   );
 }
 

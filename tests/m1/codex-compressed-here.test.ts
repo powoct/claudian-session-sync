@@ -10,11 +10,11 @@
  * back into a plain file when the conversation is resumed. Before this, the
  * next pass read "plain file missing" as "not here yet" and landed the sync
  * folder's copy beside the compressed one; round 10 counted 39 such pairs on
- * one machine (OQ-31) — most likely those landings, which a read-only probe
- * on that machine is to confirm.
+ * one machine (OQ-31), and a read-only probe there (2026-10-15) showed this
+ * plugin wrote all 39 in one pass, byte-identical to what was compressed.
  *
  * "Exactly what was compressed" is checked without a decoder: the zstd frame
- * header declares the plain file's length (Codex since rust-v0.151), and a
+ * header declares the plain file's length (Codex since rust-v0.152), and a
  * frame that declares none carries the plain file's modification time, which
  * Codex copies onto it.
  *
@@ -81,7 +81,7 @@ const frameOf = (text: string) => zstdRawFrame(new TextEncoder().encode(text));
 /**
  * What Codex's compression worker does: a `.zst` beside it carrying the
  * plain file's modification time, then the original removed. Since
- * rust-v0.151 the frame declares the plain file's length; `declareSize: false`
+ * rust-v0.152 the frame declares the plain file's length; `declareSize: false`
  * is a frame from before that.
  */
 async function compress(plain: string, options: { declareSize?: boolean } = {}): Promise<void> {

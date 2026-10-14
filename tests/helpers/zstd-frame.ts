@@ -1,7 +1,7 @@
 /**
  * A real zstd frame holding `content` uncompressed, in raw blocks (RFC 8878
  * §3.1.1.2) — what the `zstd` tool decodes, with the header Codex writes:
- * the content size declared, since rust-v0.151 (`set_pledged_src_size`), or
+ * the content size declared, since rust-v0.152 (`set_pledged_src_size`), or
  * not, as before it.
  *
  * Node 20 has no zstd encoder, and the engine reads nothing past the header,

@@ -1228,7 +1228,7 @@ block,`zstd` 解得开;插件只读前 18 字节帧头)与 `tests/m1/zstd-frame.
 **环境**:同 §9.12、§9.13(测试 vault,records、Claude Code、Codex 两机都开)。造压缩件:最好等 Codex 自己压(对话
 7 天不动、距上次压缩运行超过 6 小时,且 Codex 启动时开着压缩开关或经 app-server 的 `rollout/compress` 触发);
 等不了就在**退出 Obsidian、Codex 没开着这条会话**时用 `zstd -q --rm <rollout>`——产出同名 `.jsonl.zst`(默认在帧头写
-原长,并保留原文件的 mtime)并删掉原文件,与 Codex 0.151 起的结果同形。`zstd` 只在 macOS 上用(`brew install
+原长,并保留原文件的 mtime)并删掉原文件,与 Codex 0.152 起的结果同形。`zstd` 只在 macOS 上用(`brew install
 zstd`);Windows 机器上不造压缩件。**只对测试 vault 里新建的会话这样做。**
 
 | 步 | 断言 |
@@ -1241,10 +1241,19 @@ zstd`);Windows 机器上不造压缩件。**只对测试 vault 里新建的会�
 | **Z4** | 另一条对话:A 上压缩后,**在 A 上**续一轮(Codex 把 `.zst` 还原成普通文件、删掉 `.zst`)→ 下一轮起照常推送,B 上能看到 |
 | **Z5** | 在 Claudian 里归档一条对话,再把 `archived_sessions/` 里那份压缩 → A 上 Sync now ×2:`SKIP_ARCHIVED_HERE` / `archived-here`,`sessions/` 下没有副本 |
 | **Z6** | (观察项)在 Claudian 紧凑历史里直接删除(不经归档)一条 Codex 对话,并把它在 `sessions/` 下的 rollout 压缩 → 审计屏「Kept off this device」下该会话显示「on this device, compressed by Codex」 |
-| **Z7** | (观察项)Z1 那条对话若有本机备份,恢复屏上它的行不提供恢复,说明 Codex 压缩了它;用 `zstd --no-content-size` 造一份(模拟 0.151 之前的 Codex)重复 Z2,同样落地(靠 mtime) |
+| **Z7** | (观察项)Z1 那条对话若有本机备份,恢复屏上它的行不提供恢复,说明 Codex 压缩了它;用 `zstd --no-content-size` 造一份(模拟 0.152 之前的 Codex)重复 Z2,同样落地(靠 mtime) |
 
 **B1 和 Z1 是核心。** ADR-82 只改「这一轮先处理谁」与「哪些读不必做」,不改任何一个文件怎么判;ADR-83 只扣住写入,
 唯一放行的「同步夹那份是压缩内容的延续」与修复前的行为相同,而且多了压缩件自带的证据。⚠️ **尚未执行。**
+
+**第 11 轮只读探针(2026-10-15,A 的平常 vault,0.3.5)**:A 上 269 个 `.zst` 是 2026-10-14 00:28:30Z 同一次压缩运行写的;
+39 对的普通文件是插件 8 小时后一轮里拉回的,与压缩内容逐字节相同;另 17 个只有 `.zst` 的被 0.3.5 的预算挡了 41 轮。
+没有轮次丢失(详见架构 ADR-83、OQ-31)。据此,**0.3.6 装到 A 的平常 vault 后第一轮应当**:17 个 `SKIP_COMPRESSED_HERE`
+且不点名、39 对 `NOOP`、没有「continued on another device」与「cannot tell」,普查句「Codex has compressed N of this
+vault's…」(N 多半是 17,大于 17 的部分是从没推送过就被压缩的本 vault 对话,续接之前到不了别的设备),可能有一次
+`waited 5 or more syncs`。这需要在约 2026-11-12 之前装上:之后 0.3.5 的 ledger 会把那 17 条的收敛基线 GC 掉。
+下一次只读探针(v2)在 A、B 两台的平常 vault 上都跑,补上帧头声明的原长、ledger 的签名、按 provider 的饥饿计数与
+两项上限设置。
 
 ### 9.5 各里程碑 Exit Criteria
 
