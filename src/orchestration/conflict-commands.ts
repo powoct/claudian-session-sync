@@ -93,6 +93,14 @@ export interface ConflictEntry {
    * into the directory would suppress a genuine recurrence under the same id.
    */
   readonly standing: ConflictStanding;
+  /**
+   * This machine's copy is missing because the conversation is archived here
+   * (ADR-79): Codex moved it out of `sessions/`, and the engine keeps the sync
+   * folder's copy out until it is unarchived. Neither choice can be made
+   * until then — keeping this machine's version has nothing to read, and
+   * keeping the other one would write a second copy beside the archived one.
+   */
+  readonly localArchived: boolean;
 }
 
 export type ConflictStanding =
@@ -112,6 +120,8 @@ export interface ConflictCommandDeps {
   readonly replicaRoot: string;
   /** Where a neutral-relative path lands on this machine, per provider. */
   readonly localPathFor: (providerId: string, neutralRel: string) => Promise<string | null>;
+  /** Where it would be once archived (ADR-79), when the provider archives at all. */
+  readonly archivedPathFor?: (providerId: string, neutralRel: string) => string | null;
   /**
    * The same validator the engine writes through.
    *
@@ -158,6 +168,8 @@ export type ResolveFailure =
    * then re-transfers, and reported success.
    */
   | "sides-agree"
+  /** This machine's copy is archived (ADR-79); unarchive it first. */
+  | "local-archived"
   | "remote-not-ready"
   /** A pass is applying right now — the same lock a pass takes (§9.4). */
   | "sync-in-progress"
@@ -214,6 +226,7 @@ export async function resolveConflict(
   // before the readiness gate deliberately — sending someone off to fix sync
   // readiness for a write that would change nothing is the worse refusal.
   if (entry.standing === "settled") return { ok: false, reason: "sides-agree" };
+  if (entry.localArchived) return { ok: false, reason: "local-archived" };
 
   const keepingLocal = resolution === "keep-local";
   // Keeping local means writing into the sync directory, and that is only
@@ -355,7 +368,26 @@ async function readEntry(
     neutralRel,
     branches,
     standing: standingOf(branches, localHash, remoteHash),
+    localArchived: localHash === null && (await archivedHere(deps, providerId, neutralRel, localPath)),
   };
+}
+
+/** The engine's ADR-79 question, for a local side that read as missing. */
+async function archivedHere(
+  deps: ConflictCommandDeps,
+  providerId: string,
+  neutralRel: string,
+  localPath: string | null,
+): Promise<boolean> {
+  const archived = deps.archivedPathFor?.(providerId, neutralRel) ?? null;
+  if (archived === null || localPath === null) return false;
+  try {
+    if ((await deps.fs.lstat(localPath)) !== null) return false;
+    const st = await deps.fs.lstat(archived);
+    return st !== null && st.isFile;
+  } catch {
+    return false;
+  }
 }
 
 /**

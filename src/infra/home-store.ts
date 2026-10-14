@@ -32,7 +32,7 @@ import {
   parseObservations,
 } from "./state-store";
 import type { NotReadyReason, ReadinessState, RemoteRecord } from "../domain/readiness";
-import { INITIAL_REMOTE_RECORD } from "../domain/readiness";
+import { INITIAL_REMOTE_RECORD, LEGACY_BYTE_COUNT_BASIS } from "../domain/readiness";
 import { type HoldKind, claudianRecordOf } from "../domain/deleted-here";
 
 /** 0700: this directory holds absolute paths and a machine identity. */
@@ -110,6 +110,12 @@ export interface RemoteStateFile {
   readonly initializedAt: string | null;
   readonly lastReadyPassAt: string | null;
   readonly lastKnownCounts: { readonly files: number; readonly bytes: number };
+  /**
+   * What `lastKnownCounts.bytes` measured (ADR-80). Absent in files written
+   * before it, which measured basis 1 — and absent again after a downgrade
+   * rewrites the file, which is why it is never assumed current.
+   */
+  readonly byteCountBasis?: number;
   readonly consecutiveStableProbes: number;
   readonly firstProbeMs: number | null;
   readonly notReadyReason: NotReadyReason | null;
@@ -380,6 +386,7 @@ export function createHomeStore(deps: HomeStoreDeps): HomeStore {
         state: parsed.state,
         rootId: parsed.rootId,
         lastKnownCounts: parsed.lastKnownCounts,
+        byteCountBasis: parsed.byteCountBasis ?? LEGACY_BYTE_COUNT_BASIS,
         consecutiveStableProbes: parsed.consecutiveStableProbes,
         firstProbeMs: parsed.firstProbeMs,
         notReadyReason: parsed.notReadyReason,
@@ -395,6 +402,7 @@ export function createHomeStore(deps: HomeStoreDeps): HomeStore {
         initializedAt: context.initializedAt,
         lastReadyPassAt: record.state === "READY" ? context.nowIso : null,
         lastKnownCounts: record.lastKnownCounts,
+        byteCountBasis: record.byteCountBasis,
         consecutiveStableProbes: record.consecutiveStableProbes,
         firstProbeMs: record.firstProbeMs,
         notReadyReason: record.notReadyReason,
@@ -622,6 +630,7 @@ function parseRemote(raw: unknown): RemoteStateFile | null {
       files: typeof counts?.files === "number" ? counts.files : 0,
       bytes: typeof counts?.bytes === "number" ? counts.bytes : 0,
     },
+    ...(typeof c.byteCountBasis === "number" ? { byteCountBasis: c.byteCountBasis } : {}),
     consecutiveStableProbes:
       typeof c.consecutiveStableProbes === "number" ? c.consecutiveStableProbes : 0,
     firstProbeMs: typeof c.firstProbeMs === "number" ? c.firstProbeMs : null,

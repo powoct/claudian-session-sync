@@ -89,12 +89,21 @@ export class ConflictModal extends Modal {
     // correcting the verdict alone would print "nothing to choose here"
     // directly above two live buttons — worse than the screen it replaced.
     const settled = conflict.standing === "settled";
-    const hasLocal = !settled && conflict.branches.some((branch) => branch.onThisMachine);
-    const hasRemote = !settled && conflict.branches.some((branch) => branch.inSyncFolder);
+    // An archived copy greys both: there is nothing here to keep, and keeping
+    // the other version would write a second copy beside the archived one.
+    const blocked = settled || conflict.localArchived;
+    const hasLocal = !blocked && conflict.branches.some((branch) => branch.onThisMachine);
+    const hasRemote = !blocked && conflict.branches.some((branch) => branch.inSyncFolder);
     this.addChoice(buttons, conflict, "keep-local", "Keep this machine's version", hasLocal);
     this.addChoice(buttons, conflict, "keep-remote", "Keep the other machine's version", hasRemote);
     this.addChoice(buttons, conflict, "reveal", "Show me both", true);
-    if (conflict.standing === "in-dispute" && (!hasLocal || !hasRemote)) {
+    if (conflict.localArchived) {
+      buttons.createEl("p", {
+        text:
+          "This conversation is archived on this machine, so its file here is in Codex's archive " +
+          "folder and neither choice can be made from here. Unarchive it, run a sync, and reopen this.",
+      });
+    } else if (conflict.standing === "in-dispute" && (!hasLocal || !hasRemote)) {
       buttons.createEl("p", {
         text:
           "A greyed-out choice means that side has changed since this conflict was recorded, " +
@@ -206,6 +215,11 @@ export function describeOutcome(
       );
     case "backup-failed":
       return "The backup could not be written, so nothing was overwritten.";
+    case "local-archived":
+      return (
+        "This conversation is archived on this machine, so nothing was changed. Unarchive it, " +
+        "run a sync, and try again."
+      );
     case "kept-unreadable":
       // Not "the state changed": a user told that re-syncs and waits for
       // nothing. The honest message is that a file was busy — the sync tool

@@ -50,6 +50,7 @@ async function claudianRecord(vault: string, providerId: string, id: string): Pr
 const fsDeps = (vault: string) => ({
   vaultRealPath: vault,
   joinPath: (...parts: string[]) => path.join(...parts),
+  dirnameOf: (target: string) => path.dirname(target),
   listDir: async (dir: string) =>
     (await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])).map((entry) => ({
       name: entry.name,

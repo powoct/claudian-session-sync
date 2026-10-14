@@ -166,6 +166,7 @@ describe("the remote-state record", () => {
         state: "READY",
         rootId: "root-a",
         lastKnownCounts: { files: 9, bytes: 900 },
+        byteCountBasis: 2,
         consecutiveStableProbes: 3,
         firstProbeMs: 5,
         notReadyReason: null,
@@ -186,6 +187,7 @@ describe("the remote-state record", () => {
         state: "READY",
         rootId: "root-a",
         lastKnownCounts: { files: 9, bytes: 900 },
+        byteCountBasis: 2,
         consecutiveStableProbes: 3,
         firstProbeMs: 5,
         notReadyReason: null,
@@ -197,6 +199,37 @@ describe("the remote-state record", () => {
       state: "READY",
       rootId: "root-a",
       lastKnownCounts: { files: 9, bytes: 900 },
+      byteCountBasis: 2,
+    });
+  });
+
+  it("says a record from before ADR-80 measured bytes on the old basis", async () => {
+    // Every remote.json written so far, and every one a downgrade rewrites:
+    // its byte mark includes Claudian's records, and comparing it with a
+    // reading that leaves them out is the drop ADR-80 stops reporting.
+    const root = makeRoot();
+    const store = home(root);
+    const target = store.layout.remoteFile(WS);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(
+      target,
+      JSON.stringify({
+        schemaVersion: 1,
+        syncDirPath: "/here",
+        rootId: "root-a",
+        state: "NOT_READY",
+        initializedAt: null,
+        lastReadyPassAt: null,
+        lastKnownCounts: { files: 9, bytes: 40_000_000 },
+        consecutiveStableProbes: 0,
+        firstProbeMs: 5,
+        notReadyReason: "NR-7-byte-count-dropped",
+      }),
+    );
+    expect(await store.loadRemote(WS, "/here")).toMatchObject({
+      state: "NOT_READY",
+      lastKnownCounts: { files: 9, bytes: 40_000_000 },
+      byteCountBasis: 1,
     });
   });
 });
@@ -345,6 +378,29 @@ describe("the workspace scan", () => {
 
     expect(scan.counts).toEqual({ files: 2, bytes: 5 });
     expect(scan.zeroByteRels).toEqual(["claude-code/b.jsonl"]);
+  });
+
+  it("counts Claudian's records as files and not as bytes (ADR-80)", async () => {
+    // They are rewritten whole, and Claudian 2.3.8's image stripping can take
+    // tens of megabytes out of them in one save. Their files still count, and
+    // an empty one is still named: neither of those is something they do.
+    const root = makeRoot();
+    await fsp.mkdir(path.join(root, WS, "claude-code"), { recursive: true });
+    await fsp.writeFile(path.join(root, WS, "claude-code", "a.jsonl"), "12345");
+    const records = path.join(root, WS, "claudian");
+    await fsp.mkdir(path.join(records, "nested"), { recursive: true });
+    await fsp.writeFile(path.join(records, "conv-1-a.meta.json"), "x".repeat(1000));
+    await fsp.writeFile(path.join(records, "nested", "conv-2-b.meta.json"), "x".repeat(1000));
+    await fsp.writeFile(path.join(records, "conv-3-c.meta.json"), "");
+    // Only the top-level directory: a provider's own subfolder that happens to
+    // share the name is somebody else's bytes.
+    await fsp.mkdir(path.join(root, WS, "codex", "claudian"), { recursive: true });
+    await fsp.writeFile(path.join(root, WS, "codex", "claudian", "x.jsonl"), "1234567");
+
+    const scan = await syncDir(root).scanWorkspace(WS);
+
+    expect(scan.counts).toEqual({ files: 5, bytes: 12 });
+    expect(scan.zeroByteRels).toEqual(["claudian/conv-3-c.meta.json"]);
   });
 });
 

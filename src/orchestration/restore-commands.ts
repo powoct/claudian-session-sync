@@ -95,6 +95,13 @@ export interface BackupEntry {
      * it over — "will propagate" would be the wrong promise.
      */
     | "held-here"
+    /**
+     * A Codex rollout this machine has archived (ADR-79). From the sync
+     * folder: the next sync does not copy it into `sessions/`. From this
+     * machine: putting it back would make a second, active copy beside the
+     * archived one, so the restore is refused.
+     */
+    | "archived-here"
     | "unknown";
 }
 
@@ -116,6 +123,8 @@ export type RestoreOutcome =
         | "target-not-located"
         | "target-changed"
         | "target-exists"
+        /** A Codex rollout archived on this machine (ADR-79); unarchive it first. */
+        | "target-archived"
         | "remote-not-ready"
         | "sync-in-progress"
         | "path-rejected"
@@ -247,6 +256,9 @@ export async function listBackups(
     }
     const own = remote ? sides.remote : sides.local;
     const other = remote ? sides.local : sides.remote;
+    // Asked whenever this machine's copy is missing: the engine's ADR-79 rule
+    // decides what happens to a version put back on either side.
+    const archived = neutralRel !== null && sides.local === null && (await archivedHere(deps, provider, neutralRel));
     entries.push({
       path,
       name,
@@ -268,7 +280,7 @@ export async function listBackups(
               ? "identical"
               : "differs",
       liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
-      outcome: predict(deps, bytes, other, neutralRel, provider),
+      outcome: !remote && archived ? "archived-here" : predict(deps, bytes, other, neutralRel, provider, archived),
     });
   }
 
@@ -356,6 +368,12 @@ export async function restoreBackup(
   }
 
   if (before === null) {
+    // Not into `sessions/` beside an archived copy: Codex would hold two files
+    // for one thread, and its unarchive would rename the archived one over
+    // this (ADR-79).
+    if (!entry.remote && (await archivedHere(deps, provider, entry.neutralRel))) {
+      return { ok: false, reason: "target-archived" };
+    }
     // Nothing there to preserve, so I1 is not implicated: this is a creation,
     // not an overwrite, and it commits with no-replace so a pass that lands
     // the session first wins rather than being silently clobbered.
@@ -536,10 +554,14 @@ function predict(
   other: Uint8Array | null,
   neutralRel: string | null,
   provider: RestoreCommandDeps["providers"][number],
+  archived: boolean,
 ): BackupEntry["outcome"] {
   if (neutralRel === null) return "unknown";
   const mode = provider.adapter.classifyNeutral(neutralRel)?.mode ?? null;
-  if (other === null) return deps.heldHere?.has(neutralRel) === true ? "held-here" : "will-propagate";
+  if (other === null) {
+    if (deps.heldHere?.has(neutralRel) === true) return "held-here";
+    return archived ? "archived-here" : "will-propagate";
+  }
   if (deps.hashBytes(other) === deps.hashBytes(bytes)) return "nothing";
   if (mode !== "append-jsonl") return "whole-file";
   if (bytes.length < other.length && isPrefix(bytes, other)) return "will-be-undone";
@@ -598,4 +620,20 @@ function countLines(bytes: Uint8Array): number {
 function shortHash(hash: string): string {
   const bare = hash.startsWith("sha256:") ? hash.slice(7) : hash;
   return bare.slice(0, 8);
+}
+
+/**
+ * The engine's ADR-79 question, asked of a row whose local side is missing:
+ * is the session archived on this machine? A read that fails answers no,
+ * which predicts the copy the engine would then also make.
+ */
+async function archivedHere(
+  deps: RestoreCommandDeps,
+  provider: RestoreCommandDeps["providers"][number],
+  neutralRel: string,
+): Promise<boolean> {
+  const archived = provider.adapter.archivedPathFor?.(neutralRel) ?? null;
+  if (archived === null) return false;
+  const st = await deps.fs.lstat(archived).catch(() => null);
+  return st !== null && st.isFile;
 }

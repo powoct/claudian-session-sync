@@ -201,16 +201,29 @@ Later Claudian releases changed three more things worth knowing:
 - **2.3.6** no longer reads the old `.claude/sessions` folder. A conversation recorded only
   there no longer appears in Claudian; its session file still syncs and resumes from a
   terminal.
-- **2.3.8** strips image data out of conversation records when it saves them. With the
-  Claudian records provider on, a vault whose records were tens of megabytes can see the
-  sync folder shrink by more than a quarter in one go, and syncing then pauses with "fewer
-  bytes than before" and does not resume on its own. **Not fixed yet.** If it happens, and
-  you are sure nothing else removed files from the sync folder, delete
-  `~/.claudian-session-sync/state/<workspace id>/remote.json` on each paused device: the
-  plugin then re-checks the folder from scratch and resumes once it has settled.
+- **2.3.8** strips image data (from subagent tool results) out of conversation records when
+  it saves them, so with the Claudian records provider on, the sync folder can shrink by
+  tens of megabytes in one go. The plugin's "has the sync folder been emptied?" check no
+  longer counts conversation records' bytes, so this does not pause syncing. After updating,
+  each device re-checks the sync folder once: its first sync copies nothing, and the second —
+  one sync interval later, or a second **Sync now** at least 90 seconds after the first —
+  carries on. A device an older version had already paused with "fewer bytes than before"
+  resumes the same way.
 - **2.3.11** moves an archived Codex conversation's session file into Codex's own archive
-  folder. This plugin does not know that folder yet, so the next sync copies the file back
-  into the active one on that device. Nothing is lost. **Not fixed yet.**
+  folder (`~/.codex/archived_sessions`). A conversation archived on a device stays archived
+  there: the plugin sees the file in the archive and does not copy the sync folder's version
+  back into the active folder (the sync report lists it as `archived-here`). Other devices
+  keep their own copy in their active folder and keep syncing it. Unarchive it **on the
+  device that archived it** (in Claudian there, or with `codex unarchive`) and it catches up
+  with what the other devices added — as long as that device had synced it before archiving;
+  if both sides added turns, you get a conflict with both versions kept. With shared
+  records, the archived state shows on every device, but only the device that archived it
+  moves the file, and restoring it elsewhere does not move it back: if Codex on that device
+  then says the session is archived, archive and restore it there once. The plugin never
+  writes to or syncs from the archive folder, and its restore and conflict screens will not
+  put a copy beside an archived one. If an older version of this plugin already copied an
+  archived conversation back, that copy stays and keeps syncing, and unarchiving it later can
+  raise a conflict.
 
 Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
 its records, but its sessions are not synced.
@@ -281,12 +294,12 @@ anywhere. `main.ts` marks the call site with the same explanation.
 
 ```bash
 npm ci
-npm run verify   # typecheck, lint, secret/docs gates, ~1200 tests, build, bundle checks
+npm run verify   # typecheck, lint, secret/docs gates, ~1250 tests, build, bundle checks
 ```
 
 Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 [testing & acceptance](docs/zh-CN/testing.md) · [measured findings](docs/zh-CN/findings/).
-Every behavioural claim above traces to a decision record (ADR 1–78) and, where it
+Every behavioural claim above traces to a decision record (ADR 1–80) and, where it
 matters, to a real-machine measurement.
 
 ## License
@@ -304,7 +317,8 @@ A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接�
 - **只同步本 vault 的 Claudian 有记录的会话**;纯终端起的会话、没有 session id 的旧记录
   不同步。在 Claudian 里删除的会话不再有新会话从本机上传,但已在同步目录里的会话文件照常
   双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,在本机删掉的对话留在删掉的状态,可用命令
-  「Bring back conversations deleted on this device」取回。
+  「Bring back conversations deleted on this device」取回。在本机归档的 Codex 对话留在
+  Codex 的归档目录里,不会被拉回活动目录。
 - **合并只做前缀快进**,从不信时间戳;双机分叉 = 冲突,两个版本都保留,由你选择。
   覆盖前必备份;不认识的文件永远原地不动;不传播删除。
 - **请勿把 `.claudian/` 排除在你的 vault 同步之外**——Claudian 的会话列表靠它;

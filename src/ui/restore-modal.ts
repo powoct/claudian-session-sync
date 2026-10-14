@@ -93,7 +93,8 @@ export class RestoreModal extends Modal {
     const restorable =
       backup.neutralRel !== null &&
       backup.liveRelation !== "identical" &&
-      backup.liveRelation !== "unknown";
+      backup.liveRelation !== "unknown" &&
+      !(backup.outcome === "archived-here" && !backup.remote);
     const button = buttons.createEl("button", { text: "Restore this version" });
     button.disabled = !restorable;
     if (restorable) {
@@ -163,6 +164,13 @@ export function describeWhatFollows(backup: BackupEntry): string {
   if (backup.liveRelation === "identical") {
     return "This is what the file already holds — there is nothing to put back.";
   }
+  if (backup.outcome === "archived-here" && !backup.remote) {
+    return (
+      "This conversation is archived on this machine. Putting this version back would make a " +
+      "second, active copy beside the archived one, so it is not offered — unarchive the " +
+      "conversation first, and this row compares as usual."
+    );
+  }
   const here =
     backup.liveRelation === "absent"
       ? "Nothing is there now, so this puts the session back in place."
@@ -218,6 +226,11 @@ function describeNextSync(backup: BackupEntry): string {
         "This machine is keeping this conversation off itself because it was deleted here, so " +
         "the next sync does not copy it here. Run \"Bring back conversations deleted on this " +
         "device\" if you want it back on this machine."
+      );
+    case "archived-here":
+      return (
+        "This conversation is archived on this machine, so the next sync does not copy it here. " +
+        "Unarchive it and the two sides are compared as usual."
       );
     default:
       return "What the next sync will do with it cannot be worked out from here.";
@@ -275,6 +288,11 @@ export function describeRestore(
       );
     case "unknown-backup":
       return "That backup is no longer listed. Reopen this list to see what is there now.";
+    case "target-archived":
+      return (
+        "That conversation is archived on this machine, so nothing was put back — it would have " +
+        "made a second, active copy. Unarchive it first."
+      );
     default:
       return `Could not restore it: ${outcome.reason}.`;
   }

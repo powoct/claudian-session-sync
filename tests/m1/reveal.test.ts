@@ -70,6 +70,7 @@ const conflictEntry = {
   standing: "in-dispute" as const,
     reason: null,
     externalCopy: null,
+    localArchived: false,
 } as ConflictEntry;
 
 function stubRuntime(opened: string[], succeeds: boolean) {

@@ -143,6 +143,18 @@ export interface ProviderAdapter {
   /** Where a neutral-relative file lands locally. Must realpath before escaping. */
   targetPathFor(neutralRel: string): Promise<string>;
   /**
+   * Where the CLI keeps this file once the user has archived the session, or
+   * null when the path is not one of this provider's (ADR-79).
+   *
+   * Asked only about a file missing from `targetPathFor`: a regular file here
+   * means the session is on this machine, archived, and copying the sync
+   * folder's copy back would hand the CLI a second one. Never written, never
+   * read for its bytes, never listed.
+   *
+   * Optional: only Codex moves a session out of the place it was written.
+   */
+  archivedPathFor?(neutralRel: string): string | null;
+  /**
    * Sessions on this machine that are missing their commit point (§6.6).
    *
    * Separate from `listSessions` on purpose: that one deliberately drops a
