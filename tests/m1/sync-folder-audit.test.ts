@@ -19,7 +19,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type HarnessOptions, RuntimeHarness } from "../helpers/runtime-harness";
 import { assignToDevice, deleteRecord, legacyPeerDelete, saveRecord, store } from "../helpers/claudian-2320";
-import type { SyncFolderAudit } from "../../src/orchestration/sync-folder-audit";
+import { type SyncFolderAudit, auditSyncFolder } from "../../src/orchestration/sync-folder-audit";
+import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
+import { sequentialIdGen } from "../../src/infra/clock";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
@@ -231,6 +234,43 @@ describe("① conversations kept off this device", () => {
   }, 60_000);
 });
 
+describe("① a held record whose copy will not answer", () => {
+  it("is listed as unreadable, not counted as gone from the sync folder", async () => {
+    const root = makeRealTmpDir("aiss-h8-");
+    try {
+      const real = createNodeFsGateway({ ids: sequentialIdGen(), platform: process.platform, pid: process.pid, sleep: async () => undefined });
+      const replicaRoot = path.join(root, "sync", "ws");
+      const copy = path.join(replicaRoot, "claudian", `${CONV}.meta.json`);
+      await write(copy, JSON.stringify({ id: CONV, providerId: "claude", sessionId: S1 }));
+      const fs = {
+        ...real,
+        lstat: async (target: string) => {
+          if (path.resolve(target) === copy) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+          return real.lstat(target);
+        },
+      };
+      const hold = { kind: "deleted-here", sinceMs: 1, passes: 2, announced: true, replicaSize: 1, replicaMtimeMs: 1, replicaDigest: null, releaseRequested: false } as const;
+      const result = await auditSyncFolder({
+        fs,
+        joinPath: path.join,
+        replicaRoot,
+        vaultRealPath: path.join(root, "vault"),
+        providers: [],
+        deletedHere: {
+          status: "tracked",
+          file: { schemaVersion: 1, records: { [`claudian/${CONV}.meta.json`]: { witnessedHash: "x", hold } } },
+        },
+        legacyStillListed: false,
+        maxRecordBytes: 1024 * 1024,
+      });
+      expect(result.heldNotInFolder).toBe(0);
+      expect(result.held.map((h) => [h.conversationId, h.recordProvider, h.sessions])).toEqual([[CONV, null, []]]);
+    } finally {
+      removeTree(root);
+    }
+  });
+});
+
 describe("② sessions with no record in this vault", () => {
   it("are listed from every provider's folder, looked for here only for providers switched on", async () => {
     const { m, ws } = await machine();
@@ -284,6 +324,27 @@ describe("② sessions with no record in this vault", () => {
 
     const result = await audit(m);
     expect(ids(result.unrecorded)).toEqual([]);
+  });
+
+  it("leaves out a pending fork's source even when the source conversation has no record here", async () => {
+    const { m, ws } = await machine();
+    await write(m.replicaPath(ws, S1), "x");
+    await saveRecord(m, CONV, {
+      providerId: "claude",
+      sessionId: null,
+      providerState: { forkSource: { sessionId: S1, resumeAt: "m1" } },
+    });
+
+    expect(ids((await audit(m)).unrecorded)).toEqual([]);
+  });
+
+  it("matches ids whatever their case, as Claudian compares them", async () => {
+    const { m, ws } = await machine();
+    const LETTERS = "abcdef12-abcd-4abc-8abc-abcdefabcdef";
+    await write(m.replicaPath(ws, LETTERS), "x");
+    await saveRecord(m, CONV, { providerId: "claude", sessionId: LETTERS.toUpperCase() });
+
+    expect(ids((await audit(m)).unrecorded)).toEqual([]);
   });
 
   it("counts a Codex rollout archived here as on this device", async () => {

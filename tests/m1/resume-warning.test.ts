@@ -20,6 +20,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { PassReport } from "../../src/orchestration/pass-report";
 import { type HarnessOptions, RuntimeHarness } from "../helpers/runtime-harness";
 import { saveRecord, store } from "../helpers/claudian-2320";
+import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
+import { createNodeFsGateway } from "../../src/infra/node-fs-gateway";
+import { sequentialIdGen } from "../../src/infra/clock";
+import { findHistoryNotHere } from "../../src/orchestration/resume-warning";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
@@ -285,6 +289,110 @@ describe("the pop-up", () => {
       expect(m.runtime.takeAnnouncement()).toBeNull();
     }
   }, 30_000);
+});
+
+describe("the pop-up and the Claude Code switch", () => {
+  it("comes again after the provider was switched off and on — the first pass after is a fresh look", async () => {
+    const { m, ws } = await machine();
+    await m.runtime.updateSettings({ maxFileSizeMB: 1 });
+    await saveRecord(m, CONV, { providerId: "claude", sessionId: S1 });
+    await inFolder(m, ws, S1, LARGE);
+    await m.runtime.syncNow();
+    expect(popup(m)).toContain(`${POPUP} 1`);
+
+    await m.runtime.setProvider("claude-code", { enabled: false });
+    await m.runtime.syncNow();
+    expect(warnings(m)).toEqual([]);
+    await m.runtime.setProvider("claude-code", { enabled: true });
+    await m.runtime.syncNow();
+    expect(warnings(m)).toHaveLength(1);
+    expect(popup(m)).toContain(`${POPUP} 1`);
+  }, 30_000);
+});
+
+describe("a pass another holds the lock for", () => {
+  it("says nothing about history and changes nothing — another pass is moving files right now", async () => {
+    const { m, ws } = await machine();
+    await m.runtime.updateSettings({ maxFileSizeMB: 1 });
+    await saveRecord(m, CONV, { providerId: "claude", sessionId: S1 });
+    await inFolder(m, ws, S1, LARGE);
+    const lock = path.join(m.homedir, ".claudian-session-sync", "locks", `${ws}.lock`);
+    await fsp.mkdir(path.dirname(lock), { recursive: true });
+    const now = m.nowMs();
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({ pid: 1, machineId: "another-machine", epoch: 7, acquiredAtMs: now, heartbeatMs: now }),
+    );
+
+    await m.runtime.syncNow();
+    const report = m.runtime.lastPassReport() as PassReport;
+    expect(report.outcome).toBe("aborted");
+    expect(report.notices.filter((n) => n.startsWith("History not here yet"))).toEqual([]);
+    expect(m.runtime.takeAnnouncement()).toBeNull();
+
+    // Released: the first pass that gets the lock is still the first look.
+    await fsp.rm(lock);
+    await m.runtime.syncNow();
+    expect(warnings(m)).toHaveLength(1);
+    expect(popup(m)).toContain(`${POPUP} 1`);
+  }, 30_000);
+});
+
+describe("findHistoryNotHere on its own", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    while (roots.length) removeTree(roots.pop() as string);
+  });
+
+  function setup() {
+    const root = makeRealTmpDir("aiss-h10-");
+    roots.push(root);
+    const fs = createNodeFsGateway({ ids: sequentialIdGen(), platform: process.platform, pid: process.pid, sleep: async () => undefined });
+    const storeDir = path.join(root, "vault", ".claudian", "sessions");
+    const projectDir = path.join(root, "projects", "vault");
+    const replicaDir = path.join(root, "sync", "ws", "claude-code");
+    const deps = { fs, joinPath: path.join, storeDir, deviceKey: null, projectDir, replicaDir, maxRecordBytes: 1024 };
+    const record = async (conv: string, body: Record<string, unknown>) => {
+      await fsp.mkdir(storeDir, { recursive: true });
+      await fsp.writeFile(path.join(storeDir, `${conv}.meta.json`), JSON.stringify({ id: conv, providerId: "claude", ...body }));
+    };
+    const pushed = async (sessionId: string) => {
+      await fsp.mkdir(replicaDir, { recursive: true });
+      await fsp.writeFile(path.join(replicaDir, `${sessionId}.jsonl`), LINES);
+    };
+    return { deps, record, pushed, replicaDir };
+  }
+
+  it("does not answer while the sync folder has no Claude Code folder — gone for a moment looks the same", async () => {
+    const { deps, record } = setup();
+    await record(CONV, { sessionId: S1 });
+    expect(await findHistoryNotHere(deps)).toBeNull();
+  });
+
+  it("counts a missing projects folder as holding nothing", async () => {
+    const { deps, record, pushed } = setup();
+    await record(CONV, { sessionId: S1 });
+    await pushed(S1);
+    expect((await findHistoryNotHere(deps))?.entries.map((e) => e.conversationId)).toEqual([CONV]);
+  });
+
+  it("leaves a record larger than Max file size unread, as unsure", async () => {
+    const { deps, record, pushed } = setup();
+    await record(CONV, { sessionId: S1, pad: "x".repeat(2048) });
+    await pushed(S1);
+    const result = await findHistoryNotHere(deps);
+    expect(result?.entries).toEqual([]);
+    expect([...(result?.unsure ?? [])]).toEqual([CONV]);
+  });
+
+  it("returns the most recently active first, then the newest conversation id", async () => {
+    const { deps, record, pushed } = setup();
+    await record(CONV, { sessionId: S1, lastActivityAt: 300 });
+    await record(CONV2, { sessionId: S2, createdAt: 100 });
+    await record(CONV3, { sessionId: S3, updatedAt: 100 });
+    for (const id of [S1, S2, S3]) await pushed(id);
+    expect((await findHistoryNotHere(deps))?.entries.map((e) => e.conversationId)).toEqual([CONV, CONV3, CONV2]);
+  });
 });
 
 describe("the report", () => {
