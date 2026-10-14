@@ -495,16 +495,54 @@ describe("the census that would have caught this one (OQ-32)", () => {
     expect(text, "the consequence, not just the fact").toContain("not travelling");
   });
 
-  it("fires for a compressed sibling, which is the next shape upstream will ship", async () => {
-    // `local_thread_store_compression` is off by default today, but when it is
-    // turned on the rollout becomes `.jsonl.zst` and the plain file is
-    // deleted. That must arrive as a sentence, not as silence.
+  it("fires for a compressed sibling, and says what it is", async () => {
+    // `local_thread_store_compression` is off by default upstream, and on for
+    // real on both machines of round 10 (OQ-31): the rollout becomes
+    // `.jsonl.zst` and the plain file is deleted. That must arrive as a
+    // sentence, not as silence — and since ADR-83 a sentence about
+    // compression, not about an update.
     const { adapter, sessions } = await world({ recorded: [SID] });
     const dir = path.join(sessions, "2026", "08", "06");
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.zst`), "z");
 
-    expect(await warn(adapter)).toContain("does not recognise");
+    const text = await warn(adapter);
+    expect(text).toContain("Codex has compressed 1 of this vault's conversation file(s)");
+    expect(text).not.toContain("does not recognise");
+  });
+
+  it("does not count a compressed copy left in sessions/ after its plain file was archived", async () => {
+    // A pair ADR-83 left, then archived in Codex: the plain file moves to the
+    // archive and the compressed one stays where it was (archive_thread.rs).
+    // It is not a conversation that has not travelled.
+    const { adapter, sessions } = await world({ recorded: [SID] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${rollout(SID)}.zst`), "z");
+    const archive = path.join(path.dirname(sessions), "archived_sessions");
+    await fsp.mkdir(archive, { recursive: true });
+    await fsp.writeFile(path.join(archive, rollout(SID)), "{}\n");
+
+    expect(await warn(adapter)).toBe("");
+  });
+
+  it("counts only this vault's compressed conversations, and not one Codex no longer reads", async () => {
+    // The sessions folder is every vault's and every Codex client's: another
+    // vault's compressed thread is not this vault's news. And a `.zst` beside
+    // its plain file is what ADR-83 leaves when a peer's turns land — Codex
+    // reads the plain one, so the compressed one is nothing to act on.
+    const THIRD = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    const { adapter, plant, sessions } = await world({ recorded: [SID, THIRD] });
+    const dir = path.join(sessions, "2026", "08", "06");
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, `${rollout(SID)}.zst`), "z");
+    await fsp.writeFile(path.join(dir, `${rollout(OTHER)}.zst`), "z");
+    await plant(THIRD);
+    await fsp.writeFile(path.join(dir, `${rollout(THIRD)}.zst`), "z");
+
+    const text = await warn(adapter);
+    expect(text).toContain("Codex has compressed 1 of this vault's conversation file(s)");
+    expect(text).not.toContain("does not recognise");
   });
 
   it("says nothing when every file is one it knows", async () => {
@@ -528,6 +566,9 @@ describe("the census that would have caught this one (OQ-32)", () => {
       "{}\n",
     );
     await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.aiss-tmp-42-abcd`), "{}\n");
+    // Codex's own, from its compression worker (codex-rs `compression.rs`).
+    await fsp.writeFile(path.join(dir, "rollout-compress-Xq3vT9.tmp"), "z");
+    await fsp.writeFile(path.join(dir, `rollout-2026-08-06T12-43-59-${SID}.jsonl.decompress.4242.0.tmp`), "{}\n");
 
     expect(await warn(adapter)).toBe("");
   });

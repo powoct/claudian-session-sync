@@ -50,6 +50,8 @@ export interface FsGateway {
   readFile(path: string): Promise<Uint8Array>;
   /** Last `min(size, n)` bytes, for the E0 tail hash without reading it all. */
   readTail(path: string, n: number): Promise<Uint8Array>;
+  /** First `min(size, n)` bytes — a compressed file's frame header (ADR-83). */
+  readHead(path: string, n: number): Promise<Uint8Array>;
 
   // ── write side: validated paths only ──
 

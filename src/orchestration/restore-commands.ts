@@ -35,7 +35,8 @@ import { QUARANTINE_DIR } from "./conflict-commands";
 import { parseBackupName } from "../infra/backup-store";
 import type { LogicalId } from "../domain/types";
 import type { MintOutcome } from "./sync-engine";
-import type { ProviderAdapter } from "../providers/provider-adapter";
+import { type ProviderAdapter, archivedPathsFor } from "../providers/provider-adapter";
+import { lookForCompressed } from "./compressed-here";
 import { compareRecordwise } from "../domain/equivalence";
 
 /** Only ever compared and displayed as a prefix (§11.1). */
@@ -102,6 +103,14 @@ export interface BackupEntry {
      * archived one, so the restore is refused.
      */
     | "archived-here"
+    /**
+     * A Codex rollout this machine holds compressed (ADR-83). From the sync
+     * folder: the next sync copies it here only if it continues exactly what
+     * was compressed. From this machine: a plain file put back beside the
+     * compressed one is the file Codex reads from then on, so turns only the
+     * compressed one holds would drop out of sight — the restore is refused.
+     */
+    | "compressed-here"
     | "unknown";
 }
 
@@ -125,6 +134,8 @@ export type RestoreOutcome =
         | "target-exists"
         /** A Codex rollout archived on this machine (ADR-79); unarchive it first. */
         | "target-archived"
+        /** A Codex rollout compressed on this machine (ADR-83); resume it first. */
+        | "target-compressed"
         | "remote-not-ready"
         | "sync-in-progress"
         | "path-rejected"
@@ -256,9 +267,9 @@ export async function listBackups(
     }
     const own = remote ? sides.remote : sides.local;
     const other = remote ? sides.local : sides.remote;
-    // Asked whenever this machine's copy is missing: the engine's ADR-79 rule
-    // decides what happens to a version put back on either side.
-    const archived = neutralRel !== null && sides.local === null && (await archivedHere(deps, provider, neutralRel));
+    // Asked whenever this machine's copy is missing: the engine's ADR-79 and
+    // ADR-83 rules decide what happens to a version put back on either side.
+    const kept = neutralRel !== null && sides.local === null ? await keptHere(deps, provider, neutralRel) : null;
     entries.push({
       path,
       name,
@@ -280,7 +291,7 @@ export async function listBackups(
               ? "identical"
               : "differs",
       liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
-      outcome: !remote && archived ? "archived-here" : predict(deps, bytes, other, neutralRel, provider, archived),
+      outcome: !remote && kept !== null ? kept : predict(deps, bytes, other, neutralRel, provider, kept),
     });
   }
 
@@ -371,9 +382,12 @@ export async function restoreBackup(
     // Not into `sessions/` beside an archived copy: Codex would hold two files
     // for one thread, and its unarchive would rename the archived one over
     // this (ADR-79).
-    if (!entry.remote && (await archivedHere(deps, provider, entry.neutralRel))) {
-      return { ok: false, reason: "target-archived" };
-    }
+    // Nor beside a compressed one: Codex would read this file from then on,
+    // and turns only the compressed copy holds would drop out of sight
+    // (ADR-83).
+    const kept = entry.remote ? null : await keptHere(deps, provider, entry.neutralRel);
+    if (kept === "archived-here") return { ok: false, reason: "target-archived" };
+    if (kept === "compressed-here") return { ok: false, reason: "target-compressed" };
     // Nothing there to preserve, so I1 is not implicated: this is a creation,
     // not an overwrite, and it commits with no-replace so a pass that lands
     // the session first wins rather than being silently clobbered.
@@ -554,13 +568,13 @@ function predict(
   other: Uint8Array | null,
   neutralRel: string | null,
   provider: RestoreCommandDeps["providers"][number],
-  archived: boolean,
+  kept: "archived-here" | "compressed-here" | null,
 ): BackupEntry["outcome"] {
   if (neutralRel === null) return "unknown";
   const mode = provider.adapter.classifyNeutral(neutralRel)?.mode ?? null;
   if (other === null) {
     if (deps.heldHere?.has(neutralRel) === true) return "held-here";
-    return archived ? "archived-here" : "will-propagate";
+    return kept ?? "will-propagate";
   }
   if (deps.hashBytes(other) === deps.hashBytes(bytes)) return "nothing";
   if (mode !== "append-jsonl") return "whole-file";
@@ -623,17 +637,23 @@ function shortHash(hash: string): string {
 }
 
 /**
- * The engine's ADR-79 question, asked of a row whose local side is missing:
- * is the session archived on this machine? A read that fails answers no,
- * which predicts the copy the engine would then also make.
+ * The engine's ADR-79 and ADR-83 questions, in its order, asked of a row
+ * whose local side is missing: is the session archived on this machine, or
+ * compressed where it was? A read that fails answers no — except for a
+ * compressed file that cannot be asked about, which answers yes: this is
+ * asked before a write, and writing beside it is the one outcome that hides
+ * turns.
  */
-async function archivedHere(
+async function keptHere(
   deps: RestoreCommandDeps,
   provider: RestoreCommandDeps["providers"][number],
   neutralRel: string,
-): Promise<boolean> {
-  const archived = provider.adapter.archivedPathFor?.(neutralRel) ?? null;
-  if (archived === null) return false;
-  const st = await deps.fs.lstat(archived).catch(() => null);
-  return st !== null && st.isFile;
+): Promise<"archived-here" | "compressed-here" | null> {
+  for (const archived of archivedPathsFor(provider.adapter, neutralRel)) {
+    const st = await deps.fs.lstat(archived).catch(() => null);
+    if (st !== null && st.isFile) return "archived-here";
+  }
+  const target = await provider.adapter.targetPathFor(neutralRel).catch(() => null);
+  if (target === null) return null;
+  return (await lookForCompressed(deps.fs, provider.adapter, target)).kind === "none" ? null : "compressed-here";
 }

@@ -38,9 +38,10 @@
  */
 import type { FsGateway } from "../infra/fs-gateway";
 import type { ClaudianRecordsFile } from "../infra/home-store";
-import type { ProviderAdapter } from "../providers/provider-adapter";
+import { type ProviderAdapter, archivedPathsFor } from "../providers/provider-adapter";
 import { claudeBoundSessionIds, claudeResume, claudianRecordOf } from "../domain/deleted-here";
 import { isSessionUuid } from "../providers/vault-scope";
+import { lookForCompressed } from "./compressed-here";
 
 /**
  * How deep a session's files sit below its provider's folder: Codex's
@@ -80,7 +81,7 @@ export interface AuditDeps {
 }
 
 /** Where a session is on this device; "unchecked" for a provider switched off here. */
-export type Whereabouts = "here" | "archived-here" | "not-here" | "unchecked";
+export type Whereabouts = "here" | "compressed-here" | "archived-here" | "not-here" | "unchecked";
 
 export interface AuditSession {
   readonly providerId: string;
@@ -254,8 +255,17 @@ async function finish(deps: AuditDeps, provider: ProviderSessions, draft: Draft)
       here = "here";
       break;
     }
-    const archived = provider.adapter.archivedPathFor?.(rel) ?? null;
-    if (archived !== null && (await isFile(deps, archived))) here = "archived-here";
+    // In the engine's order (ADR-79 before ADR-83): an archived copy is what
+    // the next sync acts on, even with a compressed one still in `sessions/`
+    // — which is what archiving leaves behind after a peer's newer turns
+    // landed beside the compressed file.
+    for (const archived of archivedPathsFor(provider.adapter, rel)) {
+      if (await isFile(deps, archived)) here = "archived-here";
+    }
+    if (here !== "not-here" || target === null) continue;
+    if ((await lookForCompressed(deps.fs, provider.adapter, target)).kind === "compressed") {
+      here = "compressed-here";
+    }
   }
   return {
     providerId: draft.providerId,

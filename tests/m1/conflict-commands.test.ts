@@ -319,6 +319,7 @@ describe("the heading that has to identify a conflict (acceptance r4, F-4)", () 
       reason: null,
       externalCopy: null,
       localArchived: false,
+      localCompressed: false,
       ...over,
     }) as ConflictEntry;
 
@@ -371,6 +372,7 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
       reason: null,
       externalCopy: null,
       localArchived: false,
+      localCompressed: false,
     }) as ConflictEntry;
 
   it("tells the two records of one conversation apart", () => {
@@ -387,7 +389,7 @@ describe("the heading, on a provider whose ids are not uuids (acceptance r5, F-3
   it("still abbreviates a uuid, and still names the file when the name needs it", () => {
     // The three providers whose ids are uuids must read exactly as before.
     const uuid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], standing: "in-dispute" as const, reason: null, externalCopy: null, localArchived: false };
+    const base = { conflictId: "c", detectedAt: "", directory: "/q", branches: [], standing: "in-dispute" as const, reason: null, externalCopy: null, localArchived: false, localCompressed: false };
     expect(
       describeConflict({
         ...base, providerId: "claude-code", logicalId: uuid, logicalIdPrefix: "3f2504e0",
@@ -409,7 +411,7 @@ describe("the sentence for a conflict the standing paragraph would describe wron
       conflictId: "c", providerId: "claudian", logicalId: "conv-1-a.meta",
       logicalIdPrefix: "conv-1-a", detectedAt: "", directory: "/q",
       neutralRel: "claudian/conv-1-a.meta.json", branches: [], standing: "in-dispute" as const,
-      reason: null, externalCopy: null, localArchived: false, ...over,
+      reason: null, externalCopy: null, localArchived: false, localCompressed: false, ...over,
     }) as ConflictEntry;
 
   it("says nothing for an ordinary fork — the standing paragraph is right there", () => {

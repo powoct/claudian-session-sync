@@ -41,7 +41,13 @@ export type Action =
    * A Codex rollout this machine has archived, kept out of `sessions/`
    * (ADR-79). Decided by the engine before the budget, never by `plan()`.
    */
-  | "SKIP_ARCHIVED_HERE";
+  | "SKIP_ARCHIVED_HERE"
+  /**
+   * ADR-83: the sync folder's copy of a Codex rollout that Codex compressed on
+   * this machine, held back because it carries nothing this machine can show
+   * is new. Like the archive's, a standing state, not an error.
+   */
+  | "SKIP_COMPRESSED_HERE";
 
 export type RemoteReadiness = "ready" | "not-ready" | "unsupported-format";
 

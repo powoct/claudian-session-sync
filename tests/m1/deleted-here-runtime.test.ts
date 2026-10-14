@@ -407,6 +407,29 @@ describe("Claude's own automatic delete is not the user's (H3)", () => {
     expect(report.actions.find((r) => r.neutralRel === META)?.reason).toBe("remote-only-history-not-here");
     expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
   }, 90_000);
+
+  it("judges it in the pass that pulled the transcript even when the budget is spent", async () => {
+    // The pull is what makes R2 visible, and it is visible for that one pass
+    // only: put off by the budget to the next, the record would see a
+    // transcript that is here and be held as the user's delete (review
+    // 2026-10-14). So its first judgement is never put off.
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "claude", sessionId: S1, title: "t" });
+    await a.settle();
+    const b = await machine("2.3.20", a);
+    await b.settle();
+    await fsp.writeFile(b.sessionPath(S1), '{"type":"user","text":"hello"}\n');
+    for (let i = 0; i < 3; i++) await pass(b);
+    await a.runtime.updateSettings({ maxFilesPerPass: 1 });
+
+    await pass(a);
+    await deleteRecord(a, CONV); // R2
+    const { report } = await pass(a);
+
+    expect(report.actions.find((r) => r.neutralRel === `claude-code/${S1}.jsonl`)?.action).toBe("PULL_NEW");
+    expect(report.actions.find((r) => r.neutralRel === META)?.reason).toBe("remote-only-history-not-here");
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
+  }, 90_000);
 });
 
 describe("another device keeps using a conversation deleted here", () => {
@@ -718,6 +741,80 @@ describe("a recreated store", () => {
     expect(await exists(local(a, `${KEEP}.meta.json`)), "kept off a recreated store").toBe(true);
     expect(await exists(local(a, `${CONV}.meta.json`)), "a deletion undone by the recreation").toBe(false);
     expect(seen.announcements).toEqual([]);
+  }, 90_000);
+
+  async function recreate(a: RuntimeHarness): Promise<void> {
+    const old = `${store(a)}-old`;
+    await fsp.rename(store(a), old);
+    await fsp.mkdir(path.join(store(a), "devices", DEVICE), { recursive: true });
+    await fsp.rm(old, { recursive: true });
+  }
+
+  it("restores everything missing even when there are more records than the budget", async () => {
+    // The recreation is seen on one pass; a record whose judgement the budget
+    // put off to the next would be judged against a store that looked
+    // healthy, and held as deleted (review 2026-10-14).
+    const a = await machine();
+    const convs = Array.from({ length: 6 }, (_, n) => `conv-178642268700${n}-many${n}`);
+    for (const conv of convs) await saveRecord(a, conv, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await a.runtime.updateSettings({ maxFilesPerPass: 2 });
+    await recreate(a);
+
+    const seen = await restarts(a, 2);
+
+    for (const conv of convs) expect(await exists(local(a, `${conv}.meta.json`)), conv).toBe(true);
+    expect(seen.rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
+    expect(seen.announcements).toEqual([]);
+  }, 90_000);
+
+  it("still counts as recreated for a record whose copy in the sync folder was moving that pass", async () => {
+    // Another device saved the conversation just as this one found its store
+    // recreated: the record is put off as unsettled, and judged a pass later
+    // — still as a record missing from a recreated store.
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "one" });
+    await a.settle();
+    await recreate(a);
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const record = JSON.parse(await fsp.readFile(shared, "utf8")) as Record<string, unknown>;
+    await fsp.writeFile(shared, JSON.stringify({ ...record, title: "two" }));
+
+    const first = await pass(a);
+    expect(first.report.actions.find((r) => r.neutralRel === META)?.action).toBe("DEFER");
+    const seen = await restarts(a, 1);
+
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(true);
+    expect(seen.rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
+    expect(seen.announcements).toEqual([]);
+
+    // Judged, so the recreation is over for it: deleting it now is a delete.
+    await deleteRecord(a, CONV);
+    const after = await restarts(a, 1);
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+    expect(after.rows.some((r) => r.neutralRel === META && r.action === "SKIP_DELETED_HERE")).toBe(true);
+  }, 90_000);
+
+  it("still charges a record that has never been here — only a deletion's first judgement is free", async () => {
+    const a = await machine();
+    await a.settle();
+    const b = await machine("2.3.20", a);
+    const convs = Array.from({ length: 3 }, (_, n) => `conv-178642268710${n}-peer${n}`);
+    for (const conv of convs) await saveRecord(b, conv, { providerId: "codex", sessionId: null });
+    for (let i = 0; i < 3; i++) await pass(b);
+    await a.runtime.updateSettings({ maxFilesPerPass: 1 });
+
+    const reports: PassReport[] = [];
+    // Long enough for the allowance for the starved: at a budget of one, the
+    // pass's scrub sample can take the slot.
+    for (let i = 0; i < 10; i++) reports.push((await pass(a)).report);
+
+    const isPeer = (r: ActionEntry) => convs.some((conv) => r.neutralRel === `claudian/${conv}.meta.json`);
+    const first = reports.find((report) => report.actions.some((r) => isPeer(r) && r.action === "PULL_NEW"));
+    expect(first, "none of them arrived").toBeDefined();
+    expect(first?.actions.filter((r) => isPeer(r) && r.action === "PULL_NEW")).toHaveLength(1);
+    expect(first?.actions.filter((r) => isPeer(r) && r.reason === "budget-exhausted").length).toBeGreaterThan(0);
+    for (const conv of convs) expect(await exists(local(a, `${conv}.meta.json`)), conv).toBe(true);
   }, 90_000);
 });
 

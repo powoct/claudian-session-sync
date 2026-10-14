@@ -113,7 +113,7 @@ On each machine:
   sync later — a conversation that arrives while Obsidian is running is not in Claudian's
   list until the next launch, and its history usually lands a sync later anyway. Wait for
   the sync that brings it. It is likeliest on a device's first syncs, or for a session file
-  over *Max file size* (which travels with the vault, so this only happens when the limit
+  over *Maximum file size* (which travels with the vault, so this only happens when the limit
   was lowered after the file was copied, or your devices keep different limits). Opening
   the conversation is harmless, though it can look empty until the history arrives. If your
   vault sync carries `.obsidian/workspace.json`, Claudian may reopen such a conversation's
@@ -243,6 +243,23 @@ Later Claudian releases changed three more things worth knowing:
   archived conversation back, that copy stays and keeps syncing, and unarchiving it later can
   raise a conflict.
 
+Codex can **compress** a session left untouched for a week into `<name>.jsonl.zst` beside it,
+in the active folder and in the archive (when its experimental compression switch is on, and
+whenever a Codex client sends the experimental `rollout/compress` request, which does not need
+the switch). This version does not sync compressed files, and reads only a compressed file's
+18-byte header, never its contents. A compressed conversation is left compressed: the plugin
+does not copy the sync folder's version back beside it (`compressed-here` in the report),
+except when that version is exactly what was compressed plus turns another device added — the
+header's recorded length (or, for files from Codex before 0.152, the modification time Codex
+copies onto them) shows what was compressed. Then it lands next to it, Codex reads it from then
+on, and the older compressed copy, which Codex no longer uses, can be deleted. When it cannot
+tell, it holds back and names the conversation: open it in Codex once and quit without sending,
+let the next sync run, then continue — sending first can split it into two versions. Resuming a
+compressed conversation turns it back into a plain file, which syncs as usual; a compressed one
+your other devices never had stays on this device until you do. An archived session Codex has
+compressed still counts as archived. Restoring an older version over a compressed conversation
+is refused, and so is resolving a conflict on one, until it has been opened in Codex once.
+
 Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
 its records, but its sessions are not synced.
 
@@ -316,7 +333,15 @@ anywhere. `main.ts` marks the call site with the same explanation.
 - Two machines writing the **same session at the same time** is detected and contained
   (conflict, both versions kept), not prevented — this is a file-sync architecture, not
   a real-time collaboration protocol.
-- Files larger than *Max file size* (default 64 MB) are skipped and reported.
+- Files larger than *Maximum file size* (default 64 MB) are skipped and reported.
+- Each sync reads at most `maxFilesPerPass` files that need reading (default 200; change it
+  in the plugin's `data.json` while Obsidian is closed — it is not on the settings screen).
+  Sessions answered from the cache do not count, except when a periodic full check re-reads
+  them (each file at least daily); files over *Maximum file size* are skipped without being
+  read. A session turned away five syncs in a row gets through on a separate allowance of 20
+  files per sync, longest-waiting first, and the report says so when that queue is backing up.
+  A conversation record deleted on this device is always judged in the sync that finds it
+  gone, whatever the limit.
 - The CLIs themselves append metadata to session files — Claude Code, for instance,
   appends title records even when you merely *open* a session. That is normal, absorbed
   by the merge, and not this plugin (or Claudian) writing to your files.
@@ -331,12 +356,12 @@ anywhere. `main.ts` marks the call site with the same explanation.
 
 ```bash
 npm ci
-npm run verify   # typecheck, lint, secret/docs gates, ~1350 tests, build, bundle checks
+npm run verify   # typecheck, lint, secret/docs gates, ~1400 tests, build, bundle checks
 ```
 
 Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 [testing & acceptance](docs/zh-CN/testing.md) · [measured findings](docs/zh-CN/findings/).
-Every behavioural claim above traces to a decision record (ADR 1–81) and, where it
+Every behavioural claim above traces to a decision record (ADR 1–83) and, where it
 matters, to a real-machine measurement.
 
 ## License
@@ -355,7 +380,10 @@ A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接�
   不同步。在 Claudian 里删除的会话不再有新会话从本机上传,但已在同步目录里的会话文件照常
   双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,在本机删掉的对话留在删掉的状态,可用命令
   「Bring back conversations deleted on this device」取回。在本机归档的 Codex 对话留在
-  Codex 的归档目录里,不会被拉回活动目录。
+  Codex 的归档目录里,不会被拉回活动目录;被 Codex 压缩(`.jsonl.zst`)的对话同样不会被拉回,
+  除非同步目录里那份正是压缩内容加上别的机器新增的内容(凭压缩文件头里记的原长判断,不解压)。
+  压缩的文件本身不同步,在 Codex 里续接一次即恢复;插件说「无法判断」时,先在 Codex 里打开一次、
+  不发送就退出,等下一轮同步后再继续。
 - **历史没到之前别在对话里发送**:Claude 对话的会话文件还在同步目录里、没落到本机时发送,Claudian
   会删掉或重置这条对话;共享的对话,这个改动会随 vault 同步到你的其他机器。每轮同步后插件会检查这种状态,
   在报告里点名;Obsidian 启动后的第一轮、或同一条对话下一轮仍在等时,弹窗按标题点名。命令

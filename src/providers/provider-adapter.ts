@@ -155,6 +155,27 @@ export interface ProviderAdapter {
    */
   archivedPathFor?(neutralRel: string): string | null;
   /**
+   * Where the CLI keeps a compressed form of the file at `localPath`, or null
+   * (ADR-83). Codex compresses a rollout left untouched for a week into
+   * `<name>.jsonl.zst` beside it and removes the original; it reads the plain
+   * file whenever both exist, and turns the compressed one back into a plain
+   * file when the session is resumed.
+   *
+   * Asked of a target path, and of an archived one, that has nothing at it. A
+   * regular file here means the session is on this machine, compressed — not
+   * yet to arrive. Never written, never listed, and never decompressed: only
+   * its first `COMPRESSED_HEADER_BYTES` are read, for `compressedContentSize`.
+   *
+   * Optional: only Codex compresses its sessions.
+   */
+  compressedSiblingOf?(localPath: string): string | null;
+  /**
+   * How long the file was before it was compressed, as the compressed file's
+   * own header declares it — given at most its first `COMPRESSED_HEADER_BYTES`
+   * — or null when the header does not say (ADR-83).
+   */
+  compressedContentSize?(header: Uint8Array): number | null;
+  /**
    * Sessions on this machine that are missing their commit point (§6.6).
    *
    * Separate from `listSessions` on purpose: that one deliberately drops a
@@ -179,6 +200,24 @@ export interface ProviderAdapter {
 
   /** Tier B only; a no-op elsewhere. */
   reconcileLocalIndex(desired: readonly SessionGroup[]): Promise<void>;
+}
+
+/**
+ * Every path at which the provider's archive holds this session: the archived
+ * file, and its compressed form — Codex compresses archived rollouts as well
+ * (ADR-79, ADR-83). Empty for a provider without an archive.
+ */
+/** Enough of a compressed file for any header `compressedContentSize` reads. */
+export const COMPRESSED_HEADER_BYTES = 18;
+
+export function archivedPathsFor(
+  adapter: Pick<ProviderAdapter, "archivedPathFor" | "compressedSiblingOf">,
+  neutralRel: string,
+): string[] {
+  const archived = adapter.archivedPathFor?.(neutralRel) ?? null;
+  if (archived === null) return [];
+  const compressed = adapter.compressedSiblingOf?.(archived) ?? null;
+  return compressed === null ? [archived] : [archived, compressed];
 }
 
 export interface RecordNaming {

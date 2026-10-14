@@ -148,6 +148,11 @@ export function createPassState(input: PassStateInput): PassState {
         lastConvergedSize: size,
       });
     },
+    budgetSkips(rel) {
+      // `recordOutcomes` counts on whichever sides have an entry; a file only
+      // the sync folder has carries its count on the remote one.
+      return Math.max(local.get(rel)?.skippedForBudgetPasses ?? 0, remote.get(rel)?.skippedForBudgetPasses ?? 0);
+    },
   };
 
   const evidence: EvidenceCache = {
@@ -265,7 +270,13 @@ function recordVerified(
   });
 }
 
-const UNSETTLED = new Set(["CONFLICT", "DEFERRED", "FAILED_IO", "ABORTED_PRECONDITION"]);
+/**
+ * `SKIPPED_BUDGET` too (ADR-82): a file the budget turned away was not read,
+ * and the reason it was due to be — a scrub's sample, Verify all — is not
+ * asked again on its own. Without this, Verify all with more files than the
+ * budget verified the first `maxFilesPerPass` and quietly dropped the rest.
+ */
+const UNSETTLED = new Set(["CONFLICT", "DEFERRED", "FAILED_IO", "ABORTED_PRECONDITION", "SKIPPED_BUDGET"]);
 
 function isUnsettled(record: LedgerEntryRecord | undefined): boolean {
   if (!record) return false;

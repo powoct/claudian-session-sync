@@ -69,6 +69,16 @@ export interface ClaudianRecordsState {
    * one: the store was recreated, and absences this pass are not deletions.
    */
   observeStore(identity: string | null): boolean;
+  /**
+   * A record found missing when the store was recreated, whose judgement a
+   * pass put off: its absence is still not a deletion.
+   */
+  recreatedFor(rel: string): boolean;
+  /**
+   * The records whose recreated-store judgement this pass put off, replacing
+   * the last pass's. A record judged, or no longer missing, drops out.
+   */
+  carryRecreation(rels: ReadonlySet<string>): void;
 
   entries(): ReadonlyArray<readonly [string, ClaudianRecordEntry]>;
   toFile(): ClaudianRecordsFile;
@@ -105,6 +115,7 @@ export function seedClaudianRecords(
 export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianRecordsState {
   const records = new Map<string, ClaudianRecordEntry>(Object.entries(file.records));
   let storeIdentity = file.storeIdentity ?? null;
+  let recreatedPending = new Set(file.recreatedPending ?? []);
   let dirty = false;
 
   const set = (rel: string, entry: ClaudianRecordEntry) => {
@@ -203,11 +214,21 @@ export function createClaudianRecordsState(file: ClaudianRecordsFile): ClaudianR
       return recreated;
     },
 
+    recreatedFor: (rel) => recreatedPending.has(rel),
+
+    carryRecreation(rels) {
+      const same = rels.size === recreatedPending.size && [...rels].every((rel) => recreatedPending.has(rel));
+      if (same) return;
+      recreatedPending = new Set(rels);
+      dirty = true;
+    },
+
     entries: () => [...records],
 
     toFile: () => ({
       schemaVersion: STATE_SCHEMA_VERSION,
       ...(storeIdentity !== null ? { storeIdentity } : {}),
+      ...(recreatedPending.size > 0 ? { recreatedPending: [...recreatedPending].sort() } : {}),
       records: Object.fromEntries([...records].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
     }),
 

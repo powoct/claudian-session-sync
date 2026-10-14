@@ -28,10 +28,18 @@
  * adapter says about it is `archivedPathFor`: where the file would be, so the
  * engine can see that a rollout missing from `sessions/` is archived here, not
  * yet to arrive, and leave the sync folder's copy where it is (ADR-79).
+ *
+ * Compressed rollouts (`<name>.jsonl.zst`, ADR-83) are neither listed nor
+ * written either. `compressedSiblingOf` names where one would be, for the same
+ * reason: a rollout Codex compressed here is on this machine, and the sync
+ * folder's plain copy lands beside it only when it continues exactly what was
+ * compressed — which the zstd frame header's declared size, read by
+ * `compressedContentSize`, lets the engine check without a decoder.
  */
 import type { LogicalId } from "../../domain/types";
 import type { NeutralClassification, ProviderAdapter, SessionGroup } from "../provider-adapter";
 import {
+  CODEX_COMPRESSED_SUFFIX,
   CODEX_DATE_SEGMENT,
   CODEX_LOGICAL_ID_PATTERN,
   isCodexSessionId,
@@ -41,6 +49,7 @@ import {
   rolloutLogicalId,
 } from "./rollout-name";
 import { describeUnreadDirs, readVaultScope } from "../vault-scope";
+import { zstdFrameContentSize } from "./zstd-frame";
 
 export const CODEX_PROVIDER_ID = "codex";
 
@@ -71,6 +80,8 @@ export interface CodexAdapterDeps {
 }
 
 export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
+  const archiveDir = () => deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR);
+
   /**
    * Names only — no `stat`, no read, no vault scope.
    *
@@ -80,6 +91,11 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
    */
   async function unrecognised(): Promise<string[]> {
     const found: string[] = [];
+    const archived = new Set(
+      (await deps.listDir(archiveDir()).catch(() => []))
+        .filter((entry) => entry.isFile)
+        .map((entry) => entry.name),
+    );
     await walkNames(deps.providerRoot, 0);
     return found;
 
@@ -89,7 +105,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       // recognisable next to the file it copied.
       if (depth === DATE_DEPTH) {
         const names = entries.filter((entry) => entry.isFile).map((entry) => entry.name);
-        found.push(...unrecognisedRolloutNames(names));
+        found.push(...unrecognisedRolloutNames(names, archived));
         return;
       }
       for (const entry of entries) {
@@ -141,7 +157,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         ok: true,
         warnings: [
           ...describeUnreadDirs(scope.unreadDirs),
-          ...describeUnrecognised(await unrecognised()),
+          ...describeUnrecognised(await unrecognised(), scope.sessionIds),
         ],
       };
     },
@@ -210,8 +226,16 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       // neutral path may reach a filesystem call.
       if (classifyNeutral(neutralRel) === null) return null;
       const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
-      return deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR, name);
+      return deps.joinPath(archiveDir(), name);
     },
+
+    compressedSiblingOf(localPath) {
+      // codex-rs `rollout/src/compression.rs`: `<name>.jsonl` → `<name>.jsonl.zst`,
+      // in the same directory, in `sessions/` and in the archive alike.
+      return localPath.endsWith(".jsonl") ? `${localPath}${CODEX_COMPRESSED_SUFFIX}` : null;
+    },
+
+    compressedContentSize: zstdFrameContentSize,
 
     async reconcileLocalIndex() {
       // OQ-2: discovery is a directory scan. `session_index.jsonl` is a

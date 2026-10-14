@@ -88,6 +88,17 @@ export function createNodeFsGateway(deps: NodeFsGatewayDeps): FsGateway {
       }
     },
 
+    async readHead(target, n) {
+      const handle = await fsp.open(target, "r");
+      try {
+        const buffer = new Uint8Array(Math.max(0, n));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        return buffer.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+    },
+
     async writeFileAtomic(target, bytes, options) {
       await writeAtomic(deps, target, bytes, options);
     },
