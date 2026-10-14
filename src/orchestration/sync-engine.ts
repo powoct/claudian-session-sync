@@ -863,6 +863,22 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       }
       if (decision.action === "CONFLICT") memberConflicted = true;
 
+      // ADR-79 once more, at the last moment before a file is created: Codex
+      // can archive the rollout while this pass reads the sync folder's copy,
+      // and a duplicate created now would occupy the path the check above
+      // looks at — ending the rule for this rollout for good.
+      if (
+        decision.action === "PULL_NEW" &&
+        adapter.archivedPathFor &&
+        (await archivedLocally(deps, adapter, file.neutralRel))
+      ) {
+        actions.push(
+          entry(group, file.neutralRel, adapter.id, "SKIP_ARCHIVED_HERE", "archived-here", "SKIPPED_POLICY"),
+        );
+        recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, tailTruncated(remoteBytes));
+        continue;
+      }
+
       // ── P6 apply ─────────────────────────────────────────────────────────
       const applied = await applyAction(deps, barrier, {
         action: decision.action,
@@ -1162,19 +1178,13 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     adapter: ProviderAdapter,
     file: SessionFileRef,
   ): Promise<ActionEntry | null> {
-    // Listed means found in `sessions/`.
-    if (file.absPath !== "") return null;
-    const archived = adapter.archivedPathFor?.(file.neutralRel) ?? null;
-    if (archived === null) return null;
-    try {
-      if ((await deps.fs.lstat(await adapter.targetPathFor(file.neutralRel))) !== null) return null;
-      const st = await deps.fs.lstat(archived);
-      if (st === null || !st.isFile) return null;
-    } catch {
-      return null;
-    }
-    // Kept current, so the pass after an unarchive finds the copy as quiet as
-    // it is rather than restarting its quiet window.
+    // Asked even of a rollout this pass listed in `sessions/`: the listing is
+    // from the start of the pass, and Claudian archives at startup and in bulk.
+    if (!(await archivedLocally(deps, adapter, file.neutralRel))) return null;
+    // The sync folder's copy stays watched while it is withheld, so a copy
+    // that empties meanwhile still reads as a regression (NR-8) — for a
+    // rollout archived before this machine ever synced it, nothing else
+    // would have recorded that it had content.
     const remote = await observe(deps, deps.joinPath(deps.replicaRoot, deps.workspaceId, file.neutralRel));
     recordLedger(deps, file.neutralRel, "remote", remote, deps.clock.nowMs(), null);
     return entry(group, file.neutralRel, adapter.id, "SKIP_ARCHIVED_HERE", "archived-here", "SKIPPED_POLICY");
@@ -1578,6 +1588,25 @@ function extensionOf(neutralRel: string): string {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * ADR-79's question: is this rollout on this machine, archived? True only
+ * when nothing at all is at its local path and the provider's archive holds a
+ * plain file of the same name. A read that fails answers no — which plans the
+ * file as before, and for a rollout that really is archived costs the
+ * duplicate this exists to avoid, never a byte.
+ */
+async function archivedLocally(deps: EngineDeps, adapter: ProviderAdapter, neutralRel: string): Promise<boolean> {
+  const archived = adapter.archivedPathFor?.(neutralRel) ?? null;
+  if (archived === null) return false;
+  try {
+    if ((await deps.fs.lstat(await adapter.targetPathFor(neutralRel))) !== null) return false;
+    const st = await deps.fs.lstat(archived);
+    return st !== null && st.isFile;
+  } catch {
+    return false;
+  }
+}
 
 async function observe(deps: EngineDeps, target: string): Promise<SideObservation> {
   const st = await deps.fs.lstat(target);

@@ -21,6 +21,13 @@ import { createGrokAdapter } from "./grok/adapter";
 
 export interface AdapterEnvironment {
   readonly providerRoot: string;
+  /**
+   * The root as configured, before it was realpath'd. Only for finding a
+   * CLI's own siblings of it: Codex archives into `<CODEX_HOME>/archived_sessions`
+   * without resolving anything, so a symlinked `sessions/` must not move where
+   * that is looked for (ADR-79). Never written under.
+   */
+  readonly configuredRoot?: string;
   /** Realpath of the vault — the escape rule's measured input (§6.3). */
   readonly vaultRealPath: string;
   readonly joinPath: (...parts: string[]) => string;

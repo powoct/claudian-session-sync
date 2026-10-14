@@ -96,8 +96,10 @@ export interface BackupEntry {
      */
     | "held-here"
     /**
-     * A Codex rollout this machine has archived (ADR-79): the next sync does
-     * not copy the sync folder's version into `sessions/` either.
+     * A Codex rollout this machine has archived (ADR-79). From the sync
+     * folder: the next sync does not copy it into `sessions/`. From this
+     * machine: putting it back would make a second, active copy beside the
+     * archived one, so the restore is refused.
      */
     | "archived-here"
     | "unknown";
@@ -121,6 +123,8 @@ export type RestoreOutcome =
         | "target-not-located"
         | "target-changed"
         | "target-exists"
+        /** A Codex rollout archived on this machine (ADR-79); unarchive it first. */
+        | "target-archived"
         | "remote-not-ready"
         | "sync-in-progress"
         | "path-rejected"
@@ -252,7 +256,9 @@ export async function listBackups(
     }
     const own = remote ? sides.remote : sides.local;
     const other = remote ? sides.local : sides.remote;
-    const archived = remote && other === null && neutralRel !== null && (await archivedHere(deps, provider, neutralRel));
+    // Asked whenever this machine's copy is missing: the engine's ADR-79 rule
+    // decides what happens to a version put back on either side.
+    const archived = neutralRel !== null && sides.local === null && (await archivedHere(deps, provider, neutralRel));
     entries.push({
       path,
       name,
@@ -274,7 +280,7 @@ export async function listBackups(
               ? "identical"
               : "differs",
       liveHashPrefix: own === null ? null : shortHash(deps.hashBytes(own)),
-      outcome: predict(deps, bytes, other, neutralRel, provider, archived),
+      outcome: !remote && archived ? "archived-here" : predict(deps, bytes, other, neutralRel, provider, archived),
     });
   }
 
@@ -362,6 +368,12 @@ export async function restoreBackup(
   }
 
   if (before === null) {
+    // Not into `sessions/` beside an archived copy: Codex would hold two files
+    // for one thread, and its unarchive would rename the archived one over
+    // this (ADR-79).
+    if (!entry.remote && (await archivedHere(deps, provider, entry.neutralRel))) {
+      return { ok: false, reason: "target-archived" };
+    }
     // Nothing there to preserve, so I1 is not implicated: this is a creation,
     // not an overwrite, and it commits with no-replace so a pass that lands
     // the session first wins rather than being silently clobbered.

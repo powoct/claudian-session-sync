@@ -275,8 +275,43 @@ describe("a byte mark from before ADR-80", () => {
 
   it("is replaced by the first reading, not compared with it", () => {
     const verdict = evaluateReadiness(legacy(), observed({ counts: { files: 40, bytes: 2 * MB } }), SUPPORTED_FORMAT);
-    expect(verdict.state).toBe("READY");
+    expect(verdict.reason).toBeNull();
     expect(verdict.record.lastKnownCounts).toEqual({ files: 40, bytes: 2 * MB });
+    expect(verdict.record.byteCountBasis).toBe(2);
+  });
+
+  it("starts probing over, so the reading that set the mark is not the one that clears it", () => {
+    // Compared with itself, the rebasing reading would let a READY device
+    // write on the one pass NR-7 is blind (review, 2026-10-14).
+    const first = evaluateReadiness(legacy(), observed({ counts: { files: 40, bytes: 2 * MB } }), SUPPORTED_FORMAT);
+    expect(first.state).toBe("PROBING");
+    expect(first.mayWrite).toBe(false);
+    const held = evaluateReadiness(
+      first.record,
+      observed({ counts: { files: 40, bytes: 2 * MB }, nowMs: T0 + DEFAULT_READINESS.minAgeMs }),
+      SUPPORTED_FORMAT,
+    );
+    expect(held.state).toBe("READY");
+  });
+
+  it("catches a byte drop still under way on the pass after", () => {
+    const first = evaluateReadiness(legacy(), observed({ counts: { files: 40, bytes: 20 * MB } }), SUPPORTED_FORMAT);
+    const next = evaluateReadiness(
+      first.record,
+      observed({ counts: { files: 40, bytes: 4 * MB }, nowMs: T0 + DEFAULT_READINESS.minAgeMs }),
+      SUPPORTED_FORMAT,
+    );
+    expect(next.reason).toBe("NR-7-byte-count-dropped");
+    expect(next.mayWrite).toBe(false);
+  });
+
+  it("is any basis but the current one — a newer version's included", () => {
+    const verdict = evaluateReadiness(
+      legacy({ byteCountBasis: 3 }),
+      observed({ counts: { files: 40, bytes: 2 * MB } }),
+      SUPPORTED_FORMAT,
+    );
+    expect(verdict.reason).toBeNull();
     expect(verdict.record.byteCountBasis).toBe(2);
   });
 

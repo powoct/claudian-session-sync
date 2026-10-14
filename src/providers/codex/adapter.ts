@@ -50,14 +50,18 @@ const NEUTRAL_SEGMENTS = 5;
 const DATE_DEPTH = 3;
 /**
  * Beside the sessions root, flat (codex-rs `ARCHIVED_SESSIONS_SUBDIR`).
- * Claudian finds it the same way — the parent of whatever the sessions root
- * is — so an overridden root is followed rather than guessed at.
+ * Claudian finds it the same way — the parent of the sessions root *as
+ * configured*, unresolved — so an overridden root is followed rather than
+ * guessed at, and a `sessions/` symlinked to another disk does not move it:
+ * Codex joins it onto `CODEX_HOME` without resolving anything.
  */
 const ARCHIVED_DIR = "archived_sessions";
 
 export interface CodexAdapterDeps {
   /** `<CODEX_HOME>/sessions`, already realpath'd. */
   readonly providerRoot: string;
+  /** The same root as configured, before realpath; defaults to `providerRoot`. */
+  readonly configuredRoot?: string;
   readonly vaultRealPath: string;
   readonly joinPath: (...parts: string[]) => string;
   readonly dirnameOf: (path: string) => string;
@@ -196,7 +200,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
       // neutral path may reach a filesystem call.
       if (classifyNeutral(neutralRel) === null) return null;
       const name = neutralRel.slice(neutralRel.lastIndexOf("/") + 1);
-      return deps.joinPath(deps.dirnameOf(deps.providerRoot), ARCHIVED_DIR, name);
+      return deps.joinPath(deps.dirnameOf(deps.configuredRoot ?? deps.providerRoot), ARCHIVED_DIR, name);
     },
 
     async reconcileLocalIndex() {

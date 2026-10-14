@@ -934,6 +934,7 @@ export class PluginRuntime {
       runtimes.push({
         adapter: descriptor.create({
           providerRoot: real,
+          configuredRoot: root,
           vaultRealPath: this.host.vaultRoot,
           joinPath: this.host.joinPath,
           dirnameOf: this.host.dirnameOf,
@@ -1421,6 +1422,8 @@ export class PluginRuntime {
         const runtime = providers.find((p) => p.adapter.id === providerId);
         return runtime ? runtime.adapter.targetPathFor(neutralRel) : null;
       },
+      archivedPathFor: (providerId: string, neutralRel: string) =>
+        providers.find((p) => p.adapter.id === providerId)?.adapter.archivedPathFor?.(neutralRel) ?? null,
       // The same validator the pass writes through: a resolution is an
       // overwrite of a session file and gets the same containment walk.
       mintWritePath: createWritePathMinter({

@@ -1131,24 +1131,27 @@ records provider 两机都开(E2c),或 E2b 加至少一条 flat 层记录。在�
 (真 runtime、真 Codex adapter、真文件系统,归档按 codex-rs `archive_thread.rs` 的 rename 复刻)和
 `tests/m1/wired-pass.test.ts` 里 OQ-36 那一组。**没有一条跑在真的 Claudian 或 Codex app-server 上。**
 
-**环境**:同 §9.12,Claudian **2.3.20 发布版**,Codex provider 两机都开;R1–R3 另开 records provider。
+**环境**:同 §9.12(records provider 两机都开),Claudian **2.3.20 发布版**,另外 Codex provider 两机都开。
 每一步都记:报告里的行、`~/.codex/sessions/…` 与 `~/.codex/archived_sessions/` 的列表(只记文件名)、
 `~/.claudian-session-sync/state/<ws>/remote.json` 的 `state`、`lastKnownCounts`、`byteCountBasis`。
 
 | 步 | 断言 |
 |---|---|
-| **A1 ⭐⭐** | A 上一条已同步过的 Codex 对话,在 Claudian 里 Archive → Sync now:报告 `SKIP_ARCHIVED_HERE` / `archived-here`;`sessions/` 下**没有**被拉回的副本;`archived_sessions/` 里只有 Codex 移过去的那一份,字节未变;B 上照常列出、可 resume |
-| **A2 ⭐** | B 继续在那条对话里聊,推上去 → A 仍是 `archived-here`,不拉;A 上 Unarchive → 下一轮把 B 新增的部分拉下(`PULL_OVERWRITE`),A 上能 resume 到最新一轮,**没有** `local-shrank-below-converged` 冲突 |
-| **A3** | Archive 视图里批量归档 5 条以上,把 Max files per pass 调到 3 → 归档的那几条每轮都是 `archived-here`,B 新建的一条在一轮内落到 A |
-| **A4** | `sessionAutoArchiveAfter` 设 7 天档,用一条超过 7 天未活动的对话触发自动归档 → 同 A1 |
-| **A5** | 在 A 上用 Codex CLI 自己的归档(若当前版本提供)→ 同 A1,与 Claudian 无关 |
-| **R1 ⭐⭐** | records provider 开着,A 上打开一条带图片、记录在 1 MB 以上的旧对话(2.3.8 之前保存的),让 Claudian 重新保存(发一句话即可)→ 记录缩小、推上去;**两机**下一轮都不进 `NOT_READY`,`remote.json` 的 `byteCountBasis` 为 2 |
-| **R2** | (可选)升级前先在一台机器上用 0.3.5 复现 OQ-36 的冻结(`NR-7-byte-count-dropped`),再升级本插件 → 第一轮回到 `PROBING`,随后 `READY`,无需删除 `remote.json` |
+| **A1 ⭐⭐** | A 上一条已同步过的 Codex 对话,在 Claudian 里 Archive → Sync now:报告 `SKIP_ARCHIVED_HERE` / `archived-here`;`sessions/` 下**没有**被拉回的副本;`archived_sessions/` 里只有 Codex 移过去的那一份,sha256 未变。B 上那份 rollout 仍在 `sessions/` 下、照常同步,`codex exec resume <thread id>` 能续 |
+| **A2 ⭐** | B 用终端 `codex exec resume <thread id> "continue"` 续一轮并同步 → A 仍是 `archived-here`,不拉;**在 A 上** Unarchive → 两轮内把 B 新增的部分拉下(第一轮本地侧刚被 touch,`DEFER`;第二轮 `PULL_OVERWRITE`),A 上 resume 能看到 B 那一轮,**没有**冲突 |
+| **A3** | 在 Active 视图里批量归档 5 条以上,把 Max files per pass 调到 3,B 新建一条 Codex 对话并同步 → 归档的那几条每轮都是 `archived-here`,B 那条在一轮内落到 A |
+| **A4** | `sessionAutoArchiveAfter` 设 7 天档,用一条超过 7 天未活动的对话触发自动归档(Claudian 启动时运行)→ 同 A1,且**启动后第一轮**就是 `archived-here`,没有一份被拉回 |
+| **A5** | (观察项,共享开关开着时)A 归档一条共享过的对话,B 重启后在 Claudian 里把它恢复 → A 上仍是 `archived-here`;记下 A 上在这条对话里发送时 Codex 的报错原文;在 A 上归档再恢复一次后,下一轮起照常同步 |
+| **R1 ⭐⭐** | records provider 开着,A 上打开一条 2.3.8 之前保存、记录在 1 MB 以上、**subagent 的工具结果里带图片**的 Claude 对话,发一句话让 Claudian 重新保存 → 记录缩小、推上去;**两机**下一轮都不进 `NOT_READY`;`byteCountBasis` 为 2,且 `lastKnownCounts.bytes` 约等于 `<同步夹>/<ws>` 去掉 `claudian/` 之后的总字节数(`du` 核对) |
+| **R2** | (可选)升级前先在一台机器上用 0.3.5 复现 OQ-36 的冻结(`NR-7-byte-count-dropped`),再升级本插件 → 第一轮 `PROBING`,下一轮 `READY`,无需删除 `remote.json` |
+| **R3** | 升级本插件后的第一轮:报告无写入(`PROBING`),第二轮(≥ 90 s 后)照常;`byteCountBasis` 从缺省变为 2 |
 
-追加写文件的字节照计、照样触发 NR-7,由 `tests/m1/readiness.test.ts` 与 `stores.test.ts` 的扫描用例钉住,
-不在真机上做——要在同步夹里造一次真实的字节下降,就得截断一份真的 transcript。
+R1 只有当记录缩小的量超过工作区总字节的 25% 时才会在 0.3.5 上触发冻结,所以它证明的是「新口径不计
+`claudian/`」,与旧版本的区分靠 R2。追加写文件的字节照计、照样触发 NR-7,由 `tests/m1/readiness.test.ts`
+与 `stores.test.ts` 的扫描用例钉住,不在真机上做——要在同步夹里造一次真实的字节下降,就得截断一份真的 transcript。
 
-**A1 和 R1 是核心。** 两条都只扣住写入,失败的最坏结果是修复前的行为(重复副本、冻结)。
+**A1 和 R1 是核心。** ADR-79 只扣住写入,失败的最坏结果是修复前的重复副本;ADR-80 放宽了 NR-7
+(代价见 ADR-80),失败的最坏结果是修复前的冻结。
 ⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.12 一起跑;跑完把 ADR-79、ADR-80 的 ⚠️ 改成 ✅。
 
 ### 9.5 各里程碑 Exit Criteria

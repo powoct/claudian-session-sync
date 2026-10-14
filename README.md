@@ -201,20 +201,29 @@ Later Claudian releases changed three more things worth knowing:
 - **2.3.6** no longer reads the old `.claude/sessions` folder. A conversation recorded only
   there no longer appears in Claudian; its session file still syncs and resumes from a
   terminal.
-- **2.3.8** strips image data out of conversation records when it saves them, so with the
-  Claudian records provider on, the sync folder can shrink by tens of megabytes in one go.
-  The plugin's "has the sync folder been emptied?" check no longer counts conversation
-  records' bytes, so this does not pause syncing. A device an older version had already
-  paused with "fewer bytes than before" resumes by itself after updating, once it has
-  re-checked the folder for a minute or two.
+- **2.3.8** strips image data (from subagent tool results) out of conversation records when
+  it saves them, so with the Claudian records provider on, the sync folder can shrink by
+  tens of megabytes in one go. The plugin's "has the sync folder been emptied?" check no
+  longer counts conversation records' bytes, so this does not pause syncing. After updating,
+  each device re-checks the sync folder once: its first sync copies nothing, and the second —
+  one sync interval later, or a second **Sync now** at least 90 seconds after the first —
+  carries on. A device an older version had already paused with "fewer bytes than before"
+  resumes the same way.
 - **2.3.11** moves an archived Codex conversation's session file into Codex's own archive
   folder (`~/.codex/archived_sessions`). A conversation archived on a device stays archived
   there: the plugin sees the file in the archive and does not copy the sync folder's version
-  back into the active folder (the sync report lists it as `archived-here`). Your other
-  devices are not affected, and unarchiving it picks up whatever they added meanwhile. The
-  plugin never writes to or syncs from the archive folder itself, so anything you added on
-  this device just before archiving is pushed once you unarchive. If an older version
-  already copied an archived conversation back, that copy stays and keeps syncing.
+  back into the active folder (the sync report lists it as `archived-here`). Other devices
+  keep their own copy in their active folder and keep syncing it. Unarchive it **on the
+  device that archived it** (in Claudian there, or with `codex unarchive`) and it catches up
+  with what the other devices added — as long as that device had synced it before archiving;
+  if both sides added turns, you get a conflict with both versions kept. With shared
+  records, the archived state shows on every device, but only the device that archived it
+  moves the file, and restoring it elsewhere does not move it back: if Codex on that device
+  then says the session is archived, archive and restore it there once. The plugin never
+  writes to or syncs from the archive folder, and its restore and conflict screens will not
+  put a copy beside an archived one. If an older version of this plugin already copied an
+  archived conversation back, that copy stays and keeps syncing, and unarchiving it later can
+  raise a conflict.
 
 Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
 its records, but its sessions are not synced.

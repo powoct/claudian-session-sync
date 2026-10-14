@@ -216,8 +216,13 @@ export function evaluateReadiness(
   // earlier — an unreachable directory reads as zero, and a refusal above has
   // not established that this reading describes the directory at all.
   //
-  // The cost is one pass in which a byte drop already under way is not caught.
-  // The file mark is kept, so NR-6 is not blind, and NR-8 does not use marks.
+  // And it starts probing over. The reading that sets the mark cannot also be
+  // the one that clears it — compared with itself, it would let a READY device
+  // write on the very pass NR-7 is blind. As probe one, it has to hold for
+  // `minAgeMs` first, so a drop still under way is caught on the next pass. A
+  // drop that had already finished before the update is not caught: that is
+  // the cost of a mark that cannot be converted. The file mark is kept, so
+  // NR-6 is not blind, and NR-8 does not use marks.
   const rebased: RemoteRecord =
     previous.byteCountBasis === BYTE_COUNT_BASIS
       ? previous
@@ -225,6 +230,8 @@ export function evaluateReadiness(
           ...previous,
           lastKnownCounts: { files: previous.lastKnownCounts.files, bytes: observed.counts.bytes },
           byteCountBasis: BYTE_COUNT_BASIS,
+          consecutiveStableProbes: 0,
+          firstProbeMs: null,
         };
 
   const shrink = detectShrink(rebased.lastKnownCounts, observed.counts, thresholds);
