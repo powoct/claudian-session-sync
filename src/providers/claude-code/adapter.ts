@@ -18,7 +18,12 @@
  * walk, not this listing.
  */
 import type { LogicalId } from "../../domain/types";
-import { type ProviderAdapter, type SessionGroup, classifyFileName } from "../provider-adapter";
+import {
+  type NeutralClassification,
+  type ProviderAdapter,
+  type SessionGroup,
+  classifyFileName,
+} from "../provider-adapter";
 import { describeUnreadDirs, isSessionUuid, readVaultScope } from "../vault-scope";
 import { escapeProjectPath } from "./path-escape";
 
@@ -63,6 +68,28 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
     // is no reason to test that tolerance with our own files.
     auxSuffixPattern: /^\.origin\.json$/,
   } as const;
+
+  function classifyNeutral(neutralRel: string): NeutralClassification | null {
+    // Claude Code's layout is flat: exactly `claude-code/<name>`. Anything
+    // deeper is not this provider's shape, and guessing that a nested file
+    // "probably belongs to us" is how a foreign tree gets flattened into the
+    // CLI's directory — `targetPathFor` keeps only the basename.
+    const parts = neutralRel.split("/");
+    const name = parts.length === 2 && parts[0] === "claude-code" ? parts[1] : undefined;
+    if (name === undefined) return null;
+    const classified = classifyFileName(whitelist, name);
+    if (classified.kind === "unknown") return null;
+    return {
+      logicalId: classified.logicalId as LogicalId,
+      role: classified.kind,
+      mode: "append-jsonl" as const,
+      // `<sid>.origin.json` is written by this plugin, in the sync directory,
+      // and belongs nowhere else. Said explicitly rather than relying on the
+      // engine to act on primaries only — that was true while every provider
+      // had a single-file group, and stopped being true with Grok.
+      ...(classified.kind === "aux" ? { replicaOnly: true } : {}),
+    };
+  }
 
   return {
     id: "claude-code",
@@ -116,26 +143,13 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
       return groups;
     },
 
-    classifyNeutral(neutralRel) {
-      // Claude Code's layout is flat: exactly `claude-code/<name>`. Anything
-      // deeper is not this provider's shape, and guessing that a nested file
-      // "probably belongs to us" is how a foreign tree gets flattened into the
-      // CLI's directory — `targetPathFor` keeps only the basename.
-      const parts = neutralRel.split("/");
-      const name = parts.length === 2 && parts[0] === "claude-code" ? parts[1] : undefined;
-      if (name === undefined) return null;
-      const classified = classifyFileName(whitelist, name);
-      if (classified.kind === "unknown") return null;
-      return {
-        logicalId: classified.logicalId as LogicalId,
-        role: classified.kind,
-        mode: "append-jsonl" as const,
-        // `<sid>.origin.json` is written by this plugin, in the sync directory,
-        // and belongs nowhere else. Said explicitly rather than relying on the
-        // engine to act on primaries only — that was true while every provider
-        // had a single-file group, and stopped being true with Grok.
-        ...(classified.kind === "aux" ? { replicaOnly: true } : {}),
-      };
+    classifyNeutral,
+
+    records: {
+      claudianProviderId: CLAUDIAN_PROVIDER_ID,
+      // The file name is the session id, for the transcript and for this
+      // plugin's own `.origin.json` beside it alike.
+      sessionIdOf: (neutralRel) => classifyNeutral(neutralRel)?.logicalId ?? null,
     },
 
     async targetPathFor(neutralRel) {

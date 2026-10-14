@@ -304,7 +304,9 @@ describe("Claude's own automatic delete is not the user's (H3)", () => {
       "remote-only-history-not-here",
     );
     expect(seen.notices.some((n) => n.includes("removed them by itself"))).toBe(true);
-    expect(seen.announcements).toHaveLength(1);
+    // Once. ADR-81's own pop-up for the same conversation — its history is
+    // still not here — may follow a pass later; it is a different sentence.
+    expect(seen.announcements.filter((a) => a.includes("removed them by itself"))).toHaveLength(1);
   }, 60_000);
 
   it("keeps it deleted when its transcript is here — Claudian would only have reset it", async () => {

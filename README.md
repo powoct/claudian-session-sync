@@ -102,6 +102,24 @@ On each machine:
 - **Claudian's UI**: Claudian lists conversations from its records in
   `.claudian/sessions/` inside the vault. Those records travel with your **vault's**
   sync, not with this plugin — see the next section.
+- **Wait for the history before you send.** If you send in a Claude conversation whose
+  session file has not reached this machine yet, the CLI cannot find the session and
+  Claudian then removes the conversation — or, when part of its history is here, carries on
+  without the missing part. For a shared conversation that change is made to the shared
+  record, so it reaches your other devices with your vault sync. After every sync the
+  plugin looks for exactly that: a conversation Claudian lists here whose current session
+  file is in the sync folder but not on this machine is named in the sync report. A pop-up
+  names it by title on the first sync after Obsidian starts, or once it is still waiting a
+  sync later — a conversation that arrives while Obsidian is running is not in Claudian's
+  list until the next launch, and its history usually lands a sync later anyway. Wait for
+  the sync that brings it. It is likeliest on a device's first syncs, or for a session file
+  over *Max file size* (which travels with the vault, so this only happens when the limit
+  was lowered after the file was copied, or your devices keep different limits). Opening
+  the conversation is harmless, though it can look empty until the history arrives. If your
+  vault sync carries `.obsidian/workspace.json`, Claudian may reopen such a conversation's
+  tab at launch. The check needs the Claude Code provider on, and it looks for the session
+  file where that provider is set to look — a `CLAUDE_CONFIG_DIR` set only for Claudian is
+  not seen.
 
 > **There is a setting for this.** *Share this device's conversations with your other
 > devices* (off by default, and set per machine) **moves** each of this machine's
@@ -228,6 +246,25 @@ Later Claudian releases changed three more things worth knowing:
 Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
 its records, but its sessions are not synced.
 
+### What the sync folder still holds
+
+Deletions are never propagated, so the sync folder only grows: a conversation deleted on
+every device still has its session files there, and a new device still receives them. The
+command **Audit the sync folder (read-only)** shows what that amounts to, in three lists:
+conversations this device keeps off itself (deleted here, or removed by an older Claudian's
+deletion marker), with the session files their records name and their size; sessions in the
+sync folder that no Claudian record in this vault names, in any field Claudian builds a
+conversation's history from; and records left only in the old `.claude/sessions` folder,
+with the session id a terminal can resume them by. It changes nothing, and it has no delete
+button on purpose. A session with no record here may have been deleted — or its record has
+not arrived yet, sits in another device's folder this vault has not received, or was never
+made because the session started in a terminal — and nothing on disk tells those apart.
+Removing files from the sync folder by hand also does less, or more, than it looks: remove a
+few and any device that still has those sessions copies them straight back; remove more than
+a few (more than three files and more than a tenth of them, or more than a quarter of the
+bytes) and every device that had seen them stops syncing and writes nothing until the files
+are put back by hand. And a device that has not received a session yet loses its only copy.
+
 ## How your data is protected
 
 - **Backups before every overwrite.** Any file about to be replaced — on either side —
@@ -261,7 +298,7 @@ touches is a short list:
 
 | | |
 |---|---|
-| **Reads** | the session files of the providers *you* switch on (all off by default), Claudian's conversation records inside your vault, and the `manifest.json` files in the vault's plugins folder (only to learn which Claudian version is installed). With the Claudian records provider on, it also checks whether a deleted Claude conversation's session file exists in this vault's Claude project folder — existence only, never the contents, and even when the Claude Code provider is off — to tell your delete from Claudian's own |
+| **Reads** | the session files of the providers *you* switch on (all off by default), Claudian's conversation records inside your vault, and the `manifest.json` files in the vault's plugins folder (only to learn which Claudian version is installed). With the Claudian records provider on, it also checks whether a deleted Claude conversation's session file exists in this vault's Claude project folder — existence only, never the contents, and even when the Claude Code provider is off — to tell your delete from Claudian's own. *Audit the sync folder* lists the sync folder, reads the vault's records (both record folders, every device's), and checks which of the sync folder's sessions exist on this machine (Codex's archive folder included) — for the providers you switched on, and only when you run it |
 | **Writes** | your sync folder, those same session files when pulling a conversation from another machine, and its own state under `~/.claudian-session-sync` |
 | **Never** | anything else. Every path is resolved segment by segment and rejected if it escapes a known root or passes through a symlink; files it does not recognise are reported and left alone; credentials (`auth.json`, `config.toml`, `.credentials.json`) are excluded by name and never read. The one exception to the symlink rule is reading Claudian's `manifest.json`, which follows a linked plugin folder the way Obsidian does, because a plugin installed from a working copy is usually linked there |
 
@@ -294,12 +331,12 @@ anywhere. `main.ts` marks the call site with the same explanation.
 
 ```bash
 npm ci
-npm run verify   # typecheck, lint, secret/docs gates, ~1250 tests, build, bundle checks
+npm run verify   # typecheck, lint, secret/docs gates, ~1350 tests, build, bundle checks
 ```
 
 Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 [testing & acceptance](docs/zh-CN/testing.md) · [measured findings](docs/zh-CN/findings/).
-Every behavioural claim above traces to a decision record (ADR 1–80) and, where it
+Every behavioural claim above traces to a decision record (ADR 1–81) and, where it
 matters, to a real-machine measurement.
 
 ## License
@@ -319,6 +356,11 @@ A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接�
   双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,在本机删掉的对话留在删掉的状态,可用命令
   「Bring back conversations deleted on this device」取回。在本机归档的 Codex 对话留在
   Codex 的归档目录里,不会被拉回活动目录。
+- **历史没到之前别在对话里发送**:Claude 对话的会话文件还在同步目录里、没落到本机时发送,Claudian
+  会删掉或重置这条对话;共享的对话,这个改动会随 vault 同步到你的其他机器。每轮同步后插件会检查这种状态,
+  在报告里点名;Obsidian 启动后的第一轮、或同一条对话下一轮仍在等时,弹窗按标题点名。命令
+  「Audit the sync folder (read-only)」只读地列出同步目录里还留着什么(本机不再列出的对话及其文件大小、
+  本 vault 没有记录的会话、只在旧 `.claude/sessions` 里的记录),**不提供删除**。
 - **合并只做前缀快进**,从不信时间戳;双机分叉 = 冲突,两个版本都保留,由你选择。
   覆盖前必备份;不认识的文件永远原地不动;不传播删除。
 - **请勿把 `.claudian/` 排除在你的 vault 同步之外**——Claudian 的会话列表靠它;

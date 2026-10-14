@@ -1154,6 +1154,33 @@ R1 只有当记录缩小的量超过工作区总字节的 25% 时才会在 0.3.5
 (代价见 ADR-80),失败的最坏结果是修复前的冻结。
 ⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.12 一起跑;跑完把 ADR-79、ADR-80 的 ⚠️ 改成 ✅。
 
+### 9.14 发送前的预警与同步夹审计(ADR-81,**下一版的闸门**,两机)
+
+两条都是只读的提示,自动化证据是 `tests/m1/resume-warning.test.ts`(真 runtime,记录按 2.3.20 的紧凑格式写在
+它读的层里)、`tests/m1/sync-folder-audit.test.ts`(真 runtime、真 adapter,含「审计前后同步夹、vault、home
+逐字节不变,目录 mtime 也不变」)与 `tests/m1/audit-ui.test.ts`(审计屏上没有任何可点的控件)。**R2 本身
+(Claudian 在发送失败后删除或重置对话)从没有在真机上触发过**,预警依据的是读上游代码;「Claudian 2.3.20 只在
+启动时读记录、运行中到达的记录要重启才列出」同样只来自读代码,W2 要核对它。
+
+**环境**:同 §9.12,Claude Code provider 两机都开,Claudian **2.3.20 发布版**。**两机的 Auto sync interval 都设为
+0**(只手动同步,这个设置随 vault 走,两边都核对一下):每一步要控制「哪一轮看见了什么」。弹窗与审计屏会显示
+标题——**验收记录里只记 id、条数、字节数,不抄标题、不截含标题的图**。**全程不在被预警的对话里发送。**
+
+| 步 | 断言 |
+|---|---|
+| **W1 ⭐⭐** | A 开共享开关,新建一条 Claude 对话聊两三轮,A 上 Sync now。**B 不同步**,等记录(`.claudian/sessions/<conv>.meta.json`)与 transcript(`<同步夹>/<ws>/claude-code/<id>.jsonl`)都到了 B → 重启 B 的 Obsidian。启动时的那一轮:报告有一行 `History not here yet: Claude conversation <conv> (shared) resumes claude-code/<id>.jsonl … This pass: DEFER (…)`,弹一次「History has not reached this device yet for 1 Claude conversation(s): "…"」。90 秒后 B 上 Sync now → `PULL_NEW`,报告行消失,不再弹窗;Claudian 里打开它能看到 A 上的内容 |
+| **W2 ⭐** | B **不重启**,A 上再新建一条、共享、同步;记录与 transcript 都到 B 后 B 上 Sync now → 报告有那一行,**不弹窗**。此时**核对 B 的 Claudian 对话列表里有没有这一条**(读代码的结论是没有,要重启才列出);再 Sync now → 落地、行消失。记下 Claudian 是否在不重启的情况下列出了它 |
+| **W3 ⭐** | A 上新建一条 Claude 对话,让它**分段**读一个约 2 MB 的文本文件(用 offset/limit 分 10 段以上;一次读整份只会留下一条报错),确认 A 上 transcript 超过 1 MB,A 上 Sync now 推上去。**之后**两机的 Max file size 都改为 1 MB(先推后降:上限随 vault 走,两机不同上限的情形只在 data.json 不随 vault 同步时出现)。重启 B → 启动那一轮弹窗,报告行 `This pass: SKIP_TOO_LARGE (over-size-limit).`;Sync now → 行仍在、**不弹**;再重启 → **再弹一次**;两机上限改回 64 MB → Sync now ×2 → 落地、行消失 |
+| **W4** | (观察项)W3 降限的状态下 B 关掉 Claude Code provider → 无报告行、无弹窗;再打开。A 的共享开关关着、对话记录只在 A 的 device 层时,B 不预警(B 的 Claudian 本来也列不出它) |
+| **U1 ⭐⭐** | §9.12 的删除做完后(两机仍是 interval 0,检查期间谁都不同步),A 上先 `touch` 一个标记文件,记下 `find <同步夹>/<ws> -type f \| wc -l` 与 `du -sb <同步夹>/<ws>`,运行「Audit the sync folder (read-only)」:「Kept off this device」列出在 A 上删掉的对话(行上标 `deleted here`),每条下面是它的记录点名的 transcript 与字节数;运行后文件数、字节数不变,`find <同步夹>/<ws> -newer <标记文件>` 为空,`remote.json` 的 `state` 仍是 `READY` |
+| **U2** | 第二类:说明文字写明不可据此删除;抽一行,确认 vault 里任何一层都没有点名它的记录(`grep -rl <session id> .claudian/sessions .claude/sessions` 为空);关着的 provider 的行显示「not checked on this device」;屏上**没有任何按钮** |
+| **U3** | 第三类:说明文字与已装的 Claudian 版本相符(2.3.20 上是「no longer reads that folder」);vault 里若有只在 `.claude/sessions` 的记录(2.3.6 之前的旧记录),逐条核对 `claude --resume <屏上的 session id>` 能续;没有就记「无此类记录」 |
+| **U4** | (有 Codex 归档时)§9.13 A1 之后,若这条归档的对话已在 Claudian 删除(记录不在),它出现在第二类,显示「on this device, archived」 |
+
+**W1 和 U1 是核心。** 两条都只读:预警写的是报告与弹窗,审计不写任何文件,失败的最坏结果是一句错的提示或漏掉的
+提示。W2 若发现 Claudian 不重启也会列出新到的记录,运行中到达的对话就该和启动时一样立刻弹窗——回到 ADR-81 改规则。
+⚠️ **尚未执行。** 剧本写进验收套件的附录,与 §9.12、§9.13 一起跑;跑完把 ADR-81 的 ⚠️ 改成 ✅。
+
 ### 9.5 各里程碑 Exit Criteria
 
 | 里程碑 | 通过标准 |

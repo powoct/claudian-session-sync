@@ -265,22 +265,16 @@ export async function judgeClaudeHistory(
  * this, which is right for admission and wrong here.
  */
 export function claudeBoundSessionIds(
-  text: string,
+  text: string | Record<string, unknown>,
   conversationId: string,
 ):
   | { readonly status: "unreadable" }
   | { readonly status: "not-claude" }
   | { readonly status: "ok"; readonly ids: readonly unknown[]; readonly hasCurrent: boolean } {
-  const record = parseObject(text);
-  if (record === null) return { status: "unreadable" };
-  const providerId = record.providerId ?? "claude";
-  if (providerId !== "claude") return { status: "not-claude" };
+  const shell = claudeShell(text, conversationId);
+  if (shell.status !== "ok") return shell;
+  const { state, sessionId, forkSource } = shell;
 
-  const ownId = typeof record.id === "string" ? record.id : conversationId;
-  const sessionId = "sessionId" in record ? record.sessionId : ownId;
-  const state = isObject(record.providerState) ? record.providerState : {};
-
-  const forkSource = isObject(state.forkSource) ? state.forkSource : undefined;
   const hasCurrent = !!(state.providerSessionId ?? sessionId ?? forkSource?.sessionId);
   if (forkSource && !state.providerSessionId && !sessionId) {
     return { status: "ok", ids: forkSource.sessionId ? [forkSource.sessionId] : [], hasCurrent };
@@ -288,6 +282,68 @@ export function claudeBoundSessionIds(
   const previous = Array.isArray(state.previousProviderSessionIds) ? state.previousProviderSessionIds : [];
   const ids = [...previous, state.providerSessionId ?? sessionId].filter((id) => !!id);
   return { status: "ok", ids: [...new Set(ids)], hasCurrent };
+}
+
+/**
+ * What a send in this Claude conversation resumes, read the way Claudian
+ * reads it — or null for a record that cannot be read or is not Claude's.
+ *
+ * `resumes` is `ClaudeResumeState`'s pick, over the conversation `createShell`
+ * built (an absent `sessionId` key means the record's own `id`): the
+ * conversation's `sessionId` when it is set — the resume seed — else the
+ * persisted `providerSessionId` when it is a string, else a pending fork's
+ * source, and only a source with both its ids, the only one Claudian forks
+ * from. `forked` says the id is that source, another conversation's session.
+ *
+ * `comparedWith` is what a failed resume is held against before Claudian
+ * deletes or resets the conversation (`resolveSessionIdForConversation`:
+ * `providerSessionId ?? sessionId ?? forkSource.sessionId`). The two orders
+ * disagree only in states Claudian 2.3.20 does not write on its own — it keeps
+ * `sessionId` and `providerSessionId` equal — and where they disagree, a
+ * failed resume is compared against the other id and preserved.
+ *
+ * Takes the record's text, or the record already parsed. Returned
+ * unvalidated: the caller decides what an id it cannot use means.
+ */
+export function claudeResume(
+  text: string | Record<string, unknown>,
+  conversationId: string,
+): { readonly resumes: unknown; readonly forked: boolean; readonly comparedWith: unknown } | null {
+  const shell = claudeShell(text, conversationId);
+  if (shell.status !== "ok") return null;
+  const { state, sessionId, forkSource } = shell;
+  const comparedWith = state.providerSessionId ?? sessionId ?? forkSource?.sessionId ?? null;
+  const established = sessionId ? sessionId : typeof state.providerSessionId === "string" ? state.providerSessionId : null;
+  if (established !== null) return { resumes: established, forked: false, comparedWith };
+  const validFork = typeof forkSource?.sessionId === "string" && typeof forkSource.resumeAt === "string";
+  return validFork
+    ? { resumes: forkSource?.sessionId, forked: true, comparedWith }
+    : { resumes: null, forked: false, comparedWith };
+}
+
+/** A Claude record with `createShell`'s defaults applied. */
+function claudeShell(
+  text: string | Record<string, unknown>,
+  conversationId: string,
+):
+  | { readonly status: "unreadable" }
+  | { readonly status: "not-claude" }
+  | {
+      readonly status: "ok";
+      readonly state: Record<string, unknown>;
+      readonly sessionId: unknown;
+      readonly forkSource: Record<string, unknown> | undefined;
+    } {
+  const record = typeof text === "string" ? parseObject(text) : text;
+  if (record === null) return { status: "unreadable" };
+  const providerId = record.providerId ?? "claude";
+  if (providerId !== "claude") return { status: "not-claude" };
+
+  const ownId = typeof record.id === "string" ? record.id : conversationId;
+  const sessionId = "sessionId" in record ? record.sessionId : ownId;
+  const state = isObject(record.providerState) ? record.providerState : {};
+  const forkSource = isObject(state.forkSource) ? state.forkSource : undefined;
+  return { status: "ok", state, sessionId, forkSource };
 }
 
 /** Claudian's own rule for an id it will put in a path (`isPathSafeId`). */

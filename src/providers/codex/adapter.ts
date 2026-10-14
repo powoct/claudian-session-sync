@@ -190,6 +190,16 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
 
     classifyNeutral,
 
+    records: {
+      claudianProviderId: CODEX_PROVIDER_ID,
+      // A record names the thread; a reverted thread's rollouts each carry it
+      // in the tail of their own name.
+      sessionIdOf: (neutralRel) =>
+        classifyNeutral(neutralRel) === null
+          ? null
+          : (rolloutIds(neutralRel.slice(neutralRel.lastIndexOf("/") + 1))?.threadId ?? null),
+    },
+
     async targetPathFor(neutralRel) {
       return deps.joinPath(deps.providerRoot, ...neutralRel.split("/").slice(1));
     },
