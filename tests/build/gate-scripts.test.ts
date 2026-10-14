@@ -355,6 +355,17 @@ describe("check-docs (Q-01)", () => {
     expect(result.stderr).toContain("dangling");
   });
 
+  it("catches a placeholder left in the docs, and not a CI expression", () => {
+    const root = makeRoot();
+    write(root, "CLAUDE.md", "See docs/zh-CN/architecture.md for the normative spec.\n");
+    write(root, "docs/zh-CN/architecture.md", "# spec\n\n| 84 | done. {{REVIEW84}} |\n");
+    write(root, "docs/zh-CN/testing.md", "```yaml\nconcurrency: ci-${{ github.ref }}\n```\n");
+    const result = runGate("check-docs.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("architecture.md:3 still has the placeholder {{REVIEW84}}");
+    expect(result.stderr).not.toContain("testing.md");
+  });
+
   it("catches a retired rule creeping back in", () => {
     const root = makeRoot();
     write(root, "CLAUDE.md", `See docs/zh-CN/architecture.md.\n\n合并规则：${retiredRule}。\n`);

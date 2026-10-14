@@ -361,7 +361,7 @@ npm run verify   # typecheck, lint, secret/docs gates, ~1400 tests, build, bundl
 
 Design documents (Chinese): [architecture](docs/zh-CN/architecture.md) ·
 [testing & acceptance](docs/zh-CN/testing.md) · [measured findings](docs/zh-CN/findings/).
-Every behavioural claim above traces to a decision record (ADR 1–83) and, where it
+Every behavioural claim above traces to a decision record (ADR 1–84) and, where it
 matters, to a real-machine measurement.
 
 ## License

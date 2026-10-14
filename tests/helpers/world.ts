@@ -98,6 +98,12 @@ export interface TransportOptions {
   readonly zeroByte?: boolean;
   /** Preserve the source mtime (many sync tools do), or stamp it now. */
   readonly mtime?: "preserve" | "rewrite-now" | "future";
+  /**
+   * Carry only files whose bytes differ, as a real sync tool does. Without
+   * it every flush rewrites every file, which no machine could tell from
+   * somebody appending to all of them.
+   */
+  readonly changedOnly?: boolean;
 }
 
 interface Version {
@@ -197,6 +203,14 @@ export class Machine {
    */
   private readonly localEvidence = new Map<string, CachedContentFacts>();
   /**
+   * Paths whose next full read fails with EBUSY, once — a sync client or an
+   * antivirus holding the file. Permission bits cannot do this portably:
+   * Windows reads a mode-000 file regardless.
+   */
+  readonly readFailures = new Set<string>();
+  /** This machine's own record of the sync folder's copies (ADR-84). */
+  private readonly remoteEvidence = new Map<string, CachedContentFacts>();
+  /**
    * Counts the reads a pass performs, which is how E1 is observable at all.
    *
    * `readPaths` matters once the real stores are in play: a wired pass reads
@@ -247,9 +261,15 @@ export class Machine {
   }
 
   /** Forgets in-process state, as an Obsidian restart would. */
+  /** This machine's own record of the sync folder's copies, lost — as a wiped ledger half. */
+  forgetRemoteEvidence(): void {
+    this.remoteEvidence.clear();
+  }
+
   restart(): void {
     this.ledger.clear();
     this.localEvidence.clear();
+    this.remoteEvidence.clear();
   }
 
   resetIo(): void {
@@ -329,9 +349,9 @@ export class Machine {
   /**
    * Builds the pass's E1 cache from the two stores it actually has.
    *
-   * Remote entries come from the manifest in the sync directory — untrusted,
-   * transported by `flush()`, deletable. Local entries come from this
-   * machine's own memory. A manifest that is missing or unreadable forces a
+   * Both sides come first from this machine's own memory; the sync folder's
+   * copy falls back to the manifest in the sync directory — untrusted,
+   * transported by `flush()`, deletable — as production does since ADR-84. A manifest that is missing or unreadable forces a
    * full-read pass (trigger T4), which is what makes losing it cost I/O rather
    * than correctness.
    */
@@ -354,14 +374,26 @@ export class Machine {
     // Arrow properties, not shorthand methods: `this` has to stay the machine.
     return {
       lookup: (rel, side) =>
-        side === "remote" ? entries[key(rel)] : this.localEvidence.get(rel),
+        side === "remote"
+          ? (this.remoteEvidence.get(rel) ?? entries[key(rel)])
+          : this.localEvidence.get(rel),
       scrub: (): ScrubTrigger | null => (forceFullRead ? "T4-manifest" : null),
       record: (rel, side, facts) => {
         if (side === "local") {
           this.localEvidence.set(rel, facts);
           return;
         }
+        this.remoteEvidence.set(rel, facts);
         const previous = entries[key(rel)];
+        // The same content verified again is not rewritten (ADR-84).
+        if (
+          previous &&
+          previous.size === facts.e0.size &&
+          previous.lineCount === facts.lineCount &&
+          previous.contentHash === facts.contentHash
+        ) {
+          return;
+        }
         entries[key(rel)] = {
           provider: rel.slice(0, rel.indexOf("/")),
           workspaceId: WORKSPACE_ID,
@@ -405,7 +437,7 @@ export class Machine {
    */
   async wiredPass(options: WiredPassOptions = {}): Promise<PassOutcome> {
     const guard = await this.pathGuard();
-    const fs = countingGateway(this.nodeGateway(), this.io);
+    const fs = countingGateway(this.nodeGateway(), this.io, this.readFailures);
     const home = createHomeStore({ fs, guard, joinPath: path.join, stateRoot: this.homeRoot });
     const syncDir = createSyncDirStore({
       fs,
@@ -595,7 +627,7 @@ export class Machine {
     localQuietMs?: number;
     remoteQuietMs?: number;
   }): EngineDeps {
-    const fs = countingGateway(this.nodeGateway(), this.io);
+    const fs = countingGateway(this.nodeGateway(), this.io, this.readFailures);
     const adapter = this.adapter();
 
     return {
@@ -838,6 +870,7 @@ class MemoryLedger implements LedgerView {
 function countingGateway(
   inner: FsGateway,
   counts: { readFile: number; readTail: number; readHead: number; lstat: number; readPaths: string[] },
+  readFailures: Set<string> = new Set(),
 ): FsGateway {
   return {
     ...inner,
@@ -848,6 +881,11 @@ function countingGateway(
     async readFile(target) {
       counts.readFile++;
       counts.readPaths.push(target);
+      if (readFailures.delete(target)) {
+        const error: NodeJS.ErrnoException = new Error(`EBUSY: injected, open '${target}'`);
+        error.code = "EBUSY";
+        throw error;
+      }
       return inner.readFile(target);
     },
     async readTail(target, n) {
@@ -894,6 +932,10 @@ async function copyTree(
     if (options.zeroByte) bytes = Buffer.alloc(0);
     else if (options.truncateBytes !== undefined) bytes = bytes.subarray(0, options.truncateBytes);
 
+    if (options.changedOnly) {
+      const existing = await fsp.readFile(to).catch(() => null);
+      if (existing !== null && Buffer.compare(existing, bytes) === 0) continue;
+    }
     await fsp.mkdir(path.dirname(to), { recursive: true });
     await fsp.writeFile(to, bytes);
 

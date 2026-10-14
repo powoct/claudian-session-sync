@@ -270,11 +270,13 @@ export interface LedgerView {
  * The E1 cache (architecture §5.3), behind an interface because its two halves
  * live in different places with different trust levels.
  *
- * The remote side is backed by the sync directory's manifest, which any machine
- * and any sync tool can rewrite; the local side by this machine's observations
- * ledger, which nothing else touches. The engine deliberately cannot tell them
- * apart: both may authorise exactly one outcome, so a difference in trust would
- * change nothing about what it is allowed to do with either.
+ * Both sides are answered first from this machine's observations ledger,
+ * which nothing else touches; the remote side falls back to the sync
+ * directory's manifest — which any machine and any sync tool can rewrite —
+ * only when the ledger has no record of that copy (ADR-84). The engine
+ * deliberately cannot tell the sources apart: each may authorise exactly one
+ * outcome, so a difference in trust would change nothing about what it is
+ * allowed to do with either.
  */
 export interface EvidenceCache {
   /** What was remembered about this side, or undefined. */
@@ -736,6 +738,27 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const remoteBytes = readRemote ? await readBytes(deps, remotePath) : null;
       await barrier("P3:bytes-read", { neutralRel: file.neutralRel });
 
+      // There and settled, and still not read — a sync client or antivirus
+      // holding it (EBUSY, EPERM), too many open files, gone since the stat.
+      // Planned on, the side reads as empty and the pair as "neither side
+      // exists", a settled NOOP the next pass would not revisit. Deferred, it
+      // is unsettled, and the next pass reads it again (T3).
+      if ((readLocal && localBytes === null) || (readRemote && remoteBytes === null)) {
+        actions.push(entry(group, file.neutralRel, adapter.id, "DEFER", "read-failed", "DEFERRED"));
+        recordLedger(deps, file.neutralRel, "local", localO2, nowMs, null);
+        recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, null);
+        if (
+          records &&
+          adapter.id === "claudian" &&
+          !localO2.exists &&
+          remoteO2.exists &&
+          (storeRecreated || records.state.recreatedFor(file.neutralRel))
+        ) {
+          recreationCarried.add(file.neutralRel);
+        }
+        continue;
+      }
+
       // O3: the file must not have moved while we were reading it.
       const localO3 = localBytes ? await observe(deps, localPath) : localO2;
       const remoteO3 = remoteBytes ? await observe(deps, remotePath) : remoteO2;
@@ -1114,7 +1137,12 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       // just wrote, so treating it as a never-before-seen file on the next
       // pass would defer it for a full round for no reason — and would make a
       // converged pair take three passes to report NOOP instead of one.
-      const wrote = applied.result === "APPLIED";
+      // A write, not just an applied decision: applyAction reports NOOP and
+      // CONFLICT as APPLIED too, and treating those as writes recorded the
+      // sync folder's copy against a fresh stat and *this machine's* bytes —
+      // a pair that, once ADR-84 made the ledger the first answer, could hide
+      // a same-size replacement until the next scrub (review 2026-10-15).
+      const wrote = applied.result === "APPLIED" && WRITE_ACTIONS.has(decision.action);
       const pulled = decision.action === "PULL_NEW" || decision.action === "PULL_OVERWRITE";
       const localPost = wrote && pulled ? await observe(deps, localPath) : localO2;
       const remotePost = wrote && !pulled ? await observe(deps, remotePath) : remoteO2;

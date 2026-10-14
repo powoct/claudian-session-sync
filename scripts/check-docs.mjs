@@ -49,4 +49,21 @@ if (text !== null) {
   }
 }
 
-v.finish(GATE, "CLAUDE.md points at the spec and restates no retired rules");
+// A placeholder left for a review or injection record (`{{REVIEW84}}`) is a
+// decision record that says less than it claims. Upper-case names only, so a
+// CI snippet's `${{ github.ref }}` is not one.
+const PLACEHOLDER = /\{\{[A-Z][A-Z0-9_]*\}\}/g;
+for (const doc of ["docs/zh-CN/architecture.md", "docs/zh-CN/testing.md", "README.md", "HANDOFF.md"]) {
+  let body;
+  try {
+    body = readFileSync(path.join(root, doc), "utf8");
+  } catch {
+    continue;
+  }
+  for (const match of body.matchAll(PLACEHOLDER)) {
+    const line = body.slice(0, match.index).split("\n").length;
+    v.add(`${doc}:${line} still has the placeholder ${match[0]}`);
+  }
+}
+
+v.finish(GATE, "CLAUDE.md points at the spec, restates no retired rules, and the docs carry no placeholders");

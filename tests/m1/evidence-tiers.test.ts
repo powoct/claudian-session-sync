@@ -132,6 +132,11 @@ describe("EV-1: no manifest can authorise a write", () => {
     const remoteHash = sha256(await read(replicaFile(b)));
     expect(localHash, "the two sides must really differ").not.toBe(remoteHash);
 
+    // Since ADR-84 the manifest answers only a machine with no record of its
+    // own for this copy — B's would simply not match the swapped file, and B
+    // would read it. So B's is lost first, which is the case where the
+    // shared file's lie can still reach a decision.
+    b.forgetRemoteEvidence();
     const manifest = await readManifest(b.manifestPath);
     const key = `${WORKSPACE_ID}/claude-code/${SID}.jsonl`;
     manifest.entries[key] = {

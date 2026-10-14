@@ -11,8 +11,10 @@
  *
  *  - the **ledger** is what this machine watched happen — signatures, quiet
  *    windows, streaks. Nothing in it has crossed a network;
- *  - the **evidence cache** is content facts remembered from full reads, whose
- *    remote half lives in the sync directory and is written by other machines.
+ *  - the **evidence cache** is content facts remembered from full reads — this
+ *    machine's own for both sides, with the shared manifest in the sync
+ *    directory, written by every machine, as a fallback for the sync
+ *    folder's copy (ADR-84).
  *
  * They are both allowed to be wrong. The ledger being wrong costs a slow pass;
  * the cache being wrong costs a missed one. Neither can cost a write, and that
@@ -20,7 +22,6 @@
  */
 import type { CachedContentFacts, Manifest, ManifestEntry } from "../domain/manifest";
 import { isValidEntryKey, scrubTrigger } from "../domain/manifest";
-import { signaturesEqual } from "../domain/stability";
 import type { LedgerEntryRecord, ObservationsFile } from "../infra/state-store";
 import type { EvidenceCache, LedgerEntryView, LedgerView } from "./sync-engine";
 
@@ -157,21 +158,21 @@ export function createPassState(input: PassStateInput): PassState {
 
   const evidence: EvidenceCache = {
     lookup(rel, side) {
-      if (side === "remote") {
-        const entryKey = key(rel);
-        // A key that does not parse as `<workspaceId>/<provider>/<path>` is
-        // somebody else's or malformed; either way it does not describe this
-        // file (§5.3.4 M-06).
-        if (!isValidEntryKey(entryKey, input.workspaceId)) return undefined;
-        return entries[entryKey];
-      }
-      const record = local.get(rel);
-      if (!record || record.verifiedSig === null || record.contentHash === "") return undefined;
-      return {
-        e0: record.verifiedSig,
-        contentHash: record.contentHash,
-        lineCount: record.verifiedLineCount,
-      };
+      // This machine's own record first, for the sync folder's copy as for its
+      // own (ADR-84). An E0 signature carries the reader's inode and ctime —
+      // and the sync tool's copy on each machine has its own — so the one in
+      // the shared manifest describes the copy on whichever machine read it
+      // last. With two machines syncing, each rewrote it after every read and
+      // each missed it on the next pass: every unchanged session was read in
+      // full on every pass, and charged to the budget (round 12, B1).
+      const own = verifiedFacts(sideMap(side).get(rel));
+      if (own !== undefined || side === "local") return own;
+      const entryKey = key(rel);
+      // A key that does not parse as `<workspaceId>/<provider>/<path>` is
+      // somebody else's or malformed; either way it does not describe this
+      // file (§5.3.4 M-06).
+      if (!isValidEntryKey(entryKey, input.workspaceId)) return undefined;
+      return entries[entryKey];
     },
 
     scrub(rel) {
@@ -197,18 +198,16 @@ export function createPassState(input: PassStateInput): PassState {
       recordVerified(sideMap(side), rel, facts, input.nowMs);
       if (side !== "remote" || !input.manifestWritable) return;
       const previous = entries[key(rel)];
-      // Re-verifying an unchanged file is not news. Rewriting the entry
-      // anyway would bump `generation` and stamp `updatedAt` on every scrub
-      // of every quiet file — churn in a *shared* file. The signature check
-      // is exact (all five stat components), so a file another machine wrote
-      // — different inode, different timestamps — still refreshes the entry,
-      // which is what that machine's E1 tier needs.
+      // Re-verifying the same content is not news, whichever machine's stat
+      // the entry carries. Rewriting it anyway would bump `generation` and
+      // stamp `updatedAt` on every scrub of every quiet file — churn in a
+      // *shared* file — and swapping one machine's signature for another's
+      // helps neither: each now remembers its own (ADR-84).
       if (
         previous &&
         previous.size === facts.e0.size &&
         previous.lineCount === facts.lineCount &&
-        previous.contentHash === facts.contentHash &&
-        signaturesEqual(previous.e0, facts.e0)
+        previous.contentHash === facts.contentHash
       ) {
         return;
       }
@@ -242,6 +241,12 @@ export function createPassState(input: PassStateInput): PassState {
     manifest: () => (input.manifestWritable ? { ...input.manifest, entries } : null),
     manifestChanged: () => manifestDirty,
   };
+}
+
+/** A ledger record's verified facts, or undefined when it holds no usable pair. */
+function verifiedFacts(record: LedgerEntryRecord | undefined): CachedContentFacts | undefined {
+  if (!record || record.verifiedSig === null || record.contentHash === "") return undefined;
+  return { e0: record.verifiedSig, contentHash: record.contentHash, lineCount: record.verifiedLineCount };
 }
 
 /**
