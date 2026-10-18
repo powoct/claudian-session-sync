@@ -27,6 +27,11 @@ export default defineConfig({
     // Real tmpdirs and real rename semantics mean tests must not race each other
     // inside one file (testing.md §2.2).
     sequence: { concurrent: false },
+    // CI only. Hosted Windows runners stall now and then: tests that take
+    // 300–700 ms on main ran past vitest's 5 s default three times in a week
+    // (#60, #62), each time a different test and each time green on a rerun.
+    // Locally the default stays, so a hang still fails fast.
+    testTimeout: process.env.CI ? 30_000 : 5_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "lcov"],
