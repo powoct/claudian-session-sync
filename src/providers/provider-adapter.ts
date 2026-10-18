@@ -102,6 +102,14 @@ export interface NeutralClassification {
   readonly replicaOnly?: boolean;
 }
 
+/**
+ * The `healthCheck` reason every CLI provider gives when the vault has no
+ * Claudian records to admit sessions by (ADR-47). One string, because the
+ * engine matches it: a pass that creates the records folder says that once,
+ * in place of these lines (D12).
+ */
+export const NO_RECORDS_REASON = "no Claudian conversation records in this vault";
+
 export interface ProviderAdapter {
   readonly id: string;
   readonly tier: ProviderTier;

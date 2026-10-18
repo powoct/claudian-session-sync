@@ -1154,7 +1154,7 @@ records provider 两机都开(E2c),或 E2b 加至少一条 flat 层记录。在�
 | **D9** | 新机器 C 首次开启:A 上 hold 的对话在 C 上照常出现(ADR-10,符合预期);带墓碑的那对只落墓碑 |
 | **D10** | 共享开关开着:对端删除或 Assign 一条本机共享过的记录 → 本机**不**重新发布。若本机仍有自己那份(共享发生在当前 Obsidian 会话里,没重启过),它出现在「Repair shared conversation records」里;Assign 给对端的那条**没有**发布按钮 |
 | **D11 ⭐** | A 删一条后把同步夹换成新目录并 Initialise;B 后来也换过去、推上那条 → A 上**不回来**,也不再弹窗。旧夹里没解决的冲突换夹后照样判 `CONFLICT`(在后换过去的那台上);conflict id 按内容命名,与旧夹里的相同,照记即可 |
-| **D12** | 关掉 Obsidian,把 A 的 `.claudian` 整个移走再打开(或重新下载一个不带 `.claudian` 的 vault)→ **启动轮**:缺的记录 `PULL_NEW` / `remote-only`(ADR-78 ③:store 不在,按没见证过判),本插件因此建起 `.claudian/sessions/`(不是 Claudian 建的);此前 hold 的仍 `SKIP_DELETED_HERE`;这一轮的 Notices 照旧说 `provider claudian unavailable: no .claudian/sessions directory…`(claude-code、codex、grok 是「no Claudian conversation records」)。CLI provider 在这一轮:同步夹里的文件照常按真实本地路径规划(没有错写,没有拉到已有文件上),只有本机独有的会话晚一轮推送。「…was recreated since the last sync…」那句**只在本机此前记下过 store 身份时**于下一轮出现(那时已无可恢复);从 0.3.5 升级后的第一轮(store 身份是 0.3.5 之后才有的)或没有 inode 的文件系统上不会出现,不算失败。此前删掉的那条始终不回来 |
+| **D12** | 关掉 Obsidian,把 A 的 `.claudian` 整个移走再打开(或重新下载一个不带 `.claudian` 的 vault)。**0.3.7 起(ADR-85,在 §9.16 S1 重跑)** → **启动轮**:缺的记录 `PULL_NEW` / `remote-only`,本插件因此建起 `.claudian/sessions/`;此前 hold 的仍 `SKIP_DELETED_HERE`;Notices **没有** `provider claudian unavailable`,也没有 claude-code、codex、grok 的「no Claudian conversation records in this vault」,代之以一句「Claudian's conversation folder was not in this vault, so it was created with N conversation(s) from the sync folder.」——N 数对话(落地的 `.meta.json`),不数 `.inputs.json`、`.deleted.json`;本机有 hold 的记录时后接「Conversations this device was already keeping off stay off.」,CLI provider 那几行被去掉时(某个开着的 CLI provider 的健康检查恰以「no Claudian conversation records in this vault」失败——它自己的会话目录在、vault 里也没有 `.claude/sessions` 旧记录;第 12 轮 A 上三个都是)再接「Sessions these conversations use on this device sync from the next sync.」;一条对话都没落地(N = 0)时各行照旧。CLI provider 的规划同下方 0.3.6。**下一轮没有**「…was recreated since the last sync…」(store 不在的那一轮结束时记下了本轮拉取建起的目录);此后在 Claudian 里删掉一条刚恢复的对话 → `SKIP_DELETED_HERE` / `deleted-here`,重启两次都不回来。此前删掉的那条始终不回来。**0.3.6(第 12 轮按此通过,留作历史)** → **启动轮**:缺的记录 `PULL_NEW` / `remote-only`(ADR-78 ③:store 不在,按没见证过判),本插件因此建起 `.claudian/sessions/`(不是 Claudian 建的);此前 hold 的仍 `SKIP_DELETED_HERE`;这一轮的 Notices 照旧说 `provider claudian unavailable: no .claudian/sessions directory…`(claude-code、codex、grok 是「no Claudian conversation records」)。CLI provider 在这一轮:同步夹里的文件照常按真实本地路径规划(没有错写,没有拉到已有文件上),只有本机独有的会话晚一轮推送。「…was recreated since the last sync…」那句**只在本机此前记下过 store 身份时**于下一轮出现(那时已无可恢复);从 0.3.5 升级后的第一轮(store 身份是 0.3.5 之后才有的)或没有 inode 的文件系统上不会出现,不算失败。此前删掉的那条始终不回来 |
 | **D13** | 删一条 transcript 早已被 Claude Code 清理（本机与同步夹都没有）的旧 Claude 对话 → **保持删除**,没有「restored」通知 |
 
 **D1 是核心。** 它失败就说明这次修复在真的 Claudian 上不成立,其余各步都没有意义。
@@ -1168,6 +1168,7 @@ records provider 两机都开(E2c),或 E2b 加至少一条 flat 层记录。在�
 带到下一轮,下一轮可能被误 hold 成 `deleted-here`(罕见,两轮后会报出,可经「Bring back conversations deleted on this device」
 找回),修在 0.3.7。
 收尾把原来的 `.claudian` 移回时,「recreated」那句再出现一次、各记录先 `DEFER` 再 `content-identical`,属预期。
+**(2026-10-18)** 文案与这条残余都已在 0.3.7 改(ADR-85;D12 行的「0.3.7 起」),验收见 §9.16。
 
 ⚠️ **第 10 轮(2026-10-14,两台 macOS,Claudian 2.3.20)**:**D0 ✅**(Claude、Codex 两条在 B 上能续;Grok 那条
 未测——测试 vault 里 Claudian 发 Grok 要登录,真实 vault 靠 Claudian 设置里的环境变量登录,按红线没有拷;
@@ -1237,7 +1238,7 @@ sha256 未变,B 上能续)、**A2 ✅**(归档期间不拉;Restore 后 `DEFER` �
 
 ⚠️ **R1 ⭐⭐ 从未在真机上跑过**:第 10、12 轮与续跑都没有样本(测试 vault 的记录都在 1 KB 以下,没有 2.3.8 之前保存、带图、
 1 MB 以上的记录,也没有从平常 vault 拷)。只读观察三轮一致:两台 `byteCountBasis` 为 2,`lastKnownCounts.bytes` 等于同步夹
-`<ws>` 下不含 `claudian/` 的字节合计。**0.3.6 照 0.3.4 的先例,以自动化加只读观察放行 R1,维护者合并本 PR 即确认**;
+`<ws>` 下不含 `claudian/` 的字节合计。**0.3.6 照 0.3.4 的先例,以自动化加只读观察放行 R1,维护者合并 #60 即确认**;
 ADR-80 仍记 ⚠️,R1 等有样本时补跑。
 
 ### 9.14 发送前的预警与同步夹审计(ADR-81,**0.3.6 的闸门**,两机)
@@ -1300,7 +1301,7 @@ zstd`);Windows 机器上不造压缩件。**只对测试 vault 里新建的会�
 |---|---|
 | **B1 ⭐⭐** | **先决**:改 3 之前先在上限 200 下两机各跑一次 Verify all(刷新 T1 的「上次全量校验」,否则第 10 轮读过的文件会在满 24 小时时按 T1 整份重读、在上限 3 下挤掉别人),24 小时内做完;`maxFilesPerPass` 改为 3(测试 vault 两台各一份、没有 vault 同步,两台各改)、重开 Obsidian 后,Sync now 排空:连续两轮除 `e1-cache-hit`、`SKIP_*`、每轮约 1 行 T6 抽检(`content-identical`)与每轮都要读的已知分歧行(`equivalent-left-as-is`、`conflict-already-known`)之外没有别的行;已知分歧行有 k 条、k ≥ 2 的那台把上限改成 k + 3。然后重跑 §9.12 D2:5 条删除**在同一轮**全部显示 `SKIP_DELETED_HERE`(删除后的首判不受预算约束);B 新建的一条在随后两轮内落到 A;没变的会话一律 `e1-cache-hit`,不出现在 `budget-exhausted` 行里 |
 | **B2 ⭐** | 同样先排空,再重跑 §9.13 A3:B 新建的 Codex 对话在 B 上稳定之后的那一轮离开 B,在 A 上稳定之后的那一轮落到 A(两边各自第一次看到它时是 `DEFER`/`side-unstable`);它没有一行 `budget-exhausted` |
-| **Z1b** | (观察项,紧接 Z1、在 Z2 之前)恢复屏上 Z1 那条的本机备份行:「Restore this version」是灰的,说明以「Codex has compressed this conversation on this machine.」开头。Z2 之后 `.jsonl` 已落在旁边,这一行照常可以恢复。同一会话若还有第三类行——标「(codex, from the sync folder)」的同步夹侧旧版——它**按设计可点**,说明以通用的「This replaces what is there now…」开头,接着说本机已压缩、下次同步只在它正是压缩内容的延续时才复制到本机;**只看不点**:恢复写的是同步夹,会传到别的设备,另一台随后又把它推回去。(本机行的标题现为「from the this machine」,文案错误,0.3.7 改) |
+| **Z1b** | (观察项,紧接 Z1、在 Z2 之前)恢复屏上 Z1 那条的本机备份行:「Restore this version」是灰的,说明以「Codex has compressed this conversation on this machine.」开头。Z2 之后 `.jsonl` 已落在旁边,这一行照常可以恢复。同一会话若还有第三类行——标「(codex, from the sync folder)」的同步夹侧旧版——它**按设计可点**,说明以通用的「This replaces what is there now…」开头,接着说本机已压缩、下次同步只在它正是压缩内容的延续时才复制到本机(0.3.7 起这段说明改写,见 §9.16 S4);**只看不点**:恢复写的是同步夹,会传到别的设备,另一台随后又把它推回去。(本机行的标题现为「from the this machine」,文案错误,0.3.7 改为「from this machine」,见 §9.16 S4) |
 | **Z1 ⭐⭐** | A 上一条已同步、两边一致的 Codex 对话被压缩(`sessions/` 下只剩 `.jsonl.zst`)→ A 上 Sync now ×2:`SKIP_COMPRESSED_HERE` / `compressed-here`;`sessions/` 下**没有**被拉回的普通文件;`.zst` 的 sha256 未变;报告**没有**「cannot tell whether it continues」;Notices 里那句普查是「Codex has compressed N of this vault's conversation file(s)」而不是「does not recognise」 |
 | **Z2 ⭐** | Z1 之后 B 用终端 `codex exec resume <thread id> "continue"` 续一轮并同步 → A 上 Sync now ×2(第一次可能是 `DEFER` / `side-unstable`):`PULL_NEW`,普通文件落在 `.zst` 旁边,报告一句「compressed by Codex on this device, and continued on another device since」,点名完整 thread id;A 上 `codex exec resume` 能看到 B 那一轮 |
 | **Z3 ⭐** | 另一条已同步的对话:**退出 A 的 Obsidian**,在 A 的终端 `codex exec resume <id> "one more"` 续一轮(插件没看到这一轮),再 `zstd -q --rm` 压缩;B 也续一轮并同步;开 A 的 Obsidian,Sync now ×2 → `SKIP_COMPRESSED_HERE`,**没有**普通文件落地,报告点名完整 id 并说「cannot tell whether it continues the compressed one」与「quit without sending」。随后按那句话做:Codex 里打开一次、不发送就退出 → Sync now ×2 → `CONFLICT`,两份都在隔离区(两边各有对方没有的一轮) |
@@ -1343,6 +1344,48 @@ vault's…」(N 多半是 17,大于 17 的部分是从没推送过就被压缩�
 下一次只读探针(v2)在 A、B 两台的平常 vault 上都跑,补上帧头声明的原长、ledger 的签名、按 provider 的饥饿计数与
 两项上限设置。
 
+### 9.16 不在的 store 按重建处理(ADR-85,**0.3.7 的闸门**,两机或单机)
+
+§9.12 D12 的续篇。0.3.6 里,store 刚重建或不在的那一轮判了恢复、却没落地的记录(读完后又被改、同步夹那份是 0 字节、
+`PULL_NEW` 执行时失败)不会被带到下一轮,下一轮可能被 hold 成 `deleted-here`;store 不在的那一轮受到保护只是碰巧
+(记着的旧身份让下一轮判「recreated」)。**ADR-85** 把这一轮缺的记录先收集、再结清:落地、hold、退役或本机已有的才算
+结清,其余带到下一轮(`claudian-records.json` 的 `recreatedPending`),在那里按恢复判、不会被 hold 成 `deleted-here`;store 不在的那一轮结束时
+记下本轮拉取建起的那个目录的身份,下一轮不再说「recreated」,之后谁把它换掉都算重建。D12 那一轮的「unavailable」换成
+一句实话。同一版本另有文案:Codex「cannot tell」通知加了一句有保留的话(ADR-83 ⑨ 的后续,OQ-37 仍开着),恢复屏的
+标题、压缩会话两行的说明与 `target-compressed` 的拒绝提示。
+
+自动化证据是 `tests/m1/deleted-here-runtime.test.ts` 的「a store that is not there」一组(D12 通知的全句与只有首句两种、N 数对话、
+没有对话落地时各行照旧、dry run 不建不记、从没记过身份时写入失败的那条下一轮恢复)与「a record missing from a store that
+was …」一组(not there、recreated 各一遍:没落地的六种情形都在后面某轮恢复、从不 hold;同步夹那份一直不在就一直带着;
+本机又有了的放掉,此后删掉仍保持删除;已 hold 的不带)、`tests/m1/claudian-records.test.ts` 的 store 身份一组(记下本轮
+拉取建起的目录;dry run、别的原因不可用时不记),以及 `restore-ui.test.ts`、`codex-compressed-here.test.ts` 的文案断言。
+Claudian 一侧同 §9.12,是按 2.3.20 逐行复刻的 fixture,**没有一条跑在真的 Claudian 上**。本轮经实现、三个视角的对抗审查
+(ADR-78 的安全性、用户可见文案、测试与变异)、修复轮与一名新的复核者;约 25 个注入,除两个等价或生产上不可达的(收尾处
+「带着走」与「记身份」对调先后——两份状态互不相干;「provider 关着算不在」——关着时 records 本就是 null)外全部验红。
+
+**环境**:同 §9.12(测试 vault,records provider 开着,Claudian **2.3.20 发布版**),Automatic sync interval 设为 0
+(同 §9.14)。S1–S3 只要 A 一台和一份已有内容的同步夹;S4 的 Codex 通知按 §9.15 Z3 的造法,要两机。每一步记报告行、
+`.claudian/sessions` 的列表(只记文件名),以及 `~/.claudian-session-sync/state/<ws>/claudian-records.json` 里
+`storeIdentity` 变没变(只记变没变,不抄值)与 `recreatedPending` 的条数。漏记的处理同 §9.12。移走的 `.claudian`
+放在 vault 外,不删。
+
+| 步 | 断言 |
+|---|---|
+| **S1 ⭐⭐** | 按 §9.12 D12 行「0.3.7 起」的预期重跑 D12:关掉 Obsidian,把 `.claudian` 整个移到 vault 外再打开 → 启动轮缺的记录 `PULL_NEW` / `remote-only`,此前 hold 的仍 `SKIP_DELETED_HERE`;Notices 里恰好一句「Claudian's conversation folder was not in this vault, so it was created with N conversation(s) from the sync folder. Conversations this device was already keeping off stay off. Sessions these conversations use on this device sync from the next sync.」(N 等于这一轮 `PULL_NEW` 落地的 `.meta.json` 条数;后两句的条件见 D12 行),没有 `provider claudian unavailable`,没有「no Claudian conversation records in this vault」;`storeIdentity` 变了。**下一轮没有**「Claudian's conversation folder on this device was recreated since the last sync…」,没有新的 `SKIP_DELETED_HERE`;`recreatedPending` 通常为 0,不为 0 时逐条核对同步夹里也没有它(或它在那一轮是 `DEFER`)。**再在 Claudian 里删掉一条刚恢复的对话** → 下一轮 `SKIP_DELETED_HERE` / `deleted-here`,再下一轮一条 Notice 加一次弹窗,重启两次都不回来 |
+| **S2 ⭐** | S1 之后,关掉 Obsidian,把插件建起的 `.claudian` 拷一份到 vault 外(拷贝是另一个目录,身份不同),拷时漏掉一条 S1 恢复的对话的 `.meta.json`(例如 `rsync -a --exclude '<conv id>.meta.json'`;不删任何文件),再把原目录移出 vault、拷贝放进来 → 打开后的那一轮:Notices 有「…was recreated since the last sync, so records missing from it are being restored rather than treated as deleted here.」;删掉的那条 `PULL_NEW` / `remote-only`,**不是** `SKIP_DELETED_HERE`;除此前 hold 的(含 S1 删的那条)外没有新的 `SKIP_DELETED_HERE`,随后两轮没有 deleted-here 的 Notice 或弹窗;其余记录可能先 `DEFER` 再 `content-identical`(同 §9.12 D12 下方的注)。再下一轮没有「recreated」 |
+| **S3** | (可选,只在真机上自然出现时做)store 不在的那一轮里有一条记录没落地——同步夹那份是 0 字节(同步客户端还没下载完),或写入失败 → 这一轮它不是 `PULL_NEW` / `APPLIED`,也不是 `SKIP_DELETED_HERE`,`recreatedPending` 里有它;之后某一轮 `PULL_NEW` 落地,其间没有 `SKIP_DELETED_HERE`、没有 deleted-here 的 Notice。**不要为此手工改同步夹里的文件**(会传到别的设备);造不出就记「未测」,由上述「is restored on a later pass when …」六条覆盖 |
+| **S4** | 文案核对(只看不点):恢复屏每段标题是「<文件名> (<provider>, from this machine)」或「… (codex, from the sync folder)」,不再有「from the this machine」;§9.15 Z1b 那条压缩会话的同步夹行,在「This replaces what is there now, which is kept as a new backup first.」之后是「This changes the sync folder's copy, so your other machines get it on their next sync — one holding a later version puts that back. Codex has compressed this conversation on this machine, so it is copied here only if it continues exactly what was compressed. To compare it here, open the conversation in Codex once and quit without sending, and let a sync run before you continue it; if this machine's copy continues on from this version, that sync puts it back.」;灰掉的本机行含「open the conversation in Codex once and quit without sending to turn it back into a plain file」。按 §9.15 Z3 造出的「cannot tell」通知含「sending first may leave two versions. Opening it may itself add a line in Codex; if another device has continued it too, sync then keeps both versions as a conflict, so nothing is lost.」,不再有「may split the conversation into two versions」,也没有任何叫人选哪一版的话。`target-compressed` 的拒绝提示(打开恢复屏之后、点之前才被压缩)真机上难造,只由自动化覆盖 |
+| **S5** | (可选回归)抽查 §9.15 Z1、Z2 与 §9.11 H2、H3:结果同 0.3.6(0.3.7 没有改它们的判定) |
+
+**S1 是核心。** ADR-85 只会让一条缺的记录更偏向恢复:失败若是「下一轮又说 recreated」,只多一句话;若是「之后删掉的那条
+也被恢复」,就是 ADR-78 修掉的复活又回来了——S1 的最后一步查的正是它。ADR-85 的三条残余(pass 中途抛出、很久以前删的
+记录在重建后回来一次、轮内出现又消失的记录被当作本机删除)不在真机上造,见架构 ADR-85。
+
+收尾:关掉 Obsidian,把 vault 里此时的 `.claudian` 移到 vault 外(S2 换下的那个目录同样留在 vault 外,都不删),再把 S1 移走的原目录移回。「recreated」那句再出现一次、各记录先 `DEFER` 再 `content-identical`,
+同 §9.12 D12 下方的注;S1 删掉的那条若在原目录里,回到本机即解除 hold(ADR-78),属预期。
+
+⚠️ **未执行**(2026-10-18 写定)。版本号照 0.3.6 的做法,在本节通过后才改成 0.3.7。
+
 ### 9.5 各里程碑 Exit Criteria
 
 | 里程碑 | 通过标准 |
@@ -1355,7 +1398,8 @@ vault's…」(N 多半是 17,大于 17 的部分是从没推送过就被压缩�
 | **2.2.5 兼容** | §9.8 四步全过 ✅（2026-09-01）——0.3.0 的发布闸门 |
 | **搬运对账** | §9.9 E1–E3 ✅（2026-09-04）——0.3.1 的发布闸门；E4 无残留未测 |
 | **Codex 新格式** | §9.10 G1–G4 ✅（2026-09-10）——0.3.3 的发布闸门 |
-| **0.3.6** | §9.11 H2–H4、H6 ✅（2026-10-15;H5 ✅ 2026-10-14;H7 真机不可达）、§9.12 D0–D7、D11、D12 ✅（2026-10-14/15）、§9.13 A1–A3 ✅（2026-10-14/15）、§9.14 ✅（2026-10-14;U4 由 Z6 覆盖）、§9.15 B1、B2、Z1–Z5、Z7 ✅、Z6 一半（2026-10-15）——0.3.6 的发布闸门,两台 macOS;续跑构建 = main `d16a471`,2026-10-14 的步骤在第 10 轮构建(main `84f5160`)上通过,D2 的删除部分在第 12 轮构建(main `4f968e7`)上通过([findings](./findings/2026-10-15-0.3.6-acceptance.md))。**R1 ⭐⭐ 从未在真机上跑过**,照 0.3.4 的先例以自动化加只读观察放行(ADR-80 仍 ⚠️),维护者合并本 PR 即确认。未测:D6 的 `SKIP_RETIRED`、D8–D10、D13、A4、Z6 的「compressed by Codex」分支、Z3b;未做:A5、R2;只由自动化覆盖:H7、ADR-84 的 `CONFLICT` 一半与 `read-failed` |
+| **0.3.6** | §9.11 H2–H4、H6 ✅（2026-10-15;H5 ✅ 2026-10-14;H7 真机不可达）、§9.12 D0–D7、D11、D12 ✅（2026-10-14/15）、§9.13 A1–A3 ✅（2026-10-14/15）、§9.14 ✅（2026-10-14;U4 由 Z6 覆盖）、§9.15 B1、B2、Z1–Z5、Z7 ✅、Z6 一半（2026-10-15）——0.3.6 的发布闸门,两台 macOS;续跑构建 = main `d16a471`,2026-10-14 的步骤在第 10 轮构建(main `84f5160`)上通过,D2 的删除部分在第 12 轮构建(main `4f968e7`)上通过([findings](./findings/2026-10-15-0.3.6-acceptance.md))。**R1 ⭐⭐ 从未在真机上跑过**,照 0.3.4 的先例以自动化加只读观察放行(ADR-80 仍 ⚠️),维护者合并 #60 即确认。未测:D6 的 `SKIP_RETIRED`、D8–D10、D13、A4、Z6 的「compressed by Codex」分支、Z3b;未做:A5、R2;只由自动化覆盖:H7、ADR-84 的 `CONFLICT` 一半与 `read-failed` |
+| **0.3.7** | §9.16 S1 ⭐⭐、S2 ⭐、S4 通过(S3 真机上造不出时只由自动化覆盖;S5 可选)——0.3.7 的发布闸门,⚠️ 未执行;版本号在它通过后才从 0.3.6 改为 0.3.7。自动化:`deleted-here-runtime.test.ts` 的「a store that is not there」与「a record missing from a store that was …」两组、`claudian-records.test.ts` 的 store 身份一组、`restore-ui.test.ts` 与 `codex-compressed-here.test.ts` 的文案断言;`npm run verify` 全绿(1459 条以上);约 25 个注入除两个等价或生产上不可达的外全部验红 |
 
 ---
 

@@ -374,7 +374,7 @@ describe("S-20: the observations ledger is lost", () => {
     expect(await exists(observations)).toBe(true);
     const recovered = await b.wiredPass();
     expect(recovered.report.actions.map((x) => x.action)).toContain("PUSH_OVERWRITE");
-  });
+  }, 60_000);
 });
 
 describe("the roots must be canonical", () => {

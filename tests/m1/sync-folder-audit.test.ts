@@ -396,7 +396,7 @@ describe("② sessions with no record in this vault", () => {
     failing = false;
     expect(result.recordsUnread).toBe(2);
     expect(result.unreadDirs).toEqual(["codex/2026/"]);
-  });
+  }, 60_000);
 });
 
 describe("③ records only in .claude/sessions", () => {

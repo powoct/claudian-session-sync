@@ -11,7 +11,7 @@
  */
 import { promises as fsp } from "node:fs";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import type { WorkspaceId } from "../../src/domain/types";
 import { sequentialIdGen } from "../../src/infra/clock";
 import { createHomeStore } from "../../src/infra/home-store";
@@ -23,7 +23,10 @@ import {
   emptyClaudianRecords,
   seedClaudianRecords,
 } from "../../src/orchestration/claudian-records";
+import type { ClaudianRecordsSession } from "../../src/orchestration/sync-engine";
+import { createClaudianAdapter } from "../../src/providers/claudian/adapter";
 import { makeRealTmpDir, removeTree } from "../helpers/fs-cleanup";
+import { WORKSPACE_ID, World } from "../helpers/world";
 
 const CONV = "conv-1786422687897-15ktes7p9";
 const META = `claudian/${CONV}.meta.json`;
@@ -166,6 +169,197 @@ describe("the store's identity", () => {
     expect(state.observeStore("202")).toBe(true);
     expect(state.observeStore("202")).toBe(false);
     expect(createClaudianRecordsState(state.toFile()).observeStore("202")).toBe(false);
+  });
+});
+
+describe("the store's identity, at the end of a pass the store was missing from", () => {
+  let world: World | null = null;
+  afterEach(async () => {
+    await world?.dispose();
+    world = null;
+  });
+
+  /**
+   * One pass with no store at its start, which appears before its end — the
+   * pass's own pulls create it, in production. What the memory says after.
+   * `otherReason` makes the provider unusable for some other reason instead.
+   */
+  async function storeAppearsDuring(dryRun: boolean, otherReason?: string) {
+    world = World.create();
+    const missing = createClaudianAdapter({
+      providerRoot: path.join(path.sep, "vault", ".claudian", "sessions"),
+      joinPath: (...parts) => path.join(...parts),
+      listDir: async () => [],
+      statFile: async () => null, // not there, so the health check fails
+    });
+    const adapter =
+      otherReason === undefined
+        ? missing
+        : { ...missing, healthCheck: async () => ({ ok: false, reason: otherReason }) };
+    const state = createClaudianRecordsState({
+      schemaVersion: STATE_SCHEMA_VERSION,
+      storeIdentity: "101",
+      records: {},
+    });
+    let identity: string | null = null;
+    const session: ClaudianRecordsSession = {
+      state,
+      markerless: true,
+      claudeTranscriptPath: null,
+      movedToDevice: async () => false,
+      storeIdentity: async () => identity,
+      memoryUnreadable: false,
+      notice: null,
+      commit: async () => undefined,
+    };
+    const report = await world.machine("A").pass({
+      dryRun,
+      extraAdapters: [adapter],
+      claudianRecords: { open: async () => session },
+      barrier: async (point) => {
+        if (point === "P1:discover-done") identity = "202";
+      },
+    });
+    return { report, state };
+  }
+
+  it("adopts the store that is there by then, so the next pass does not call it recreated", async () => {
+    const { report, state } = await storeAppearsDuring(false);
+    expect(report.notices).toContain("provider claudian unavailable: no .claudian/sessions directory in this vault");
+    expect(state.toFile().storeIdentity).toBe("202");
+    expect(createClaudianRecordsState(state.toFile()).observeStore("202")).toBe(false);
+  });
+
+  it("adopts nothing in a dry run", async () => {
+    const { state } = await storeAppearsDuring(true);
+    expect(state.toFile().storeIdentity).toBe("101");
+    expect(state.changed()).toBe(false);
+  });
+
+  it("adopts nothing when the provider was unusable for any other reason", async () => {
+    // Not a store that was not there, so not one this pass created either.
+    const { report, state } = await storeAppearsDuring(false, "structure not recognised");
+    expect(report.notices).toContain("provider claudian unavailable: structure not recognised");
+    expect(state.toFile().storeIdentity).toBe("101");
+  });
+
+  /**
+   * A store that is not there, with its identity read off the real folder as
+   * production reads it, and the sync folder holding META.
+   */
+  async function missingStore(
+    records: Record<string, { readonly witnessedHash: string }> = {},
+    storeIdentity: string | null = "101",
+  ) {
+    world = World.create();
+    const machine = world.machine("A");
+    const root = path.join(machine.localRoot, "vault", ".claudian", "sessions");
+    const adapter = createClaudianAdapter({
+      providerRoot: root,
+      joinPath: (...parts) => path.join(...parts),
+      listDir: async (dir) =>
+        (await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])).map((e) => ({
+          name: e.name,
+          isFile: e.isFile(),
+        })),
+      statFile: async (target) => {
+        const stat = await fsp.stat(target).catch(() => null);
+        return stat === null ? null : { mtimeMs: stat.mtimeMs };
+      },
+    });
+    const shared = path.join(machine.replicaRoot, WORKSPACE_ID, META);
+    await fsp.mkdir(path.dirname(shared), { recursive: true });
+    await fsp.writeFile(shared, JSON.stringify({ id: CONV, providerId: "codex", sessionId: null }));
+    const state = createClaudianRecordsState({
+      schemaVersion: STATE_SCHEMA_VERSION,
+      ...(storeIdentity !== null ? { storeIdentity } : {}),
+      records,
+    });
+    const identityOf = async () => {
+      const stat = await fsp.stat(root).catch(() => null);
+      return stat === null ? null : String(stat.ino);
+    };
+    const session: ClaudianRecordsSession = {
+      state,
+      markerless: true,
+      claudeTranscriptPath: null,
+      movedToDevice: async () => false,
+      storeIdentity: identityOf,
+      memoryUnreadable: false,
+      notice: null,
+      commit: async () => undefined,
+    };
+    const passOptions = { extraAdapters: [adapter], claudianRecords: { open: async () => session } };
+    return { machine, root, state, identityOf, passOptions };
+  }
+
+  /**
+   * A pass that lands META in a store that was not there. `afterLanding` runs
+   * once everything has landed, before the pass ends. What the memory says
+   * after.
+   */
+  async function landsInMissingStore(afterLanding?: (root: string) => Promise<void>, storeIdentity: string | null = "101") {
+    const { machine, root, state, identityOf, passOptions } = await missingStore({}, storeIdentity);
+    // The first sight of the sync folder's copy, which waits a pass.
+    const first = await machine.pass(passOptions);
+    expect(first.actions.find((r) => r.neutralRel === META)).toMatchObject({ action: "DEFER" });
+    let landedIn: string | null = null;
+    const report = await machine.pass({
+      ...passOptions,
+      barrier: async (point) => {
+        if (point !== "P7:reconciled") return;
+        landedIn = await identityOf();
+        await afterLanding?.(root);
+      },
+    });
+    expect(report.actions.find((r) => r.neutralRel === META)).toMatchObject({ action: "PULL_NEW", result: "APPLIED" });
+    expect(landedIn).not.toBeNull();
+    return { state, landedIn: landedIn as string | null, now: await identityOf() };
+  }
+
+  it("adopts the folder its own pulls created", async () => {
+    const { state, landedIn } = await landsInMissingStore();
+    expect(state.toFile().storeIdentity).toBe(landedIn);
+  });
+
+  it.each([
+    ["one remembered before", "101"],
+    ["none remembered before", null],
+  ])(
+    "remembers the folder its pulls landed in when that was replaced before the pass ended (%s), so the next pass reads a recreation",
+    async (_label, before) => {
+      // A sync client putting its own copy in place: none of what landed is in
+      // it, and adopted, the next pass would hold all of it as deleted here.
+      // Left unadopted, so would a device that never knew an identity: there
+      // a first sighting is no recreation.
+      const { state, landedIn, now } = await landsInMissingStore(async (root) => {
+        await fsp.rename(root, `${root}-replaced`);
+        await fsp.mkdir(root);
+      }, before);
+      expect(now).not.toBe(landedIn);
+      expect(state.toFile().storeIdentity).toBe(landedIn);
+      expect(createClaudianRecordsState(state.toFile()).observeStore(now)).toBe(true);
+    },
+  );
+
+  it("carries nothing for a record that was here at its turn, though gone again by the end", async () => {
+    // Delivered after the listing, so missing at the start of the pass, and
+    // removed again before its end — by then, a delete made here: carried,
+    // the next pass would restore it.
+    const { machine, root, state, passOptions } = await missingStore({ [META]: { witnessedHash: "sha256:w" } });
+    const here = path.join(root, `${CONV}.meta.json`);
+    const report = await machine.pass({
+      ...passOptions,
+      barrier: async (point) => {
+        if (point === "P1:discover-done") {
+          await fsp.mkdir(root, { recursive: true });
+          await fsp.writeFile(here, JSON.stringify({ id: CONV, providerId: "codex", sessionId: null }));
+        }
+        if (point === "P7:reconciled") await fsp.rm(here);
+      },
+    });
+    expect(report.actions.find((r) => r.neutralRel === META)).toMatchObject({ action: "DEFER" });
+    expect(state.recreatedFor(META)).toBe(false);
   });
 });
 

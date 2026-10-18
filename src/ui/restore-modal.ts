@@ -135,8 +135,8 @@ export class RestoreModal extends Modal {
 }
 
 function describeSession(backup: BackupEntry): string {
-  const side = backup.remote ? "sync folder" : "this machine";
-  return `${backup.originalName} (${backup.providerId}, from the ${side})`;
+  const side = backup.remote ? "the sync folder" : "this machine";
+  return `${backup.originalName} (${backup.providerId}, from ${side})`;
 }
 
 export function describeVersion(backup: BackupEntry): string {
@@ -175,8 +175,8 @@ export function describeWhatFollows(backup: BackupEntry): string {
     return (
       "Codex has compressed this conversation on this machine. A version put back beside the " +
       "compressed one would be the one Codex reads from then on, so it is not offered — open " +
-      "the conversation in Codex once to turn it back into a plain file, and this row compares " +
-      "as usual."
+      "the conversation in Codex once and quit without sending to turn it back into a plain " +
+      "file, and this row compares as usual."
     );
   }
   const here =
@@ -242,9 +242,12 @@ function describeNextSync(backup: BackupEntry): string {
       );
     case "compressed-here":
       return (
-        "Codex has compressed this conversation on this machine, so the next sync copies this " +
-        "here only if it continues exactly what was compressed. Open the conversation in Codex " +
-        "once and the two sides are compared as usual."
+        "This changes the sync folder's copy, so your other machines get it on their next " +
+        "sync — one holding a later version puts that back. Codex has compressed this " +
+        "conversation on this machine, so it is copied here only if it continues exactly what " +
+        "was compressed. To compare it here, open the conversation in Codex once and quit " +
+        "without sending, and let a sync run before you continue it; if this machine's copy " +
+        "continues on from this version, that sync puts it back."
       );
     default:
       return "What the next sync will do with it cannot be worked out from here.";
@@ -310,8 +313,9 @@ export function describeRestore(
     case "target-compressed":
       return (
         "Codex has compressed that conversation on this machine, so nothing was put back — " +
-        "Codex would have read this version instead of the compressed one. Open the " +
-        "conversation in Codex once first."
+        "Codex would have read this version instead of the compressed one. First open the " +
+        "conversation in Codex once and quit without sending, then reopen this list and try " +
+        "again."
       );
     default:
       return `Could not restore it: ${outcome.reason}.`;

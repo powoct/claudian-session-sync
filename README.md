@@ -170,7 +170,9 @@ safely is planned work). So:
   machines and the records travel through the sync folder instead — identical files are
   left alone, a one-sided change fast-forwards (with a backup), and anything else becomes
   a conflict for you to settle. Do **not** enable it if your vault sync already carries
-  `.claudian/` — two transports over one folder feed your sync tool conflicts.
+  `.claudian/` — two transports over one folder feed your sync tool conflicts. On a device
+  whose vault has no `.claudian/sessions` yet, the first sync creates it from the sync
+  folder, and that device's own sessions sync from the next sync on.
 
 ### Claudian 2.3.3 and later
 
@@ -186,10 +188,14 @@ keeps converging as described above.
   not when you point the plugin at a new sync folder. The sync report lists it as
   `deleted-here`, and the command **Bring back conversations deleted on this device**
   undoes it. Your other devices keep the conversation, and a device that has not received
-  it yet still will — deletions are never propagated. One exception: a Claude conversation
-  whose history is in the sync folder but has not reached this machine yet may have been
-  removed by Claudian itself (it does that when asked to resume a session it cannot find),
-  so the plugin restores it once and says so; if you deleted it, delete it again and it
+  it yet still will — deletions are never propagated. This holds while Claudian's
+  conversation folder is there: if it is missing or was recreated (the vault downloaded
+  again, the folder removed), records missing from it are restored rather than treated as
+  deleted, and conversations this device was already keeping off stay off. One more
+  exception: a Claude conversation whose history is in the sync folder but has not reached
+  this machine yet may have been removed by Claudian itself (it does that when asked to
+  resume a session it cannot find), so the plugin restores it once and says so; if you
+  deleted it, delete it again and it
   stays deleted. This needs the Claude Code provider on. A conversation whose history is
   nowhere — Claude Code purges old transcripts after thirty days — simply stays deleted.
   Records an older version of this plugin had already restored after you deleted them
@@ -254,11 +260,15 @@ header's recorded length (or, for files from Codex before 0.152, the modificatio
 copies onto them) shows what was compressed. Then it lands next to it, Codex reads it from then
 on, and the older compressed copy, which Codex no longer uses, can be deleted. When it cannot
 tell, it holds back and names the conversation: open it in Codex once and quit without sending,
-let the next sync run, then continue — sending first can split it into two versions. Resuming a
+let the next sync run, then continue — sending first can split it into two versions. Codex may
+add a line to the conversation just by opening it; if it does and another device has continued
+it too, the next sync keeps both versions as a conflict, so nothing is lost. Resuming a
 compressed conversation turns it back into a plain file, which syncs as usual; a compressed one
 your other devices never had stays on this device until you do. An archived session Codex has
 compressed still counts as archived. Restoring an older version over a compressed conversation
-is refused, and so is resolving a conflict on one, until it has been opened in Codex once.
+is refused, and so is resolving a conflict on one, until it has been opened in Codex once and
+closed without sending. The sync folder's version can still be restored; it reaches your other
+devices as usual, and lands here only if it continues exactly what was compressed.
 
 Claudian's **DeepSeek** provider (2.3.17) is not supported: the records provider carries
 its records, but its sessions are not synced.
@@ -378,12 +388,15 @@ A 机器上的对话能在 B 机器上 `resume` 继续。桌面端专用;不接�
 
 - **只同步本 vault 的 Claudian 有记录的会话**;纯终端起的会话、没有 session id 的旧记录
   不同步。在 Claudian 里删除的会话不再有新会话从本机上传,但已在同步目录里的会话文件照常
-  双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,在本机删掉的对话留在删掉的状态,可用命令
-  「Bring back conversations deleted on this device」取回。在本机归档的 Codex 对话留在
-  Codex 的归档目录里,不会被拉回活动目录;被 Codex 压缩(`.jsonl.zst`)的对话同样不会被拉回,
+  双向收敛(包括你在本机终端里继续写的内容)——本插件从不传播删除。开着「Claudian records」时,
+  在本机删掉的对话留在删掉的状态,可用命令「Bring back conversations deleted on this device」
+  取回;Claudian 的会话目录缺失或被重建时(vault 重新下载、目录被删),目录里缺的记录会被恢复而
+  不当作删除,本机已在挡住的对话仍挡住。在本机归档的 Codex 对话留在 Codex 的归档目录里,
+  不会被拉回活动目录;被 Codex 压缩(`.jsonl.zst`)的对话同样不会被拉回,
   除非同步目录里那份正是压缩内容加上别的机器新增的内容(凭压缩文件头里记的原长判断,不解压)。
   压缩的文件本身不同步,在 Codex 里续接一次即恢复;插件说「无法判断」时,先在 Codex 里打开一次、
-  不发送就退出,等下一轮同步后再继续。
+  不发送就退出,等下一轮同步后再继续。Codex 可能仅因打开就给对话添一行;若恰好别的机器也续写了,
+  下一轮同步会把两个版本都作为冲突保留,不会丢内容。
 - **历史没到之前别在对话里发送**:Claude 对话的会话文件还在同步目录里、没落到本机时发送,Claudian
   会删掉或重置这条对话;共享的对话,这个改动会随 vault 同步到你的其他机器。每轮同步后插件会检查这种状态,
   在报告里点名;Obsidian 启动后的第一轮、或同一条对话下一轮仍在等时,弹窗按标题点名。命令

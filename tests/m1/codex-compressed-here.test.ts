@@ -261,6 +261,12 @@ describe("a rollout Codex compressed on this machine", () => {
     expect(noticesOf(reports)).toContain(UNCOMPARED);
     expect(noticesOf(reports)).toContain(SID);
     expect(noticesOf(reports)).toContain("quit without sending");
+    // Hedged, because it was seen once and with confounds (round 12b): what
+    // opening it in Codex may do, and that the worst it costs is a conflict.
+    expect(noticesOf(reports)).toContain("sending first may leave two versions");
+    expect(noticesOf(reports)).toContain("Opening it may itself add a line in Codex");
+    expect(noticesOf(reports)).toContain("keeps both versions as a conflict, so nothing is lost");
+    expect(noticesOf(reports)).not.toContain("Keep the other machine's version");
   }, 30_000);
 
   it("holds back a copy shorter than what was compressed, and says so", async () => {

@@ -70,13 +70,14 @@ export interface ClaudianRecordsState {
    */
   observeStore(identity: string | null): boolean;
   /**
-   * A record found missing when the store was recreated, whose judgement a
-   * pass put off: its absence is still not a deletion.
+   * A record found missing when the store was recreated or not there, which
+   * that pass did not land: its absence is still not a deletion.
    */
   recreatedFor(rel: string): boolean;
   /**
-   * The records whose recreated-store judgement this pass put off, replacing
-   * the last pass's. A record judged, or no longer missing, drops out.
+   * The records missing from a recreated or absent store that this pass did
+   * not settle, replacing the last pass's. A record landed, held or retired,
+   * or no longer missing, drops out.
    */
   carryRecreation(rels: ReadonlySet<string>): void;
 
