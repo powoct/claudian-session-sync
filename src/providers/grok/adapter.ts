@@ -31,12 +31,13 @@
  * member to exist. It only declares which names it recognises.
  */
 import type { LogicalId } from "../../domain/types";
-import type {
-  FileMode,
-  NeutralClassification,
-  ProviderAdapter,
-  SessionFileRef,
-  SessionGroup,
+import {
+  type FileMode,
+  NO_RECORDS_REASON,
+  type NeutralClassification,
+  type ProviderAdapter,
+  type SessionFileRef,
+  type SessionGroup,
 } from "../provider-adapter";
 import { describeUnreadDirs, isSessionUuid, readVaultScope } from "../vault-scope";
 
@@ -166,7 +167,7 @@ export function createGrokAdapter(deps: GrokAdapterDeps): ProviderAdapter {
       }
       const scope = await readVaultScope(deps, CLAUDIAN_PROVIDER_ID, isSessionUuid);
       if (!scope.storeFound) {
-        return { ok: false, reason: "no Claudian conversation records in this vault" };
+        return { ok: false, reason: NO_RECORDS_REASON };
       }
       return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
     },

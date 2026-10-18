@@ -37,7 +37,12 @@
  * `compressedContentSize`, lets the engine check without a decoder.
  */
 import type { LogicalId } from "../../domain/types";
-import type { NeutralClassification, ProviderAdapter, SessionGroup } from "../provider-adapter";
+import {
+  NO_RECORDS_REASON,
+  type NeutralClassification,
+  type ProviderAdapter,
+  type SessionGroup,
+} from "../provider-adapter";
 import {
   CODEX_COMPRESSED_SUFFIX,
   CODEX_DATE_SEGMENT,
@@ -151,7 +156,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps): ProviderAdapter {
         // Not an error the user has to fix — it is what an unused provider
         // looks like — but saying nothing would make "syncs nothing" look
         // like a broken install.
-        return { ok: false, reason: "no Claudian conversation records in this vault" };
+        return { ok: false, reason: NO_RECORDS_REASON };
       }
       return {
         ok: true,

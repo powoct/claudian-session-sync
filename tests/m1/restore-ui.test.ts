@@ -189,7 +189,58 @@ describe("the list", () => {
     expect(buttons).toEqual([true, true, false]);
     const text = asFake(modal.contentEl).allText();
     expect(text).toContain("Codex has compressed this conversation on this machine");
-    expect(text).toContain("copies this here only if it continues exactly what was compressed");
+    expect(text).toContain("it is copied here only if it continues exactly what was compressed");
+  });
+
+  it("tells the sync folder's row of a compressed conversation where the restore goes", () => {
+    // Restoring that row writes the sync folder's copy, so it reaches the
+    // other machines; only this machine is gated by the compression. The way
+    // to compare it here must not add a turn to the compressed conversation,
+    // and the user is told that comparing usually puts this machine's longer
+    // copy back over the restore.
+    const text = describeWhatFollows(
+      entry({ providerId: "codex", outcome: "compressed-here", remote: true }),
+    );
+    expect(text).toContain(
+      "This changes the sync folder's copy, so your other machines get it on their next sync — one holding a later version puts that back.",
+    );
+    expect(text).toContain(
+      "open the conversation in Codex once and quit without sending, and let a sync run before you continue it; if this machine's copy continues on from this version, that sync puts it back.",
+    );
+    expect(text).not.toContain("devices");
+  });
+
+  it("says to quit Codex without sending wherever it says to open a compressed conversation", () => {
+    // Opening it is what turns it back into a plain file; sending would add
+    // a turn this machine alone holds.
+    expect(
+      describeWhatFollows(entry({ providerId: "codex", outcome: "compressed-here", remote: false })),
+    ).toContain("open the conversation in Codex once and quit without sending to turn it back");
+    expect(
+      describeRestore(
+        { ok: false, reason: "target-compressed" },
+        entry({ providerId: "codex", outcome: "compressed-here" }),
+      ),
+    ).toContain(
+      "First open the conversation in Codex once and quit without sending, then reopen this list and try again.",
+    );
+  });
+
+  it("titles each row with the side its backup was taken from", async () => {
+    const modal = new RestoreModal(
+      makeStubApp() as unknown as App,
+      stubRuntime([entry({ providerId: "codex" }), entry({ providerId: "codex", remote: true })]),
+      () => {},
+    );
+    await modal.onOpen();
+
+    const titles = asFake(modal.contentEl)
+      .descendants()
+      .filter((element) => element.tag === "h3")
+      .map((element) => element.textContent);
+    const name = "3f2504e0-4f89-41d3-9a0c-0305e82c3301.jsonl";
+    expect(titles).toEqual([`${name} (codex, from this machine)`, `${name} (codex, from the sync folder)`]);
+    expect(asFake(modal.contentEl).allText()).not.toContain("the this");
   });
 
   it("says so plainly when nothing has ever been overwritten", async () => {

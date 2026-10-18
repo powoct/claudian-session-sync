@@ -11,7 +11,7 @@
  * Each `launch()` here is an Obsidian restart as far as Claudian is concerned,
  * and the plugin's passes run after it, the way they do in Obsidian.
  */
-import { promises as fsp } from "node:fs";
+import { promises as fsp, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionEntry, PassReport } from "../../src/orchestration/pass-report";
@@ -89,6 +89,42 @@ const local = (m: RuntimeHarness, name: string) => path.join(store(m), name);
 const exists = async (target: string) => (await fsp.lstat(target).catch(() => null)) !== null;
 const replicaOf = async (m: RuntimeHarness, name: string) =>
   path.join(m.syncDir, (await m.runtime.refresh()).workspaceId as string, "claudian", name);
+const memoryOf = async (m: RuntimeHarness) => {
+  const ws = (await m.runtime.refresh()).workspaceId as string;
+  return path.join(m.homedir, ".claudian-session-sync", "state", ws, "claudian-records.json");
+};
+
+/**
+ * The store recreated — a new folder, so a new inode — before the old one
+ * goes, so the test does not depend on the filesystem reusing inode numbers.
+ */
+async function recreate(a: RuntimeHarness): Promise<void> {
+  const old = `${store(a)}-old`;
+  await fsp.rename(store(a), old);
+  await fsp.mkdir(path.join(store(a), "devices", DEVICE), { recursive: true });
+  await fsp.rm(old, { recursive: true });
+}
+
+/**
+ * `.claudian` removed entirely while Obsidian was closed. Claudian creates the
+ * folder again only on its first save, so the plugin's pass comes first.
+ */
+async function removeStore(a: RuntimeHarness): Promise<void> {
+  await fsp.rm(path.join(a.vaultRoot, ".claudian"), { recursive: true });
+  a.restart();
+}
+
+/** What Claudian 2.3.2 and older leave in the sync folder for a deleted conversation. */
+const LEGACY_TOMBSTONE = JSON.stringify({ schemaVersion: 1, conversationId: CONV, deletedAt: 1 }, null, 2);
+const TOMB = `claudian/${CONV}.deleted.json`;
+
+/** `recreatedPending`, and the holds, as this device's memory has them on disk. */
+async function memoryFile(a: RuntimeHarness) {
+  return JSON.parse(await fsp.readFile(await memoryOf(a), "utf8")) as {
+    readonly recreatedPending?: readonly string[];
+    readonly records: Record<string, { readonly hold?: { readonly kind: string } }>;
+  };
+}
 
 describe("a conversation deleted here", () => {
   it("stays deleted across restarts, and the user is told once", async () => {
@@ -743,13 +779,6 @@ describe("a recreated store", () => {
     expect(seen.announcements).toEqual([]);
   }, 90_000);
 
-  async function recreate(a: RuntimeHarness): Promise<void> {
-    const old = `${store(a)}-old`;
-    await fsp.rename(store(a), old);
-    await fsp.mkdir(path.join(store(a), "devices", DEVICE), { recursive: true });
-    await fsp.rm(old, { recursive: true });
-  }
-
   it("restores everything missing even when there are more records than the budget", async () => {
     // The recreation is seen on one pass; a record whose judgement the budget
     // put off to the next would be judged against a store that looked
@@ -815,6 +844,505 @@ describe("a recreated store", () => {
     expect(first?.actions.filter((r) => isPeer(r) && r.action === "PULL_NEW")).toHaveLength(1);
     expect(first?.actions.filter((r) => isPeer(r) && r.reason === "budget-exhausted").length).toBeGreaterThan(0);
     for (const conv of convs) expect(await exists(local(a, `${conv}.meta.json`)), conv).toBe(true);
+  }, 90_000);
+});
+
+describe("a store that is not there", () => {
+  // What a device the vault sync does not bring `.claudian` to looks like on
+  // its first pull (Obsidian Sync, a new device): the plugin's own pulls
+  // create the folder (D12, 2026-10-15).
+  const KEEP = "conv-1786422687000-keepme";
+  const KEEP_META = `claudian/${KEEP}.meta.json`;
+  const UNAVAILABLE = "provider claudian unavailable: no .claudian/sessions directory in this vault";
+  const NO_RECORDS = "no Claudian conversation records in this vault";
+  const RESTORED_INTO = "Claudian's conversation folder was not in this vault";
+
+  it("creates the folder with what the sync folder has, and still holds what was deleted here", async () => {
+    const a = await machine();
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+    await removeStore(a);
+
+    const first = await pass(a);
+    const row = (report: PassReport, rel: string) => report.actions.find((r) => r.neutralRel === rel);
+    expect(row(first.report, KEEP_META)).toMatchObject({
+      action: "PULL_NEW",
+      reason: "remote-only",
+      result: "APPLIED",
+    });
+    expect(row(first.report, META)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    expect(await exists(local(a, `${KEEP}.meta.json`))).toBe(true);
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+    // One sentence for what happened, in place of "unavailable" from the
+    // claudian provider and "no records" from every CLI provider.
+    expect(first.report.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([
+      "Claudian's conversation folder was not in this vault, so it was created with 1 conversation(s) " +
+        "from the sync folder. Conversations this device was already keeping off stay off. Sessions " +
+        "these conversations use on this device sync from the next sync.",
+    ]);
+    expect(first.report.notices.filter((n) => n.startsWith("provider claudian unavailable"))).toEqual([]);
+    expect(first.report.notices.filter((n) => n.includes(NO_RECORDS))).toEqual([]);
+
+    // The folder the pass created is not a recreation, and what it restored
+    // is simply here now.
+    const second = await pass(a);
+    expect(second.report.notices.filter((n) => n.includes("was recreated"))).toEqual([]);
+    expect(row(second.report, KEEP_META)).toMatchObject({ action: "NOOP", reason: "e1-cache-hit" });
+    expect(second.report.actions.filter((r) => r.action === "SKIP_DELETED_HERE").map((r) => r.neutralRel)).toEqual([
+      META,
+    ]);
+    expect([first.announcement, second.announcement]).toEqual([null, null]);
+    expect((await a.runtime.heldRecords()).map((h) => h.conversationId)).toEqual([CONV]);
+  }, 90_000);
+
+  it("still says the provider is unavailable when there is nothing to restore", async () => {
+    const a = await machine();
+    await a.settle();
+    await removeStore(a);
+
+    const { report } = await pass(a);
+    expect(report.notices).toContain(UNAVAILABLE);
+    expect(report.notices).toContain(`provider claude-code unavailable: ${NO_RECORDS}`);
+    expect(report.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([]);
+    expect(await exists(path.join(a.vaultRoot, ".claudian"))).toBe(false);
+  }, 60_000);
+
+  it("creates nothing, remembers nothing and claims no restore in a dry run", async () => {
+    const a = await machine();
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    const memory = await memoryOf(a);
+    const before = await fsp.readFile(memory, "utf8");
+    await removeStore(a);
+
+    await a.runtime.syncNow({ dryRun: true });
+    const report = a.runtime.lastPassReport() as PassReport;
+    expect(report.actions.find((r) => r.neutralRel === KEEP_META)).toMatchObject({
+      action: "PULL_NEW",
+      result: "DEFERRED",
+    });
+    expect(await exists(path.join(a.vaultRoot, ".claudian"))).toBe(false);
+    expect(await fsp.readFile(memory, "utf8")).toBe(before);
+    // Planned is not restored: the line stays what it was.
+    expect(report.notices).toContain(UNAVAILABLE);
+    expect(report.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([]);
+  }, 60_000);
+
+  it("restores a record whose write failed even when no identity of the folder was ever remembered", async () => {
+    // The first pass after upgrading from 0.3.5, which kept no memory file: it
+    // is seeded from the ledger, without the store's identity, so the pass
+    // after this one cannot tell the folder this one created from a first
+    // sighting of it.
+    let failing = false;
+    const a = await machine("2.3.20", undefined, {
+      failWrite: (target) => failing && target.endsWith(path.join(".claudian", "sessions", `${CONV}.meta.json`)),
+    });
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null });
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    await fsp.rm(await memoryOf(a));
+    await removeStore(a);
+
+    failing = true;
+    const first = await pass(a);
+    failing = false;
+    expect(first.report.actions.find((r) => r.neutralRel === META)).toMatchObject({
+      action: "PULL_NEW",
+      result: "FAILED_IO",
+    });
+    expect(await exists(local(a, `${KEEP}.meta.json`)), "nothing created the folder").toBe(true);
+    // Counted from what landed: two were to be restored, one was.
+    expect(first.report.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([
+      expect.stringContaining("created with 1 conversation(s)"),
+    ]);
+
+    const seen = await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "held as deleted here").toBe(true);
+    expect(seen.rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
+    expect(seen.announcements).toEqual([]);
+  }, 90_000);
+
+  it("counts conversations, not the files that came with them", async () => {
+    // Claudian 2.3.2 and older keep an inputs sidecar beside each record, and
+    // it is restored beside it: two files, one conversation. With no CLI
+    // provider on there is no session to speak of either.
+    const a = await machine("2.3.2");
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await fsp.writeFile(local(a, `${KEEP}.inputs.json`), "{}");
+    await a.settle();
+    await a.runtime.setProvider("claude-code", { enabled: false });
+    await removeStore(a);
+
+    const { report } = await pass(a);
+    const landed = report.actions.filter((r) => r.providerId === "claudian" && r.result === "APPLIED");
+    expect(landed.map((r) => `${r.action} ${r.neutralRel}`).sort()).toEqual([
+      `PULL_NEW claudian/${KEEP}.inputs.json`,
+      `PULL_NEW ${KEEP_META}`,
+    ]);
+    expect(report.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([
+      // Nothing is held here, so nothing is said to be kept off.
+      "Claudian's conversation folder was not in this vault, so it was created with 1 conversation(s) " +
+        "from the sync folder.",
+    ]);
+  }, 60_000);
+
+  it("claims no conversation for a deletion marker that came without one", async () => {
+    // A device on Claudian 2.3.2 or older deleted it, and left its record and
+    // its marker in the sync folder: the record is retired, the marker lands.
+    // The folder is created, with no conversation in it to speak of.
+    const a = await machine();
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    await fsp.mkdir(path.dirname(shared), { recursive: true });
+    await fsp.writeFile(shared, JSON.stringify({ id: CONV, providerId: "codex", sessionId: null }));
+    await fsp.writeFile(await replicaOf(a, `${CONV}.deleted.json`), LEGACY_TOMBSTONE);
+    await removeStore(a);
+
+    const reports = [(await pass(a)).report, (await pass(a)).report];
+    const rows = reports.flatMap((r) => r.actions);
+    expect(rows.filter((r) => r.neutralRel === META).map((r) => `${r.action}/${r.reason}`)).toContain(
+      "SKIP_RETIRED/tombstoned-in-replica",
+    );
+    const landed = reports.find((r) =>
+      r.actions.some((row) => row.neutralRel === TOMB && row.action === "PULL_NEW" && row.result === "APPLIED"),
+    );
+    expect(landed, "the marker never landed").toBeDefined();
+    expect(landed?.notices).toContain(UNAVAILABLE);
+    expect(reports.flatMap((r) => r.notices).filter((n) => n.includes(RESTORED_INTO))).toEqual([]);
+    // Retired is settled: a record this device will not land is not carried.
+    expect((await memoryFile(a)).recreatedPending).toBeUndefined();
+  }, 60_000);
+
+  it("says nothing of a folder that was there, only empty, and the providers' lines stay", async () => {
+    // Another device's conversation arriving in an empty folder is an
+    // ordinary pull, and at the start of that pass the CLI providers did have
+    // no records to admit sessions by.
+    const a = await machine();
+    const shared = await replicaOf(a, `${KEEP}.meta.json`);
+    await fsp.mkdir(path.dirname(shared), { recursive: true });
+    await fsp.writeFile(shared, JSON.stringify({ id: KEEP, providerId: "codex", sessionId: null }));
+
+    const reports = [(await pass(a)).report, (await pass(a)).report];
+    const landed = reports.find((r) =>
+      r.actions.some((row) => row.neutralRel === KEEP_META && row.action === "PULL_NEW" && row.result === "APPLIED"),
+    );
+    expect(landed, "never pulled").toBeDefined();
+    expect(landed?.notices.filter((n) => n.includes(RESTORED_INTO))).toEqual([]);
+    expect(landed?.notices).toContain(`provider claude-code unavailable: ${NO_RECORDS}`);
+  }, 60_000);
+});
+
+describe.each([
+  ["not there", removeStore],
+  ["recreated", recreate],
+] as const)("a record missing from a store that was %s", (_situation, situation) => {
+  // A store that is not there, or was recreated, makes every absence this
+  // pass "not here yet" — and the pass that sees it is the only one that
+  // does: a store this pass recreated or created looks healthy to the next.
+  // A record judged so and not landed has to carry that with it, whatever
+  // stopped it (ADR-78 ③); one that landed must not. KEEP lands beside it, so
+  // that a folder which was not there exists by the end of the pass.
+  const KEEP = "conv-1786422687000-keepme";
+
+  async function twoRecords(options: HarnessOptions = {}): Promise<RuntimeHarness> {
+    const a = await machine("2.3.20", undefined, options);
+    await saveRecord(a, CONV, { providerId: "codex", sessionId: null, title: "one" });
+    await saveRecord(a, KEEP, { providerId: "codex", sessionId: null });
+    await a.settle();
+    return a;
+  }
+
+  /** The record lands, on a later pass, and is never held on the way. */
+  async function expectRestored(a: RuntimeHarness): Promise<void> {
+    const seen = await restarts(a, 2);
+    expect(await exists(local(a, `${CONV}.meta.json`)), "held as deleted here").toBe(true);
+    expect(await exists(local(a, `${KEEP}.meta.json`))).toBe(true);
+    expect(seen.rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
+    expect(seen.announcements).toEqual([]);
+    expect(await a.runtime.heldRecords()).toEqual([]);
+  }
+
+  const rowOf = (report: PassReport) => report.actions.find((r) => r.neutralRel === META);
+
+  it("is restored on a later pass when its copy in the sync folder was moving at the stability gate", async () => {
+    const a = await twoRecords();
+    await situation(a);
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const record = JSON.parse(await fsp.readFile(shared, "utf8")) as Record<string, unknown>;
+    await fsp.writeFile(shared, JSON.stringify({ ...record, title: "two" }));
+
+    const { report } = await pass(a);
+    expect(rowOf(report)).toMatchObject({ action: "DEFER", reason: "side-unstable" });
+    expect(rowOf(report)?.evidence.level, "read after all").toBe("E0/E0");
+    await expectRestored(a);
+  }, 90_000);
+
+  it("is restored on a later pass when its copy in the sync folder changed after it was read", async () => {
+    // The P3:bytes-read moment, from outside: the first stat of the copy
+    // after its read is the O3 one, and the copy is rewritten just before it.
+    let race: string | null = null;
+    let a: RuntimeHarness | null = null;
+    a = await twoRecords({
+      failLstat: (target) => {
+        if (race !== null && target === race && a?.reads.includes(race)) {
+          writeFileSync(race, JSON.stringify({ id: CONV, providerId: "codex", sessionId: null, title: "raced" }));
+          race = null;
+        }
+        return false;
+      },
+    });
+    await situation(a);
+    a.reads.length = 0;
+    race = await replicaOf(a, `${CONV}.meta.json`);
+
+    const { report } = await pass(a);
+    expect(race, "the copy was never read").toBeNull();
+    expect(rowOf(report)).toMatchObject({ action: "DEFER", reason: "side-unstable" });
+    expect(rowOf(report)?.evidence.level, "read, then moved (O3)").toBe("E0/E2");
+    await expectRestored(a);
+  }, 90_000);
+
+  it("is restored on a later pass when its copy in the sync folder was zero bytes", async () => {
+    // Only reachable with a ledger that never saw the copy with bytes — a
+    // moved sync folder, a lost ledger: otherwise the empty copy is NR-8 and
+    // the whole sync folder is not ready, which judges nothing. That ledger
+    // also makes every copy new, so the pass that judges is the second.
+    const a = await twoRecords();
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const whole = await fsp.readFile(shared);
+    const ws = (await a.runtime.refresh()).workspaceId as string;
+    await fsp.rm(path.join(a.homedir, ".claudian-session-sync", "state", ws, "observations.json"));
+    await fsp.writeFile(shared, "");
+    await situation(a);
+    a.restart();
+
+    expect(rowOf((await pass(a)).report)).toMatchObject({ action: "DEFER", reason: "side-unstable" });
+    const { report } = await pass(a);
+    expect(rowOf(report)).toMatchObject({ action: "DEFER", reason: "opaque-zero-byte-side" });
+    expect(await exists(local(a, `${KEEP}.meta.json`))).toBe(true);
+    await fsp.writeFile(shared, whole);
+    await expectRestored(a);
+  }, 90_000);
+
+  it("is restored on a later pass when writing it failed", async () => {
+    let failing = false;
+    const a = await twoRecords({
+      failWrite: (target) => failing && target.endsWith(path.join(".claudian", "sessions", `${CONV}.meta.json`)),
+    });
+    await situation(a);
+
+    failing = true;
+    const { report } = await pass(a);
+    failing = false;
+    expect(rowOf(report)).toMatchObject({ action: "PULL_NEW", result: "FAILED_IO" });
+    await expectRestored(a);
+  }, 90_000);
+
+  it("is restored on a later pass when bringing it back did not write it", async () => {
+    // Held, with its release requested: planned rather than short-circuited,
+    // and as a held record not among the witnessed ones carried above, so
+    // the stat gate is all that carries it. A deletion marker Claudian
+    // consumed here, because a store that looks healthy holds that again
+    // despite the request; a `.meta.json` is restored by the request itself.
+    let failing = false;
+    const a = await twoRecords({
+      failWrite: (target) =>
+        failing && target.endsWith(path.join(".claudian", "sessions", `${CONV}.deleted.json`)),
+    });
+    // An older device's delete, consumed by this device's Claudian at launch.
+    await fsp.writeFile(await replicaOf(a, `${CONV}.deleted.json`), LEGACY_TOMBSTONE);
+    await restarts(a, 2);
+    expect((await memoryFile(a)).records[TOMB]?.hold?.kind).toBe("tombstone-consumed");
+    await situation(a);
+    await a.runtime.refresh();
+
+    failing = true;
+    expect(await a.runtime.bringBack([TOMB])).toEqual({ ok: true });
+    failing = false;
+    a.advanceClock(95_000);
+    const brought = a.runtime.lastPassReport() as PassReport;
+    expect(brought.actions.find((r) => r.neutralRel === TOMB)).toMatchObject({
+      action: "PULL_NEW",
+      result: "FAILED_IO",
+    });
+
+    // Passes, not restarts: Claudian's next launch consumes the marker again,
+    // which is what bringing one back comes to and not what this is about.
+    const later = [(await pass(a)).report, (await pass(a)).report];
+    expect(await exists(local(a, `${CONV}.deleted.json`)), "held again").toBe(true);
+    const rows = later.flatMap((r) => r.actions).filter((r) => r.neutralRel === TOMB);
+    expect(rows.filter((r) => r.action === "SKIP_DELETED_HERE")).toEqual([]);
+    expect((await memoryFile(a)).records[TOMB]?.hold).toBeUndefined();
+  }, 90_000);
+
+  it("is restored on a later pass when its copy in the sync folder was gone for that pass", async () => {
+    // A peer rewriting it, a sync client between its delete and its create:
+    // the record is in neither listing, so no row of the pass ever sees it
+    // missing — and the store that pass adopts looks healthy to the next.
+    const a = await twoRecords();
+    await situation(a);
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const whole = await fsp.readFile(shared);
+    await fsp.rm(shared);
+
+    const { report } = await pass(a);
+    expect(rowOf(report), "seen after all").toBeUndefined();
+    expect(await exists(local(a, `${KEEP}.meta.json`))).toBe(true);
+    await fsp.writeFile(shared, whole);
+    await expectRestored(a);
+  }, 90_000);
+
+  it("stays carried while its copy in the sync folder stays gone, at the cost of one line in the memory", async () => {
+    // Gone from both sides for as long as it likes: no row, no notice, no
+    // read, and the memory written once — and the pass the copy is back,
+    // judged as the recreation it was missing from.
+    const a = await twoRecords();
+    await situation(a);
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const whole = await fsp.readFile(shared);
+    await fsp.rm(shared);
+    await pass(a);
+    const memory = await memoryOf(a);
+    const carried = await fsp.readFile(memory, "utf8");
+    expect((JSON.parse(carried) as { recreatedPending?: unknown }).recreatedPending).toEqual([META]);
+
+    a.reads.length = 0;
+    const seen = await restarts(a, 2);
+    expect(await fsp.readFile(memory, "utf8"), "rewritten for it").toBe(carried);
+    expect(seen.rows.filter((r) => r.neutralRel === META)).toEqual([]);
+    expect(seen.notices.filter((n) => n.includes(CONV) || n.includes("was recreated"))).toEqual([]);
+    expect(a.reads.filter((p) => p.includes(CONV))).toEqual([]);
+
+    await fsp.writeFile(shared, whole);
+    await expectRestored(a);
+    const after = JSON.parse(await fsp.readFile(memory, "utf8")) as { recreatedPending?: unknown };
+    expect(after.recreatedPending, "landed, and still carried").toBeUndefined();
+  }, 90_000);
+
+  it("is let go once it is here again by other means: deleted after that, it stays deleted", async () => {
+    // Carried while its copy in the sync folder is gone, then brought back
+    // here by the vault's own sync. Here, it is no longer missing — and a
+    // carry that outlived that would undo every later delete of it.
+    const a = await twoRecords();
+    await situation(a);
+    const shared = await replicaOf(a, `${CONV}.meta.json`);
+    const whole = await fsp.readFile(shared);
+    await fsp.rm(shared);
+    await pass(a);
+    await fsp.writeFile(local(a, `${CONV}.meta.json`), whole);
+    const seen = await restarts(a, 1);
+    expect(seen.rows.filter((r) => r.neutralRel === META && r.result === "APPLIED").map((r) => r.action)).toEqual([
+      "PUSH_NEW",
+    ]);
+
+    await deleteRecord(a, CONV);
+    const { report } = await pass(a);
+    expect(rowOf(report)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 90_000);
+
+  it("is let go when it is here again by its turn in the pass: deleted after that, it stays deleted", async () => {
+    // Listed nowhere at the start of the pass — the store was not there, or
+    // did not have it — and here when its turn comes: the vault's own sync
+    // delivering `.claudian/sessions` mid-pass. Here, it is not missing.
+    let arriving: { readonly target: string; readonly bytes: Buffer } | null = null;
+    const a = await twoRecords({
+      failLstat: (target) => {
+        if (arriving !== null && target === arriving.target) {
+          mkdirSync(path.dirname(target), { recursive: true });
+          writeFileSync(target, arriving.bytes);
+          arriving = null;
+        }
+        return false;
+      },
+    });
+    const bytes = await fsp.readFile(local(a, `${CONV}.meta.json`));
+    await situation(a);
+    arriving = { target: local(a, `${CONV}.meta.json`), bytes };
+
+    const { report } = await pass(a);
+    expect(arriving, "it never arrived").toBeNull();
+    expect(rowOf(report)).toMatchObject({ action: "DEFER", reason: "side-unstable" });
+    expect((await memoryFile(a)).recreatedPending, "carried, although here").toBeUndefined();
+
+    await deleteRecord(a, CONV);
+    const after = await pass(a);
+    expect(rowOf(after.report)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 90_000);
+
+  it("is let go when it turns up here just as it is written: deleted after that, it stays deleted", async () => {
+    // After its stat and before its write: the pull's last look finds the
+    // record in its way and is refused — and the record is here again.
+    let arriving: { readonly target: string; readonly bytes: Buffer; looks: number } | null = null;
+    const a = await twoRecords({
+      failLstat: (target) => {
+        if (arriving !== null && target === arriving.target && ++arriving.looks === 2) {
+          mkdirSync(path.dirname(target), { recursive: true });
+          writeFileSync(target, arriving.bytes);
+          arriving = null;
+        }
+        return false;
+      },
+    });
+    const bytes = await fsp.readFile(local(a, `${CONV}.meta.json`));
+    await situation(a);
+    arriving = { target: local(a, `${CONV}.meta.json`), bytes, looks: 0 };
+
+    const { report } = await pass(a);
+    expect(arriving, "it never arrived").toBeNull();
+    expect(rowOf(report)).toMatchObject({ action: "PULL_NEW", result: "ABORTED_PRECONDITION" });
+    expect((await memoryFile(a)).recreatedPending, "carried, although here").toBeUndefined();
+
+    await deleteRecord(a, CONV);
+    const after = await pass(a);
+    expect(rowOf(after.report)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
+  }, 90_000);
+
+  it("carries nothing for a record already held here", async () => {
+    // Its hold settles it before any judgement, whatever the store did; in
+    // the carry it would only be a line in the memory, written for nothing.
+    const a = await twoRecords();
+    await deleteRecord(a, CONV);
+    await restarts(a, 1);
+    await situation(a);
+
+    expect(rowOf((await pass(a)).report)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    const memory = JSON.parse(await fsp.readFile(await memoryOf(a), "utf8")) as { recreatedPending?: unknown };
+    expect(memory.recreatedPending).toBeUndefined();
+    expect((await a.runtime.heldRecords()).map((h) => h.conversationId)).toEqual([CONV]);
+  }, 90_000);
+
+  it("carries nothing for a record held in the same pass", async () => {
+    // An older device's deletion marker beside it here and in the sync
+    // folder: held as removed by that marker, a verdict reached before the
+    // store is asked about — so the pass that missed it settles it too.
+    const a = await twoRecords();
+    await fsp.writeFile(await replicaOf(a, `${CONV}.deleted.json`), LEGACY_TOMBSTONE);
+    await pass(a);
+    await pass(a);
+    expect(await exists(local(a, `${CONV}.deleted.json`)), "the marker never landed").toBe(true);
+    await situation(a);
+
+    expect(rowOf((await pass(a)).report)).toMatchObject({
+      action: "SKIP_DELETED_HERE",
+      reason: "removed-by-tombstone",
+    });
+    expect((await memoryFile(a)).recreatedPending).toBeUndefined();
+  }, 90_000);
+
+  it("is here from the pass that restored it: deleted straight after, it stays deleted", async () => {
+    const a = await twoRecords();
+    await situation(a);
+    expect(rowOf((await pass(a)).report)).toMatchObject({ action: "PULL_NEW", result: "APPLIED" });
+
+    await deleteRecord(a, CONV);
+    const { report } = await pass(a);
+    expect(rowOf(report)).toMatchObject({ action: "SKIP_DELETED_HERE", reason: "deleted-here" });
+    expect(await exists(local(a, `${CONV}.meta.json`))).toBe(false);
   }, 90_000);
 });
 

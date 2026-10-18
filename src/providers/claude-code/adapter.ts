@@ -19,6 +19,7 @@
  */
 import type { LogicalId } from "../../domain/types";
 import {
+  NO_RECORDS_REASON,
   type NeutralClassification,
   type ProviderAdapter,
   type SessionGroup,
@@ -103,7 +104,7 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeAdapterDeps): ProviderAd
       if (!scope.storeFound) {
         // What an unused provider looks like, said out loud — otherwise
         // "syncs nothing" is indistinguishable from a broken install.
-        return { ok: false, reason: "no Claudian conversation records in this vault" };
+        return { ok: false, reason: NO_RECORDS_REASON };
       }
       return { ok: true, warnings: describeUnreadDirs(scope.unreadDirs) };
     },

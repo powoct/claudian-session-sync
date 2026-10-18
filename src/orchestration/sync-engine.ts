@@ -51,11 +51,13 @@ import { isDenylisted, isTransferArtifact } from "../infra/path-guard";
 import type { Clock, IdGen } from "../infra/clock";
 import {
   COMPRESSED_HEADER_BYTES,
+  NO_RECORDS_REASON,
   type ProviderAdapter,
   type SessionFileRef,
   type SessionGroup,
   archivedPathsFor,
 } from "../providers/provider-adapter";
+import { CLAUDIAN_NO_STORE_REASON } from "../providers/claudian/adapter";
 import type { ClaudianRecordsState } from "./claudian-records";
 import { type CompressedLook, lookForCompressed } from "./compressed-here";
 import {
@@ -366,12 +368,33 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   // A recreated store is a vault downloaded again or a folder somebody
   // removed, and every record missing from it at once is not the user
   // deleting them. This pass treats it like a store that is not there — and a
-  // record it could not judge this pass (its copy in the sync folder was
-  // still moving) carries that into the pass that can, rather than being
-  // judged then as if the store had always been there.
+  // record this pass does not land carries that into the next pass (see
+  // `absentCandidates`), rather than being judged then as if the store had
+  // always been there.
   const storeRecreated = records ? records.state.observeStore(await records.storeIdentity()) : false;
-  /** Records missing here whose recreated-store judgement was put off this pass. */
-  const recreationCarried = new Set<string>();
+  /**
+   * Claudian records missing here that the sync folder has, or that this
+   * machine witnessed, seen while the store was recreated or not there, or
+   * carried into this pass from one that was (ADR-78 ③). Each is carried to
+   * the next pass unless it is in `absentSettled` by the end of this one.
+   *
+   * Collected where the absence is observed and settled where it is resolved,
+   * not decided where a judgement is put off: a restore can be judged and still
+   * not land — the copy moved after it was read, it is zero bytes, the write
+   * failed — and in a pass that adopts the store's identity, a record let go
+   * there is judged next pass against a store that looks healthy, and held as
+   * the user's own delete. Every way out of the file loop below that does not
+   * settle a record leaves it carried, whichever way that is.
+   */
+  const absentCandidates = new Set<string>();
+  /** Of those, the ones this pass settled: landed, held, retired, or here. */
+  const absentSettled = new Set<string>();
+  /**
+   * The store's identity right after this pass first landed a record in a
+   * store that was not there: the folder its own pulls created. Undefined
+   * until one lands (ADR-78 ③, see the end of the pass).
+   */
+  let createdStoreIdentity: string | null | undefined;
   if (storeRecreated) {
     notices.push(
       "Claudian's conversation folder on this device was recreated since the last sync, so " +
@@ -385,6 +408,9 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   const groups: Array<{ adapter: ProviderAdapter; group: SessionGroup }> = [];
   /** Adapters whose healthCheck passed this pass. */
   const healthy = new Set<string>();
+  /** The claudian adapter's "no store" line, and the CLI providers' "no records" lines (D12). */
+  let noStoreLine: string | null = null;
+  const noRecordsLines: string[] = [];
   for (const adapter of deps.adapters) {
     const health = await adapter.healthCheck();
     // Said even when the provider is fine, and deduplicated: the four adapters
@@ -394,13 +420,22 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       if (!notices.includes(warning)) notices.push(warning);
     }
     if (!health.ok) {
-      notices.push(`provider ${adapter.id} unavailable: ${health.reason ?? "unknown"}`);
+      const line = `provider ${adapter.id} unavailable: ${health.reason ?? "unknown"}`;
+      notices.push(line);
+      if (adapter.id === "claudian" && health.reason === CLAUDIAN_NO_STORE_REASON) noStoreLine = line;
+      else if (health.reason === NO_RECORDS_REASON) noRecordsLines.push(line);
       continue; // One provider failing must not stop the others.
     }
     healthy.add(adapter.id);
     for (const group of await adapter.listSessions()) groups.push({ adapter, group });
   }
   await barrier("P1:discover-done", {});
+  // ADR-78 ③: no store at all this pass — a vault that has not run Claudian,
+  // or one whose `.claudian` folder was removed. Read off the health check's
+  // reason, so a provider that is off is never "absent", and neither is a
+  // store that is there and unusable for some other reason: restoring into
+  // that, and adopting it as this vault's store, would be guessing.
+  const storeAbsent = records !== null && noStoreLine !== null;
 
   // Remote-only sessions: present in the replica, absent locally.
   //
@@ -457,6 +492,25 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     };
     byLogicalId.set(key, added);
     groups.push(added);
+  }
+
+  // ADR-78 ③, for a record the file loop never sees. Its copy in the sync
+  // folder can be gone for the very pass that finds the store recreated or
+  // not there — a peer rewriting it, a sync client between delete and create
+  // — and that pass adopts the store's identity, so when the copy is back the
+  // store looks healthy and the record is held as the user's own delete. So
+  // every record this machine witnessed and does not have is a candidate too,
+  // carried until it lands or is listed here again. This memory's witnesses
+  // are enough without the ledger's: every convergence the ledger records for
+  // a record is witnessed here in the same step, the memory was seeded from
+  // the ledger when it was made, and the one kind it skips, `.inputs.json`,
+  // is never held. A held record stays held, so it is left out. One that
+  // never comes back costs a path in the memory file, written once.
+  if (records) {
+    for (const [rel, witnessed] of records.state.entries()) {
+      if (witnessed.hold || seen.has(rel)) continue;
+      if (storeRecreated || storeAbsent || records.state.recreatedFor(rel)) absentCandidates.add(rel);
+    }
   }
 
   let budget = deps.settings.maxFilesPerPass;
@@ -632,6 +686,25 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       const localO2 = await observe(deps, localPath);
       const remoteO2 = await observe(deps, remotePath);
       await barrier("P2:o2-taken", { neutralRel: file.neutralRel });
+      // ADR-78 ③. Here, before anything below can leave the loop, so that no
+      // way out of it can let a record go without a decision about it. Most
+      // are candidates already, as witnessed records; this adds what that list
+      // leaves out — one listed here at P1 and gone now, one only the ledger
+      // witnessed, and a held one whose release was requested, which the
+      // short-circuit lets through: carried like any other, since bringing it
+      // back asks for the very restore the carry keeps. One that is here now
+      // is settled, however it came since P1; carried, it would undo the
+      // user's next delete of it.
+      if (records && adapter.id === "claudian") {
+        if (localO2.exists) {
+          absentSettled.add(file.neutralRel);
+        } else if (
+          remoteO2.exists &&
+          (storeRecreated || storeAbsent || records.state.recreatedFor(file.neutralRel))
+        ) {
+          absentCandidates.add(file.neutralRel);
+        }
+      }
 
       const nowMs = deps.clock.nowMs();
       const localStable = judgeSide(deps, localO2, deps.ledger.local(file.neutralRel), nowMs, "local");
@@ -747,15 +820,6 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         actions.push(entry(group, file.neutralRel, adapter.id, "DEFER", "read-failed", "DEFERRED"));
         recordLedger(deps, file.neutralRel, "local", localO2, nowMs, null);
         recordLedger(deps, file.neutralRel, "remote", remoteO2, nowMs, null);
-        if (
-          records &&
-          adapter.id === "claudian" &&
-          !localO2.exists &&
-          remoteO2.exists &&
-          (storeRecreated || records.state.recreatedFor(file.neutralRel))
-        ) {
-          recreationCarried.add(file.neutralRel);
-        }
         continue;
       }
 
@@ -869,20 +933,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
             })
           : plan(input);
 
-      // Not asked this pass — the copy was moving, the sync folder was not
-      // ready, the memory could not be read — so the question waits for a
-      // pass that can ask it, and the recreation waits with it.
-      if (
-        records &&
-        record &&
-        !localFacts.exists &&
-        remoteFacts.exists &&
-        (absentHere === undefined || absentHere.verdict === "wait") &&
-        (storeRecreated || records.state.recreatedFor(file.neutralRel))
-      ) {
-        recreationCarried.add(file.neutralRel);
-      }
+      // A record retired is settled whatever the store did: that verdict is
+      // reached before the store is asked about at all.
+      if (records && record && decision.action === "SKIP_RETIRED") absentSettled.add(file.neutralRel);
       if (records && record && decision.action === "SKIP_DELETED_HERE" && absentHere?.verdict === "hold") {
+        absentSettled.add(file.neutralRel);
         records.state.hold(
           file.neutralRel,
           {
@@ -1066,7 +1121,15 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
           });
         }
       }
-      if (decision.action === "PULL_NEW" && applied.result === "APPLIED") pulledHere.add(localPath);
+      if (decision.action === "PULL_NEW" && applied.result === "APPLIED") {
+        pulledHere.add(localPath);
+        // Landed, not planned: a dry run, a failed or refused write, or a
+        // target that appeared under it all leave the record carried.
+        absentSettled.add(file.neutralRel);
+        if (records && storeAbsent && adapter.id === "claudian" && createdStoreIdentity === undefined) {
+          createdStoreIdentity = await records.storeIdentity();
+        }
+      }
       if (
         record &&
         decision.action === "PULL_NEW" &&
@@ -1178,6 +1241,45 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
     }
   }
 
+  // ADR-78 ③, D12. A store that was not there, and that this pass created with
+  // conversations from the sync folder, was not "unavailable": it is the first
+  // pull of a device the vault sync does not bring `.claudian` to. The CLI
+  // providers' "no records" lines say the same fact again — their health is
+  // read off that store — and what they leave out, the sessions these
+  // conversations use, comes with the next pass. Conversations, not files: a
+  // conversation's `.meta.json` is the record of it, and its inputs sidecar or
+  // a deletion marker is not one more. Counted from what landed, not from what
+  // was planned: a pass that brought no conversation keeps every line as it
+  // was.
+  const createdWith =
+    noStoreLine === null
+      ? 0
+      : new Set(
+          actions
+            .filter(
+              (a) =>
+                a.providerId === "claudian" &&
+                a.action === "PULL_NEW" &&
+                a.result === "APPLIED" &&
+                a.neutralRel.endsWith(".meta.json"),
+            )
+            .map((a) => a.neutralRel),
+        ).size;
+  if (createdWith > 0) {
+    // Said only where it is true of this device: a first pull with nothing
+    // held here has nothing it keeps off.
+    const keepsSomeOff = records?.state.entries().some(([, entry]) => entry.hold !== undefined) ?? false;
+    const created =
+      `Claudian's conversation folder was not in this vault, so it was created with ${createdWith} ` +
+      "conversation(s) from the sync folder." +
+      (keepsSomeOff ? " Conversations this device was already keeping off stay off." : "") +
+      (noRecordsLines.length > 0 ? " Sessions these conversations use on this device sync from the next sync." : "");
+    const rewritten = notices.flatMap((line) =>
+      line === noStoreLine ? [created] : noRecordsLines.includes(line) ? [] : [line],
+    );
+    notices.splice(0, notices.length, ...rewritten);
+  }
+
   // Named, capped, and one line each: the point is that the user can tell
   // *which* conversation to quit and re-resume, which a count cannot say.
   for (const replaced of historyReplaced.slice(0, MAX_NAMED_REPLACEMENTS)) {
@@ -1219,7 +1321,11 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
         "sync folder is not being brought here, because this device cannot tell whether it " +
         "continues the compressed one. To compare them, open the conversation in Codex once and " +
         "quit without sending — that turns it back into a plain file — and let the next sync run " +
-        "before you continue it; sending first may split the conversation into two versions.",
+        "before you continue it; sending first may leave two versions. " +
+        // Hedged: seen once (round 12b), with confounds — an interactive resume
+        // appending a record on open. Said as what it would mean, not as fact.
+        "Opening it may itself add a line in Codex; if another device has continued it too, sync " +
+        "then keeps both versions as a conflict, so nothing is lost.",
     );
   }
 
@@ -1268,7 +1374,32 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
   await barrier("P8:before-commit", {});
   await barrier("P8:committed", {});
 
-  records?.state.carryRecreation(recreationCarried);
+  if (records) {
+    const unsettled = [...absentCandidates].filter((rel) => !absentSettled.has(rel));
+    records.state.carryRecreation(new Set(await stillMissingHere(unsettled)));
+    // ADR-78 ③. The folder this pass found missing is there now — the pulls
+    // above created it, or Claudian did — and it is not a recreation: the next
+    // pass would say "was recreated" with nothing missing, and with no identity
+    // remembered (a 0.3.5 upgrade, a filesystem without inodes) would take it
+    // for a first sighting. Only after the carry above, which is what keeps
+    // every record this pass did not land out of the next pass's healthy store.
+    // Not in a dry run, which changes no memory.
+    //
+    // And it is the folder this pass's pulls landed in that is remembered,
+    // not whatever is there by now. One that replaced it since — a sync client
+    // putting its own copy in place, a second writer — has none of what
+    // landed, and remembered, the next pass would hold all of it as deleted
+    // here. Left unremembered it would too, on a device that never knew an
+    // identity (D12's own new device, a 0.3.5 upgrade): a first sighting is
+    // not a recreation. Remembering the folder the pulls created makes the
+    // replacement a recreation either way. With nothing landed, every record
+    // this pass saw missing is carried, so whatever is there is safe to adopt.
+    if (storeAbsent && !deps.dryRun) {
+      records.state.observeStore(
+        createdStoreIdentity === undefined ? await records.storeIdentity() : createdStoreIdentity,
+      );
+    }
+  }
   // Inside the lock, which `runPass` releases only after this returns.
   await records?.commit();
 
@@ -1566,6 +1697,31 @@ export async function runPass(deps: EngineDeps): Promise<PassReport> {
       if (!code || !CATCHABLE_IO.has(code)) throw error;
       return "unknown";
     }
+  }
+
+  /**
+   * Of these records, the ones still missing here at the end of the pass
+   * (ADR-78 ③). One that turned up after its stat — the vault's own sync
+   * delivering it, Claudian writing it, the very thing a pull was refused for
+   * — or that the file loop never reached is no longer missing, and carried,
+   * it would undo the user's next delete of it. One that cannot be asked
+   * about stays carried: the carry only ever moves a record toward a restore.
+   */
+  async function stillMissingHere(rels: readonly string[]): Promise<string[]> {
+    const claudian = deps.adapters.find((adapter) => adapter.id === "claudian");
+    if (!claudian) return [...rels];
+    const missing: string[] = [];
+    for (const rel of rels) {
+      try {
+        const here = await deps.fs.lstat(await claudian.targetPathFor(rel));
+        if (here === null || !here.isFile) missing.push(rel);
+      } catch (error) {
+        const code = errnoOf(error);
+        if (!code || !CATCHABLE_IO.has(code)) throw error;
+        missing.push(rel);
+      }
+    }
+    return missing;
   }
 
   /** Up to three ids, then a count — enough to find them, short enough to read. */

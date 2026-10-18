@@ -50,6 +50,13 @@ export const CLAUDIAN_RECORD_NAME = /^(conv-[0-9]+-[a-z0-9]+\.(?:meta|inputs|del
 /** Matched as a leading segment by the generic whitelist machinery. */
 export const CLAUDIAN_LOGICAL_ID_PATTERN = /^conv-[0-9]+-[a-z0-9]+\.(?:meta|inputs|deleted)/;
 
+/**
+ * The `healthCheck` reason for a vault with no records folder at all. The
+ * engine matches it (ADR-78 ③): a store that is not there is judged unlike one
+ * that is there and unusable for any other reason.
+ */
+export const CLAUDIAN_NO_STORE_REASON = "no .claudian/sessions directory in this vault";
+
 export interface ClaudianAdapterDeps {
   /** `<vault>/.claudian/sessions`, already realpath'd. */
   readonly providerRoot: string;
@@ -70,7 +77,7 @@ export function createClaudianAdapter(deps: ClaudianAdapterDeps): ProviderAdapte
       if ((await deps.statFile(deps.providerRoot)) === null) {
         // What a vault that has never run Claudian looks like — worth a
         // reason, or "syncs nothing" reads as a broken install.
-        return { ok: false, reason: "no .claudian/sessions directory in this vault" };
+        return { ok: false, reason: CLAUDIAN_NO_STORE_REASON };
       }
       return { ok: true };
     },
